@@ -810,7 +810,7 @@ def test_confidence_threshold_per_decider(tmp_path, monkeypatch):
         ]
     }
     transport = StubTransport([StubResponse(resp_payload)])
-    router, _ = build(
+    router, settings = build(
         tmp_path,
         transport,
         config={
@@ -823,13 +823,97 @@ def test_confidence_threshold_per_decider(tmp_path, monkeypatch):
         },
     )
 
+    req = ollama_request(model="glm-5.3")
     result = route(
         router,
-        ollama_request(),
+        req,
         provider="opencode-go",
-        model="deepseek-v4.1-flash",
+        model="glm-5.3",
     )
-    assert result is not None
-    # Degraded to default_model because 0.75 < 0.85
-    assert result["request"]["model"] == "deepseek-v4.1-flash"
+    # Fail-open: low confidence leaves original request untouched
+    assert result is None
+    records = router.tail(settings, limit=1)
+    assert len(records) == 1
+    assert records[0]["event"] == "skip"
+    assert records[0]["reason"] == "low_confidence"
+
+
+def test_openai_compatible_off_grid_model_leaves_original_model_untouched(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"model": "not-in-grid", "effort": "high", "confidence": 0.99}
+                    )
+                }
+            }
+        ]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "default_model": "deepseek-v4.1-flash",
+            "routable_providers": ["opencode-go"],
+        },
+    )
+
+    req = ollama_request(model="glm-5.3")
+    result = route(
+        router,
+        req,
+        provider="opencode-go",
+        model="glm-5.3",
+    )
+    assert result is None
+    records = router.tail(settings, limit=1)
+    assert len(records) == 1
+    assert records[0]["event"] == "skip"
+    assert records[0]["reason"] == "unknown_choice"
+
+
+def test_openai_compatible_invalid_confidence_leaves_original_model_untouched(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    for bad_conf in ("garbage", -0.1, 1.5):
+        resp_payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"model": "kimi-k3", "effort": "low", "confidence": bad_conf}
+                        )
+                    }
+                }
+            ]
+        }
+        transport = StubTransport([StubResponse(resp_payload)])
+        router, settings = build(
+            tmp_path,
+            transport,
+            config={
+                "decider": "openai_compatible",
+                "decider_base_url": "https://opencode.ai/zen/go/v1",
+                "decider_api_key_env": "OPENCODE_GO_API_KEY",
+                "default_model": "deepseek-v4.1-flash",
+                "routable_providers": ["opencode-go"],
+            },
+        )
+        req = ollama_request(model="glm-5.3")
+        result = route(
+            router,
+            req,
+            provider="opencode-go",
+            model="glm-5.3",
+        )
+        assert result is None
+        records = router.tail(settings, limit=1)
+        assert len(records) == 1
+        assert records[0]["event"] == "skip"
+        assert records[0]["reason"] == "malformed_answer"
 

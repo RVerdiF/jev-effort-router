@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -535,79 +536,74 @@ class OpenAICompatibleDecider(BaseDecider):
         latency_ms: int,
         provider: str = "",
     ) -> Tuple[Optional[Decision], Optional[str]]:
-        reasons: List[str] = []
+        if not isinstance(parsed, dict):
+            return None, REASON_MALFORMED
 
-        # Model validation
-        model_choice_text = str(
-            parsed.get("model") or parsed.get("model_id") or parsed.get("choice") or ""
-        ).strip()
-        conf_val = _as_optional_float(parsed.get("confidence"), minimum=0.0)
-        model_confidence = conf_val if conf_val is not None else 1.0
-        if model_confidence > 1.0:
-            model_confidence = 1.0
+        # Model validation: strict schema and grid membership
+        model_raw = parsed.get("model") or parsed.get("model_id") or parsed.get("choice")
+        if model_raw is None or not isinstance(model_raw, str):
+            return None, REASON_MALFORMED
+        model_choice_text = model_raw.strip()
+        if not model_choice_text:
+            return None, REASON_MALFORMED
 
-        chosen = None
-        for entry in effective.grid:
-            if entry.model_id == model_choice_text:
-                chosen = entry
-                break
+        grid_models = {entry.model_id: entry for entry in effective.grid}
+        chosen = grid_models.get(model_choice_text)
         if chosen is None:
-            chosen = resolve({}, model_choice_text, effective.grid)
+            return None, REASON_UNKNOWN_CHOICE
 
-        if chosen is None:
-            reasons.append(REASON_UNKNOWN_CHOICE)
-        elif model_confidence < effective.confidence_threshold:
-            reasons.append(REASON_LOW_CONFIDENCE)
-            chosen = None
+        # Confidence validation: must be finite float in [0.0, 1.0]
+        conf_raw = parsed.get("confidence")
+        if conf_raw is None or isinstance(conf_raw, bool) or not isinstance(conf_raw, (int, float)):
+            return None, REASON_MALFORMED
+        try:
+            conf_float = float(conf_raw)
+        except (TypeError, ValueError):
+            return None, REASON_MALFORMED
+        if not math.isfinite(conf_float) or conf_float < 0.0 or conf_float > 1.0:
+            return None, REASON_MALFORMED
 
-        model = chosen.model_id if chosen is not None else _fallback_model(effective)
+        if conf_float < effective.confidence_threshold:
+            return None, REASON_LOW_CONFIDENCE
 
         # Effort validation
-        effort_choice_text = str(
-            parsed.get("effort") or parsed.get("reasoning_effort") or ""
-        ).strip()
-        effort_confidence = model_confidence
+        effort_raw = parsed.get("effort") or parsed.get("reasoning_effort")
+        if effort_raw is None or not isinstance(effort_raw, str):
+            return None, REASON_MALFORMED
+        effort_choice_text = effort_raw.strip()
         candidate = normalise_effort_choice(effort_choice_text)
-
-        requested: Optional[str] = None
         if candidate is None:
-            reasons.append(REASON_UNKNOWN_CHOICE)
-            requested = effective.default_effort
-        elif effort_confidence < effective.confidence_threshold:
-            reasons.append(REASON_LOW_CONFIDENCE)
-            requested = effective.default_effort
-        else:
-            requested = candidate
+            return None, REASON_UNKNOWN_CHOICE
 
-        if requested is None and effective.max_effort:
-            requested = effective.max_effort
-        requested = _cap_effort(requested, effective.max_effort)
+        requested: Optional[str] = candidate
+        if effective.max_effort:
+            requested = _cap_effort(requested, effective.max_effort)
 
         effort = resolve_effort(
-            model,
+            chosen.model_id,
             requested,
             provider=provider,
             effort_maps=self._settings.effort_maps,
         )
 
         alternatives = tuple(
-            entry.model_id for entry in effective.grid if entry.model_id != model
+            entry.model_id for entry in effective.grid if entry.model_id != chosen.model_id
         )
 
         return (
             Decision(
-                model=model,
+                model=chosen.model_id,
                 effort=effort,
                 effort_requested=requested,
-                model_confidence=model_confidence,
-                effort_confidence=effort_confidence,
+                model_confidence=conf_float,
+                effort_confidence=conf_float,
                 model_choice=model_choice_text,
                 effort_choice=effort_choice_text,
-                model_probabilities={model: model_confidence} if model_choice_text else {},
-                effort_probabilities={effort_choice_text: effort_confidence} if effort_choice_text else {},
+                model_probabilities={chosen.model_id: conf_float},
+                effort_probabilities={effort_choice_text: conf_float},
                 alternatives=alternatives,
                 latency_ms=latency_ms,
-                fallback_reasons=tuple(reasons),
+                fallback_reasons=(),
                 decider="openai_compatible",
             ),
             None,
