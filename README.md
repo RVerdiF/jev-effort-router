@@ -45,7 +45,7 @@ main model reasons and answers
 ## Install
 
 ```bash
-hermes plugins install AlphaPerseii3000/jev-effort-router
+hermes plugins install RVerdiF/jev-effort-router --force
 hermes plugins enable jev-effort-router
 ```
 
@@ -73,7 +73,7 @@ distinguish a docstring describing a network call from a hostile one, so the ver
 Review the findings above and re-run with `--force` to accept them:
 
 ```bash
-hermes plugins install AlphaPerseii3000/jev-effort-router --force
+hermes plugins install RVerdiF/jev-effort-router --force
 ```
 
 To skip the scan entirely for this repository, set `plugins.scan_on_install` in your Hermes config.
@@ -140,18 +140,56 @@ form generated from `plugin.yaml`.
 | Setting | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch. Off registers the plugin but never rewrites a request. |
-| `jev_model` | `typesafe/jev-1.13` | Decision model. `typesafe/jev-latest` follows the newest release. |
+| `decider` | `jev` | Decision backend: `jev` (OpenRouter Decisions API) or `openai_compatible` (chat completions API). |
+| `decider_base_url` | `""` | Base URL for `openai_compatible` decider (e.g. `https://opencode.ai/zen/go/v1`). |
+| `decider_model` | `""` | Model for `openai_compatible` decider (e.g. `deepseek-v4.1-flash`). |
+| `decider_api_key_env` | `""` | Env var name storing the API key for `openai_compatible` decider. |
+| `routable_providers` | `["ollama-cloud"]` | Allowlist of provider IDs that the router is permitted to rewrite. |
+| `jev_model` | `typesafe/jev-1.13` | Decision model for `jev` backend. `typesafe/jev-latest` follows the newest release. |
 | `confidence_threshold` | `0.5` | Below this, the turn keeps the configured model and effort. |
+| `confidence_threshold_per_decider` | `null` | Optional map of decider backend to confidence threshold (e.g. `{jev: 0.5, openai_compatible: 0.6}`). |
 | `timeout_s` | `2.0` | Budget for the decision call. Any timeout leaves the request untouched. |
 | `default_model` | `deepseek-v4.1-flash` | Model used when the decision is below threshold. |
 | `default_effort` | `medium` | Effort used when the decision is below threshold. |
-| `context_turns` | `4` | Preceding turns sent to Jev as recent context. |
+| `context_turns` | `4` | Preceding turns sent to the decider as recent context. |
 | `route_per_turn` | `true` | Off routes once per session instead of once per user turn. |
 | `audit_enabled` | `true` | Append one JSONL record per turn under the plugin data directory. |
 | `log_skips` | `true` | Record why a turn was left unrouted. |
 | `include_user_message_in_audit` | `false` | Off keeps conversation content out of the audit. |
-| `grid` | `null` | Optional `["model-id: description", ...]` replacing the built-in grid. |
+| `grid` | `null` | Optional `["model-id: description", ...]` replacing the default grid. |
+| `grids` | `null` | Optional map of provider ID to its own routing grid. |
+| `effort_maps` | `null` | Optional map of provider ID to model effort configurations. |
 | `platform_overrides` | `null` | Optional map of platform to settings overrides (`enabled`, `grid`, `confidence_threshold`, `max_effort`). |
+
+### OpenCode & Pluggable Decider Configuration
+
+To route requests for another provider (such as `opencode-go`) using an OpenAI-compatible decider endpoint (such as OpenCode's `deepseek-v4.1-flash`):
+
+```yaml
+plugins:
+  entries:
+    jev-effort-router:
+      settings:
+        decider: openai_compatible
+        decider_base_url: https://opencode.ai/zen/go/v1
+        decider_model: deepseek-v4.1-flash
+        decider_api_key_env: OPENCODE_GO_API_KEY
+        routable_providers:
+          - opencode-go
+        grids:
+          opencode-go:
+            - "deepseek-v4.1-flash: everyday writing, explanation, ordinary coding"
+            - "kimi-k3: complex code, multi-file refactoring, deep reasoning"
+        effort_maps:
+          opencode-go:
+            deepseek-v4.1-flash:
+              accepted: [low, medium, high]
+```
+
+#### Key differences between backends:
+- **Authentication**: `decider_api_key_env` names the environment variable containing the key (e.g. `OPENCODE_GO_API_KEY`). The secret itself is never written to configuration files or audit logs.
+- **Confidence**: For TypeSafe Jev (`jev`), confidence reflects a mathematically calibrated probability distribution. For `openai_compatible`, confidence is an LLM self-reported heuristic score parsed from the model's JSON response, strictly validated to be a finite float in `[0.0, 1.0]`.
+- **Effort verification**: Reasoning effort levels for custom providers must never be guessed or escalated. If unverified or empty, the router safely omits `reasoning_effort` rather than risking HTTP 400 errors. Verified levels for `deepseek-v4.1-flash` were empirically confirmed via the opt-in probe (`tests/test_live_probe.py`).
 
 ### Per-surface routing policy (`platform_overrides`)
 

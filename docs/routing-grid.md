@@ -54,9 +54,16 @@ this file plus a README note, not a config-only act.
 Second Choice question, three options, in this order: `low`, `medium`, `high`. Default when confidence is
 below threshold: `medium`.
 
-## Effort-to-wire mapping
+## Provider-specific grids and effort maps
 
-Every route lands on the `ollama-cloud` provider profile, whose own profile code
+In v0.4.0+, the router supports multiple providers declared under `routable_providers`.
+
+- **Default (`ollama-cloud`)**: Uses the built-in six-model grid and the built-in effort table below.
+- **Custom providers (e.g. `opencode-go`)**: Configured via `grids.<provider>` and `effort_maps.<provider>`.
+
+### Effort-to-wire mapping (Ollama:Cloud built-in)
+
+For `ollama-cloud`, every route lands on the `ollama-cloud` provider profile, whose own profile code
 (`plugins/model-providers/ollama-cloud/__init__.py`) already clamps to
 `none | low | medium | high | max` and maps `xhigh → max`, and which emits the field only when the model
 is resolved as reasoning-capable. The plugin's table exists to (a) state the family's real vocabulary
@@ -84,6 +91,23 @@ Rules that follow from the table:
 This table is the record of what has been verified. A family added later gets its row filled in from a
 live probe before it joins the grid; until then the generic clamp applies and the audit record marks the
 effort as `clamped`.
+
+### Effort mapping for custom providers (e.g. OpenCode)
+
+For providers other than `ollama-cloud` (e.g. `opencode-go`), effort mapping is strictly opt-in and based on explicit declaration in `effort_maps`:
+
+1. **No speculation / No unverified levels:** Never declare reasoning effort levels without empirical verification via live probe or official provider specifications.
+2. **Never escalate:** When a requested effort level is not accepted for a model, clamp only to a weaker accepted level.
+3. **Omission on unverified or empty maps:** If an unverified model or an empty accepted list (`accepted: []`) is encountered, the router omits `reasoning_effort` from the request altogether. It never falls back to guessing `low`/`medium`/`high` on custom providers.
+4. **Live probe evidence:** The opt-in live probe suite (`tests/test_live_probe.py`) verified against OpenCode (`https://opencode.ai/zen/go/v1`):
+   - `deepseek-v4.1-flash`: accepts `null` (omitted), `low`, `medium`, and `high` with HTTP 200.
+
+### Confidence semantics across deciders
+
+Confidence scoring differs fundamentally between the two supported decider backends:
+
+- **TypeSafe Jev (`jev`)**: Produces mathematically calibrated probability distributions across all choices in the question. The `confidence` value represents the concentration of probability on the winning option.
+- **OpenAI-Compatible (`openai_compatible`)**: Produces an LLM self-reported heuristic score parsed from the JSON output. While constrained to `[0.0, 1.0]`, this score is uncalibrated and subjective to the model's self-assessment.
 
 ## Levers left, in the order they are worth trying
 

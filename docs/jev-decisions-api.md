@@ -1,9 +1,16 @@
-# Jev Decisions API — verified wire contract
+# Decider API wires — verified wire contracts
 
-Companion of SPEC.md. Verified 2026-09-22 against the OpenRouter model page for `typesafe/jev-1.13`,
-OpenRouter's Jev tutorial, the Decisions API reference, and TypeSafe's "How to build with System One".
+Companion of SPEC.md. Verified against TypeSafe Jev Decisions API and OpenAI-compatible endpoints (including OpenCode `opencode-go`).
 
-## Endpoint
+The plugin supports two pluggable decider backends configured via `decider`:
+1. `jev` (default): TypeSafe Jev on the OpenRouter Decisions API.
+2. `openai_compatible`: OpenAI-compatible Chat Completions endpoint (e.g. OpenCode).
+
+---
+
+## Wire 1: TypeSafe Jev Decisions API (`decider: jev`)
+
+### Endpoint
 
 ```
 POST https://openrouter.ai/api/alpha/decisions
@@ -87,3 +94,64 @@ value and split on `":"`, is replaced by this keyed form.
 
 The error body is logged truncated and with the `Authorization` value never included. A route is always
 best-effort: the turn must be byte-identical to an unrouted turn when anything in this table fires.
+
+---
+
+## Wire 2: OpenAI-Compatible Decider Endpoint (`decider: openai_compatible`)
+
+### Endpoint
+
+```
+POST {decider_base_url}/chat/completions
+Authorization: Bearer ${DECIDER_API_KEY_ENV}
+Content-Type: application/json
+User-Agent: Hermes-Agent/0.21.4 (jev-effort-router)
+x-opencode-session: jev-{timestamp}   # added when base_url contains 'opencode'
+```
+
+For example, when routing via OpenCode:
+- `decider_base_url: https://opencode.ai/zen/go/v1`
+- `decider_model: deepseek-v4.1-flash`
+- `decider_api_key_env: OPENCODE_GO_API_KEY`
+
+### Request shape
+
+```json
+{
+  "model": "deepseek-v4.1-flash",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an expert LLM routing decider for Hermes Agent..."
+    },
+    {
+      "role": "user",
+      "content": "Available models for provider opencode-go:\n- deepseek-v4.1-flash: general coding\n- kimi-k3: complex multi-file refactoring\n\nUser prompt:\nrefactor the payment module\n\nPick the model and effort. Output JSON only."
+    }
+  ],
+  "temperature": 0.0,
+  "response_format": {"type": "json_object"}
+}
+```
+
+### Answer shape
+
+The decider model must respond with valid JSON adhering to:
+
+```json
+{
+  "model": "kimi-k3",
+  "effort": "high",
+  "confidence": 0.95
+}
+```
+
+### Strict validation rules on Wire 2
+
+Unlike unstructured chat responses, the decider's output is subjected to strict type and membership validation:
+
+1. **JSON Object**: The payload must parse as a JSON dictionary (handling Markdown code blocks ````json ... ```` if emitted).
+2. **Grid Membership**: `model` is required and **must strictly belong to the grid sent for that provider**. If the LLM proposes an unoffered model (e.g. `gpt-4o` when only `opencode-go` models were supplied), it is rejected immediately.
+3. **Valid Effort**: `effort` is required and must be one of `low`, `medium`, or `high`.
+4. **Finite Numeric Confidence**: `confidence` must be a finite float between `0.0` and `1.0`. String values, NaN, infinity, or values out of bounds trigger immediate validation failure without hallucinating a default confidence.
+5. **Fail-Open Policy**: Any validation violation, HTTP error, timeout, or missing key immediately aborts routing (`decide` returns `(None, reason)`), keeping the original turn request 100% byte-identical.
