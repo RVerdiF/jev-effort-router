@@ -211,3 +211,39 @@ def test_defaults_are_unchanged_when_the_key_is_absent():
 
     assert settings.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
     assert settings.default_model == DEFAULT_MODEL
+    assert settings.decider == "jev"
+    assert settings.decider_base_url == ""
+    assert settings.decider_model == ""
+    assert settings.decider_api_key_env == ""
+    assert settings.routable_providers == ("ollama-cloud",)
+    assert len(settings.grids) == 0
+    assert len(settings.effort_maps) == 0
+    assert len(settings.confidence_threshold_per_decider) == 0
+    assert settings.is_provider_routable("ollama-cloud") is True
+    assert settings.is_provider_routable("opencode-go") is False
+
+
+def test_new_config_options_parsed_and_queried():
+    config = {
+        "decider": "openai_compatible",
+        "decider_base_url": "https://opencode.ai/zen/go/v1",
+        "decider_model": "deepseek-v4.1-flash",
+        "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        "routable_providers": ["ollama-cloud", "opencode-go"],
+        "confidence_threshold_per_decider": {"openai_compatible": 0.8, "jev": 0.5},
+    }
+    settings = settings_for(config)
+
+    assert settings.decider == "openai_compatible"
+    assert settings.decider_base_url == "https://opencode.ai/zen/go/v1"
+    assert settings.decider_model == "deepseek-v4.1-flash"
+    assert settings.decider_api_key_env == "OPENCODE_GO_API_KEY"
+    assert settings.routable_providers == ("ollama-cloud", "opencode-go")
+    assert settings.is_provider_routable("ollama-cloud") is True
+    assert settings.is_provider_routable("opencode-go") is True
+    assert settings.is_provider_routable("openrouter") is False
+    assert settings.api_key_env_for("openai_compatible") == "OPENCODE_GO_API_KEY"
+    assert settings.api_key_env_for("jev") == "OPENROUTER_API_KEY"
+    assert settings.confidence_threshold_for("openai_compatible") == 0.8
+    assert settings.confidence_threshold_for("jev") == 0.5
+

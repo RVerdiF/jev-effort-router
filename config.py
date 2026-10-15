@@ -27,6 +27,13 @@ ROUTED_API_MODES = ("chat_completions",)
 
 EFFORT_LEVELS: Tuple[str, ...] = ("low", "medium", "high")
 
+DECIDERS: Tuple[str, ...] = ("jev", "openai_compatible")
+DEFAULT_DECIDER = "jev"
+DEFAULT_ROUTABLE_PROVIDERS: Tuple[str, ...] = ("ollama-cloud",)
+DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEFAULT_OPENAI_COMPATIBLE_MODEL = "deepseek-v4.1-flash"
+DEFAULT_OPENAI_COMPATIBLE_KEY_ENV = "OPENCODE_GO_API_KEY"
+
 DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
 DEFAULT_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 DEFAULT_TIMEOUT_S = 2.0
@@ -120,7 +127,6 @@ def _entry_for(grid: Sequence[Entry], model_id: str) -> Optional[Entry]:
     return None
 
 
-
 @dataclass(frozen=True)
 class PlatformPolicy:
     """One surface's routing policy, as declared under ``platform_overrides``.
@@ -182,9 +188,23 @@ class Settings:
     platform_overrides: Mapping[str, PlatformPolicy] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    decider: str = DEFAULT_DECIDER
+    decider_base_url: str = ""
+    decider_model: str = ""
+    decider_api_key_env: str = ""
+    routable_providers: Tuple[str, ...] = DEFAULT_ROUTABLE_PROVIDERS
+    grids: Mapping[str, Tuple[Entry, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    effort_maps: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    confidence_threshold_per_decider: Mapping[str, float] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __hash__(self) -> int:
-        """Hash the snapshot, treating the read-only mapping as its frozenset of items.
+        """Hash the snapshot, treating read-only mappings as frozensets.
 
         A frozen dataclass hashes its fields by default, but ``MappingProxyType`` is hashable
         only from Python 3.12 — and this plugin's matrix includes 3.11, where the default
@@ -194,8 +214,15 @@ class Settings:
         parts = []
         for spec in fields(self):
             value = getattr(self, spec.name)
-            if spec.name == "platform_overrides":
-                value = frozenset(value.items())
+            if isinstance(value, (dict, Mapping)):
+                items = []
+                for k, v in value.items():
+                    if isinstance(v, (dict, Mapping)):
+                        v = frozenset(v.items())
+                    items.append((k, v))
+                value = frozenset(items)
+            elif isinstance(value, list):
+                value = tuple(value)
             parts.append((spec.name, value))
         return hash(tuple(parts))
 
@@ -211,26 +238,97 @@ class Settings:
         key = (platform or "").strip().lower()
         return self.platform_overrides.get(key)
 
-    def effective(self, policy: Optional[PlatformPolicy]) -> EffectiveSettings:
+    def grid_for(self, provider: str = "") -> Tuple[Entry, ...]:
+        """The grid for ``provider``, or the global grid when unlisted."""
+        key = (provider or "").strip().lower()
+        if key in self.grids:
+            return self.grids[key]
+        if key in ROUTED_PROVIDER_ALIASES and ROUTED_PROVIDER in self.grids:
+            return self.grids[ROUTED_PROVIDER]
+        return self.grid
+
+    def effort_map_for(self, provider: str = "") -> Optional[Any]:
+        """The effort map for ``provider``, or None when unlisted."""
+        key = (provider or "").strip().lower()
+        if key in self.effort_maps:
+            return self.effort_maps[key]
+        if key in ROUTED_PROVIDER_ALIASES and ROUTED_PROVIDER in self.effort_maps:
+            return self.effort_maps[ROUTED_PROVIDER]
+        return None
+
+    def api_key_env_for(self, decider: Optional[str] = None) -> str:
+        """The environment variable name holding the API key for ``decider``."""
+        target = (decider or self.decider).strip().lower()
+        if target == "openai_compatible":
+            return self.decider_api_key_env or DEFAULT_OPENAI_COMPATIBLE_KEY_ENV
+        return "OPENROUTER_API_KEY"
+
+    def base_url_for(self, decider: Optional[str] = None) -> str:
+        """The base URL for ``decider``."""
+        target = (decider or self.decider).strip().lower()
+        if target == "openai_compatible":
+            return self.decider_base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+        return self.endpoint
+
+    @property
+    def base_url(self) -> str:
+        """The effective base URL for the active decider."""
+        return self.base_url_for()
+
+    def decider_model_for(self, decider: Optional[str] = None) -> str:
+        """The decision model id for ``decider``."""
+        target = (decider or self.decider).strip().lower()
+        if target == "openai_compatible":
+            return self.decider_model or DEFAULT_OPENAI_COMPATIBLE_MODEL
+        return self.jev_model
+
+    def confidence_threshold_for(self, decider: Optional[str] = None) -> float:
+        """The confidence threshold for ``decider``."""
+        target = (decider or self.decider).strip().lower()
+        if target in self.confidence_threshold_per_decider:
+            return self.confidence_threshold_per_decider[target]
+        return self.confidence_threshold
+
+    def is_provider_routable(self, provider: str) -> bool:
+        """Whether ``provider`` is in the configured routable providers list."""
+        key = (provider or "").strip().lower()
+        if not key:
+            return any(
+                p.strip().lower() in (ROUTED_PROVIDER, *ROUTED_PROVIDER_ALIASES)
+                for p in self.routable_providers
+            )
+        for p in self.routable_providers:
+            cand = p.strip().lower()
+            if cand == key:
+                return True
+            if key in ROUTED_PROVIDER_ALIASES and cand == ROUTED_PROVIDER:
+                return True
+            if cand in ROUTED_PROVIDER_ALIASES and key == ROUTED_PROVIDER:
+                return True
+        return False
+
+    def effective(self, policy: Optional[PlatformPolicy], provider: str = "") -> EffectiveSettings:
         """Resolve one frozen snapshot, applying ``policy`` over the global settings.
 
         A policy field of ``None`` inherits the global value; a policy ``grid`` that did not
         parse also inherits, so a bad policy grid never replaces the operator's global grid.
         """
+        base_grid = self.grid_for(provider)
+        base_threshold = self.confidence_threshold_for(self.decider)
         if policy is None:
             return EffectiveSettings(
-                grid=self.grid,
-                confidence_threshold=self.confidence_threshold,
+                grid=base_grid,
+                confidence_threshold=base_threshold,
                 default_model=self.default_model,
                 default_effort=self.default_effort,
                 max_effort=None,
                 grid_from_policy=False,
             )
-        grid = policy.grid if policy.grid is not None else self.grid
+        grid = policy.grid if policy.grid is not None else base_grid
         threshold = (
             policy.confidence_threshold
             if policy.confidence_threshold is not None
-            else self.confidence_threshold
+            else base_threshold
         )
         return EffectiveSettings(
             grid=grid,
@@ -284,12 +382,63 @@ def parse_platform_overrides(raw: Any) -> Mapping[str, PlatformPolicy]:
     return MappingProxyType(policies)
 
 
+def parse_grids(raw: Any) -> Mapping[str, Tuple[Entry, ...]]:
+    """Parse per-provider grid overrides."""
+    if not isinstance(raw, dict):
+        return MappingProxyType({})
+    result: Dict[str, Tuple[Entry, ...]] = {}
+    for key, value in raw.items():
+        provider = str(key or "").strip().lower()
+        if not provider:
+            continue
+        parsed = parse_grid_strict(value)
+        if parsed:
+            result[provider] = parsed
+    return MappingProxyType(result)
+
+
+def parse_effort_maps(raw: Any) -> Mapping[str, Any]:
+    """Parse per-provider effort maps."""
+    if not isinstance(raw, dict):
+        return MappingProxyType({})
+    result: Dict[str, Any] = {}
+    for key, value in raw.items():
+        provider = str(key or "").strip().lower()
+        if not provider:
+            continue
+        result[provider] = value
+    return MappingProxyType(result)
+
+
+def parse_confidence_threshold_per_decider(raw: Any) -> Mapping[str, float]:
+    """Parse per-decider confidence threshold overrides."""
+    if not isinstance(raw, dict):
+        return MappingProxyType({})
+    result: Dict[str, float] = {}
+    for key, value in raw.items():
+        decider_name = str(key or "").strip().lower()
+        parsed = _as_optional_float(value, minimum=0.0)
+        if parsed is not None:
+            result[decider_name] = parsed
+    return MappingProxyType(result)
+
+
 def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
     """Build a :class:`Settings` from ``ctx.get_config`` (or from no config at all)."""
     read = get_config if callable(get_config) else (lambda _key, default=None: default)
 
     raw_grid = read("grid", None)
     grid = parse_grid(raw_grid) if raw_grid else tuple(DEFAULT_GRID)
+
+    raw_routable = read("routable_providers", None)
+    if raw_routable is None:
+        routable_providers = DEFAULT_ROUTABLE_PROVIDERS
+    elif isinstance(raw_routable, str):
+        routable_providers = tuple(p.strip() for p in raw_routable.split(",") if p.strip())
+    elif isinstance(raw_routable, Sequence):
+        routable_providers = tuple(str(p).strip() for p in raw_routable if str(p).strip())
+    else:
+        routable_providers = DEFAULT_ROUTABLE_PROVIDERS
 
     settings = Settings(
         enabled=_as_bool(read("enabled", True), True),
@@ -312,23 +461,46 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         include_user_message_in_audit=_as_bool(read("include_user_message_in_audit", False), False),
         grid=grid,
         platform_overrides=parse_platform_overrides(read("platform_overrides", None)),
+        decider=_as_choice(read("decider", DEFAULT_DECIDER), DECIDERS, DEFAULT_DECIDER),
+        decider_base_url=_as_text(read("decider_base_url", ""), ""),
+        decider_model=_as_text(read("decider_model", ""), ""),
+        decider_api_key_env=_as_text(read("decider_api_key_env", ""), ""),
+        routable_providers=routable_providers if routable_providers else DEFAULT_ROUTABLE_PROVIDERS,
+        grids=parse_grids(read("grids", None)),
+        effort_maps=parse_effort_maps(read("effort_maps", None)),
+        confidence_threshold_per_decider=parse_confidence_threshold_per_decider(
+            read("confidence_threshold_per_decider", None)
+        ),
     )
     return settings
 
 
-def api_key() -> str:
-    """The OpenRouter key, from the environment only.
+def api_key(env_name: Optional[str] = None) -> str:
+    """The API key, from the environment only.
 
+    Defaults to OPENROUTER_API_KEY when env_name is not provided.
     Never read from ``config.yaml`` and never returned anywhere it could be logged.
     """
-    return (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    key_name = (env_name or "OPENROUTER_API_KEY").strip()
+    return (os.environ.get(key_name) or "").strip()
 
 
-def redact(value: Any, limit: int = 200) -> str:
+def redact(value: Any, limit: int = 200, env_name: Optional[str] = None) -> str:
     """Render a value for a log line with any credential-looking substring removed."""
     text = str(value)
-    key = api_key()
-    if key:
+    keys_to_redact = set()
+    if env_name:
+        k = api_key(env_name)
+        if k:
+            keys_to_redact.add(k)
+    k_default = api_key("OPENROUTER_API_KEY")
+    if k_default:
+        keys_to_redact.add(k_default)
+    k_opencode = api_key("OPENCODE_GO_API_KEY")
+    if k_opencode:
+        keys_to_redact.add(k_opencode)
+
+    for key in keys_to_redact:
         text = text.replace(key, "[REDACTED]")
     if len(text) > limit:
         text = text[:limit] + "..."
