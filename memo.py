@@ -41,6 +41,7 @@ class Memo:
     effort_confidence: float
     choice: str
     fallback_reasons: tuple = ()
+    decider: str = "jev"
 
 
 class TurnMemo:

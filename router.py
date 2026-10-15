@@ -193,6 +193,7 @@ class Router:
                     effort_confidence=decision.effort_confidence,
                     choice=decision.model_choice,
                     fallback_reasons=decision.fallback_reasons,
+                    decider=decision.decider,
                 )
                 # Storing on "no memo found" rather than on an api_call_count test is deliberate:
                 # Hermes passes the *incremented* counter, so the first provider call of a turn
@@ -448,4 +449,5 @@ def _decision_from_memo(memo: Memo) -> Decision:
         alternatives=(),
         latency_ms=0,
         fallback_reasons=memo.fallback_reasons,
+        decider=getattr(memo, "decider", "jev") or "jev",
     )

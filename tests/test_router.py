@@ -917,3 +917,63 @@ def test_openai_compatible_invalid_confidence_leaves_original_model_untouched(tm
         assert records[0]["event"] == "skip"
         assert records[0]["reason"] == "malformed_answer"
 
+
+def test_openai_compatible_replay_preserves_decider_in_turn_and_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"model": "kimi-k3", "effort": "low", "confidence": 0.95}
+                    )
+                }
+            }
+        ]
+    }
+    # 1. Turn mode: 2 calls in same turn share 1 transport call and both audit decider=openai_compatible
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path / "turn_mode",
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "routable_providers": ["opencode-go"],
+            "route_per_turn": True,
+        },
+    )
+    res1 = route(router, provider="opencode-go", api_call_count=1)
+    res2 = route(router, provider="opencode-go", api_call_count=2, api_request_id="turn-1:api:2")
+    assert res1 is not None and res2 is not None
+    assert transport.call_count == 1
+    records = router.tail(settings, limit=10)
+    assert len(records) == 2
+    assert records[0]["decider"] == "openai_compatible"
+    assert records[1]["decider"] == "openai_compatible"
+    assert records[1]["replayed"] is True
+
+    # 2. Session mode: 2 turns in same session share 1 transport call and both audit decider=openai_compatible
+    transport_session = StubTransport([StubResponse(resp_payload)])
+    router_sess, settings_sess = build(
+        tmp_path / "session_mode",
+        transport_session,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "routable_providers": ["opencode-go"],
+            "route_per_turn": False,
+        },
+    )
+    sres1 = route(router_sess, provider="opencode-go", turn_id="turn-A", session_id="sess-1")
+    sres2 = route(router_sess, provider="opencode-go", turn_id="turn-B", session_id="sess-1")
+    assert sres1 is not None and sres2 is not None
+    assert transport_session.call_count == 1
+    sess_records = router_sess.tail(settings_sess, limit=10)
+    assert len(sess_records) == 2
+    assert sess_records[0]["decider"] == "openai_compatible"
+    assert sess_records[1]["decider"] == "openai_compatible"
+    assert sess_records[1]["replayed"] is True
+
