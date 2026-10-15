@@ -79,7 +79,14 @@ class Router:
         return self._audit
 
     def client(self, settings: Settings):
-        key = (settings.endpoint, settings.jev_model, settings.timeout_s)
+        key = (
+            settings.decider,
+            settings.endpoint,
+            settings.base_url,
+            settings.jev_model,
+            settings.decider_model,
+            settings.timeout_s,
+        )
         if self._client is None or self._client_key != key:
             self._client = self._client_factory(settings)
             self._client_key = key
@@ -130,7 +137,7 @@ class Router:
 
         # -- skip gates: anything the router does not own goes out untouched ---------
         provider_key = (provider or "").strip().lower()
-        if provider_key not in ("", ROUTED_PROVIDER) and provider_key not in ROUTED_PROVIDER_ALIASES:
+        if not settings.is_provider_routable(provider_key):
             self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
             return None
         if api_mode and api_mode not in ROUTED_API_MODES:
@@ -144,7 +151,7 @@ class Router:
         if policy is not None and policy.enabled is False:
             self._record_skip(settings, REASON_SURFACE_DISABLED, where)
             return None
-        effective = settings.effective(policy)
+        effective = settings.effective(policy, provider=provider)
 
         # A surface's grid is a structural cap: a configured model outside it degrades to a
         # skip that keeps that configured model on the wire, rather than being re-pinned.
@@ -269,7 +276,8 @@ class Router:
 
         if decision is None:
             if reason == REASON_NO_API_KEY:
-                logger.info("jev-effort-router: OPENROUTER_API_KEY is not set; turns keep the configured model")
+                key_env = settings.api_key_env_for(settings.decider)
+                logger.info("jev-effort-router: %s is not set; turns keep the configured model", key_env)
             self._record_skip(settings, reason or REASON_EXCEPTION, where)
             return None
         return decision
@@ -330,6 +338,7 @@ class Router:
             "latency_ms": decision.latency_ms,
             "fallback_reasons": list(decision.fallback_reasons),
             "jev_model": settings.jev_model,
+            "decider": getattr(decision, "decider", settings.decider),
             "replayed": bool(replayed),
         }
         record.update(where.fields())

@@ -694,3 +694,142 @@ def test_a_turn_without_a_user_message_is_skipped(tmp_path):
 def _raise_read_timeout():
 
     raise ReadTimeout("timed out")
+
+
+# -- fork tests: routable_providers, openai_compatible decider, per-provider grids/efforts --
+
+
+def test_routable_providers_allowlist(tmp_path):
+    transport = StubTransport([StubResponse(decision_payload("1", 0.9, "medium", 0.9))])
+    router, _ = build(
+        tmp_path,
+        transport,
+        config={
+            "routable_providers": ["ollama-cloud", "opencode-go"],
+        },
+    )
+
+    # opencode-go is in routable_providers -> routes
+    result = route(
+        router,
+        ollama_request(),
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
+    assert transport.call_count == 1
+
+    # openrouter is NOT in routable_providers -> skipped
+    assert route(router, ollama_request(), provider="openrouter") is None
+    assert transport.call_count == 1
+
+
+def test_provider_specific_grid_and_effort_map(tmp_path):
+    transport = StubTransport([StubResponse(decision_payload("1", 0.95, "high", 0.95, grid_size=2))])
+    router, _ = build(
+        tmp_path,
+        transport,
+        config={
+            "routable_providers": ["opencode-go"],
+            "grids": {"opencode-go": ["deepseek-v4.1-flash: fast", "kimi-k3: code"]},
+            "effort_maps": {"opencode-go": {"deepseek-v4.1-flash": ["low", "medium"]}},
+        },
+    )
+
+    result = route(
+        router,
+        ollama_request(),
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
+    # Effort clamped to medium because effort_maps declares low/medium for deepseek on opencode-go
+    assert result["request"]["reasoning_effort"] == "medium"
+
+
+def test_openai_compatible_decider_routing_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"model": "deepseek-v4.1-flash", "effort": "medium", "confidence": 0.92}
+                    )
+                }
+            }
+        ]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    audit_dir = tmp_path / "audit"
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_model": "deepseek-v4.1-flash",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "routable_providers": ["opencode-go"],
+            "effort_maps": {"opencode-go": {"deepseek-v4.1-flash": ["low", "medium", "high"]}},
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(audit_dir))
+
+    result = route(
+        router,
+        ollama_request(),
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
+    assert result["request"]["reasoning_effort"] == "medium"
+
+    # Verify audit record has decider
+    records = router.tail(settings, limit=10)
+    assert len(records) == 1
+    assert records[0]["event"] == "route"
+    assert records[0]["decider"] == "openai_compatible"
+    assert "latency_ms" in records[0]
+
+
+def test_confidence_threshold_per_decider(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"model": "kimi-k3", "effort": "medium", "confidence": 0.75}
+                    )
+                }
+            }
+        ]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, _ = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "confidence_threshold_per_decider": {"openai_compatible": 0.85},
+            "default_model": "deepseek-v4.1-flash",
+            "routable_providers": ["opencode-go"],
+        },
+    )
+
+    result = route(
+        router,
+        ollama_request(),
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    # Degraded to default_model because 0.75 < 0.85
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
+
