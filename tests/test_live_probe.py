@@ -17,13 +17,6 @@ from decider import OpenAICompatibleDecider
 
 
 OPENCODE_KEY = os.environ.get("OPENCODE_GO_API_KEY", "").strip()
-if not OPENCODE_KEY:
-    env_file = Path("/home/rafael/hermes/home/.env")
-    if env_file.is_file():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("OPENCODE_GO_API_KEY="):
-                OPENCODE_KEY = line.split("=", 1)[1].strip().strip("'").strip('"')
-                break
 BASE_URL = os.environ.get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1").rstrip("/")
 
 

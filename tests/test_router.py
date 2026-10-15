@@ -977,3 +977,48 @@ def test_openai_compatible_replay_preserves_decider_in_turn_and_session(tmp_path
     assert sess_records[1]["decider"] == "openai_compatible"
     assert sess_records[1]["replayed"] is True
 
+
+def test_cross_provider_memo_replay_isolation_and_effort_map_guard(tmp_path):
+    """A decision made for provider-a must not replay an incompatible model or leak effort maps to provider-b."""
+    resp_payload = json.dumps({
+        "choices": [{"message": {"content": json.dumps({
+            "model": "only-a",
+            "effort": "high",
+            "model_confidence": 0.95,
+            "effort_confidence": 0.95,
+        })}}]
+    })
+    transport = StubTransport([StubResponse(resp_payload)])
+    conf = {
+        "decider": "openai_compatible",
+        "decider_base_url": "https://example.com/v1",
+        "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        "routable_providers": ["provider-a", "provider-b"],
+        "grids": {
+            "provider-a": [{"model": "only-a"}, {"model": "shared"}],
+            "provider-b": [{"model": "shared"}, {"model": "only-b"}],
+        },
+        "effort_maps": {
+            "provider-a": {"only-a": {"high": "high"}},
+            "provider-b": {"shared": {}},
+        },
+    }
+    router, settings = build(
+        tmp_path,
+        transport,
+        config=conf,
+        catalog_resolver=lambda prov: ["shared", "only-a"] if prov == "provider-a" else ["shared", "only-b"],
+    )
+    # 1. Provider-a routes to only-a with high effort
+    r1 = route(router, provider="provider-a", body={"model": "shared", "messages": [{"role": "user", "content": "hi"}]}, session_id="s1", turn_id="t1")
+    assert r1 is not None
+    assert r1["model"] == "only-a"
+    assert r1.get("reasoning_effort") == "high"
+    assert transport.call_count == 1
+
+    # 2. Provider-b in same turn: provider mismatch fails open, no leakage of model or effort
+    r2 = route(router, provider="provider-b", body={"model": "shared", "messages": [{"role": "user", "content": "hi"}]}, session_id="s1", turn_id="t1")
+    assert r2 is None
+    assert transport.call_count == 1
+
+

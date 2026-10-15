@@ -37,6 +37,7 @@ from .config import (
     EffectiveSettings,
     Settings,
 )
+from .effort import resolve_effort
 from .memo import Memo, TurnMemo
 from .state import last_user_message
 
@@ -167,7 +168,45 @@ class Router:
 
             decision: Optional[Decision] = None
             if memo is not None:
-                decision = _decision_from_memo(memo)
+                # Provenance guard: a decision made for another provider must not be replayed to this one
+                memo_prov = getattr(memo, "provider", "")
+                if memo_prov and provider and memo_prov != provider:
+                    logger.info(
+                        "jev-effort-router: memo decided for provider %r is incompatible with active provider %r; failing open",
+                        memo_prov,
+                        provider,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                # Grid guard: the replayed model must exist in the active provider's grid
+                if effective.entry_for(memo.model) is None:
+                    logger.info(
+                        "jev-effort-router: memo model %r is not in grid for provider %r; failing open",
+                        memo.model,
+                        provider,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
+                    return None
+
+                # Catalog guard: provider catalog must have the model
+                if not self._provider_has(memo.model, provider=provider):
+                    logger.warning(
+                        "jev-effort-router: memo model %r is not in catalog for provider %r; leaving turn on configured model",
+                        memo.model,
+                        provider,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_UNKNOWN_MODEL, where, extra={"chosen_model": memo.model})
+                    return None
+
+                # Effort map guard: re-resolve effort against the active provider's map (never leaks unmapped effort)
+                re_effort = resolve_effort(
+                    memo.model,
+                    memo.effort_requested or memo.effort,
+                    provider=provider,
+                    effort_maps=settings.effort_maps,
+                )
+                decision = _decision_from_memo(memo, effort=re_effort)
             else:
                 fetched = self._decide(settings, effective, request, where)
                 if fetched is None:
@@ -194,6 +233,7 @@ class Router:
                     choice=decision.model_choice,
                     fallback_reasons=decision.fallback_reasons,
                     decider=decision.decider,
+                    provider=provider,
                 )
                 # Storing on "no memo found" rather than on an api_call_count test is deliberate:
                 # Hermes passes the *incremented* counter, so the first provider call of a turn
@@ -206,6 +246,7 @@ class Router:
                 else:
                     self._memo.put_session(session_id, memo)
 
+            assert decision is not None
             routed = self._apply(original_request, decision)
             self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed)
             return {"request": routed, "source": "jev-effort-router", "reason": decision.model}
@@ -433,7 +474,10 @@ class _Where:
         }
 
 
-def _decision_from_memo(memo: Memo) -> Decision:
+_UNSET = object()
+
+
+def _decision_from_memo(memo: Memo, effort: Any = _UNSET) -> Decision:
     """Present a replayed memo through the same shape as a fresh decision.
 
     Only the fields that were actually measured and are still load-bearing at replay are
@@ -443,9 +487,10 @@ def _decision_from_memo(memo: Memo) -> Decision:
     is left empty/``None`` rather than reconstructed from a sibling field: an audit record
     must never report a value that was not measured at replay.
     """
+    actual_effort = memo.effort if effort is _UNSET else effort
     return Decision(
         model=memo.model,
-        effort=memo.effort,
+        effort=actual_effort,
         effort_requested=memo.effort_requested,
         model_confidence=memo.model_confidence,
         effort_confidence=memo.effort_confidence,

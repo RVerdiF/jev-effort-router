@@ -42,6 +42,7 @@ class Memo:
     choice: str
     fallback_reasons: tuple = ()
     decider: str = "jev"
+    provider: str = ""
 
 
 class TurnMemo:
@@ -54,14 +55,24 @@ class TurnMemo:
         self._max_turns = max_turns
         self._max_sessions = max_sessions
 
-    def get_turn(self, turn_id: Optional[str]) -> Optional[Memo]:
-        return self._get(self._turns, turn_id, TURN_TTL_S)
+    def get_turn(self, turn_id: Optional[str], provider: Optional[str] = None) -> Optional[Memo]:
+        memo = self._get(self._turns, turn_id, TURN_TTL_S)
+        if memo is not None and provider is not None:
+            memo_prov = getattr(memo, "provider", "")
+            if memo_prov and memo_prov != provider:
+                return None
+        return memo
 
     def put_turn(self, turn_id: Optional[str], memo: Memo) -> None:
         self._put(self._turns, turn_id, memo, self._max_turns)
 
-    def get_session(self, session_id: Optional[str]) -> Optional[Memo]:
-        return self._get(self._sessions, session_id, SESSION_TTL_S)
+    def get_session(self, session_id: Optional[str], provider: Optional[str] = None) -> Optional[Memo]:
+        memo = self._get(self._sessions, session_id, SESSION_TTL_S)
+        if memo is not None and provider is not None:
+            memo_prov = getattr(memo, "provider", "")
+            if memo_prov and memo_prov != provider:
+                return None
+        return memo
 
     def put_session(self, session_id: Optional[str], memo: Memo) -> None:
         self._put(self._sessions, session_id, memo, self._max_sessions)
