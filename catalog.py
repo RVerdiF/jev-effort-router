@@ -113,13 +113,25 @@ class ModelCatalog:
 
     # -- the question the router asks --------------------------------------------
 
-    def is_known(self, model_id: str, provider_prefixes: Sequence[str] = ()) -> Optional[bool]:
+    def is_known(
+        self,
+        model_id: str,
+        provider_prefixes: Sequence[str] = (),
+        *,
+        provider: str = "",
+    ) -> Optional[bool]:
         """``True``/``False`` when the catalog can answer, ``None`` when it cannot.
+
+        The cache file is specific to ollama-cloud. If the active provider is not
+        ollama-cloud, there is no catalog evidence for it, so returns None (no veto).
 
         A model matches either exactly or through one of ``provider_prefixes`` (a catalog entry
         namespaced as ``vendor/model``), so a grid entry naming the bare id is not judged absent
         for a formatting difference.
         """
+        provider_key = (provider or "").strip().lower()
+        if provider_key and provider_key not in ("ollama-cloud", "ollama_cloud"):
+            return None
         models = self.models()
         if not models:
             return None

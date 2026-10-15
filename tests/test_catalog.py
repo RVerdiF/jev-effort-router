@@ -195,6 +195,30 @@ def test_grid_report_is_empty_without_evidence(tmp_path):
     assert router.grid_report(settings) == []
 
 
+def test_ollama_catalog_does_not_veto_models_for_other_providers(tmp_path):
+    # Ollama cache contains only an ollama model
+    catalog = catalog_for(tmp_path, ["ollama-only-model"])
+    assert catalog.is_known("kimi-k3", provider="opencode-go") is None
+    assert catalog.is_known("kimi-k3", provider="ollama-cloud") is False
+
+    # End-to-end router with opencode-go routes despite ollama-only cache
+    transport = StubTransport([StubResponse(decision_payload("2", 0.9, "high", 0.9))])
+    settings = load_settings(
+        lambda k, d=None: {"routable_providers": ["opencode-go"], "default_model": "deepseek-v4.1-flash"}.get(
+            k, d
+        )
+    )
+    router = Router(
+        lambda: settings,
+        get_state=lambda: None,
+        client_factory=lambda _settings: _Client(transport, settings),
+        catalog=catalog,
+    )
+    res = route(router, provider="opencode-go", model="glm-5.3")
+    assert res is not None
+    assert res["request"]["model"] == "kimi-k3"
+
+
 class _State:
     def __init__(self, data_dir):
         self.data_dir = data_dir

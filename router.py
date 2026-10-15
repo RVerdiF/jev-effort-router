@@ -176,7 +176,7 @@ class Router:
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
                 # Leave the request exactly as the operator configured it.
-                if not self._provider_has(decision.model):
+                if not self._provider_has(decision.model, provider=provider):
                     logger.warning(
                         "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
                         "leaving the turn on the configured model",
@@ -219,16 +219,16 @@ class Router:
 
     # -- decision plumbing -------------------------------------------------------
 
-    def _provider_has(self, model_id: str) -> bool:
+    def _provider_has(self, model_id: str, provider: str = "") -> bool:
         """Whether the chosen model is safe to put on the wire, according to the provider catalog.
 
         Answers ``True`` whenever the catalog has nothing to say — an absent cache, an unreadable
-        file or a host that exposes none of it all mean "no evidence", and the router must not
-        start refusing decisions on missing evidence. Only a catalog that lists models and does
-        not contain this one is a No.
+        file, a non-Ollama provider, or a host that exposes none of it all mean "no evidence",
+        and the router must not start refusing decisions on missing evidence. Only a catalog that
+        lists models and does not contain this one is a No.
         """
         try:
-            known = self._catalog.is_known(model_id)
+            known = self._catalog.is_known(model_id, provider=provider)
         except Exception as exc:  # noqa: BLE001 - a catalog probe never blocks a turn
             logger.debug("jev-effort-router: catalog check failed (%s: %s)", type(exc).__name__, exc)
             return True
