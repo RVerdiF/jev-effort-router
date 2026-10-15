@@ -167,6 +167,16 @@ class EffectiveSettings:
         return _entry_for(self.grid, model_id)
 
 
+def _make_hashable(val: Any) -> Any:
+    if isinstance(val, (dict, Mapping)):
+        return frozenset((k, _make_hashable(v)) for k, v in val.items())
+    if isinstance(val, (list, tuple)):
+        return tuple(_make_hashable(x) for x in val)
+    if isinstance(val, (set, frozenset)):
+        return frozenset(_make_hashable(x) for x in val)
+    return val
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable snapshot of the plugin's effective settings."""
@@ -214,16 +224,7 @@ class Settings:
         parts = []
         for spec in fields(self):
             value = getattr(self, spec.name)
-            if isinstance(value, (dict, Mapping)):
-                items = []
-                for k, v in value.items():
-                    if isinstance(v, (dict, Mapping)):
-                        v = frozenset(v.items())
-                    items.append((k, v))
-                value = frozenset(items)
-            elif isinstance(value, list):
-                value = tuple(value)
-            parts.append((spec.name, value))
+            parts.append((spec.name, _make_hashable(value)))
         return hash(tuple(parts))
 
     @property
@@ -397,8 +398,31 @@ def parse_grids(raw: Any) -> Mapping[str, Tuple[Entry, ...]]:
     return MappingProxyType(result)
 
 
+def _freeze_effort_spec(spec: Any) -> Any:
+    """Freeze an effort map spec into immutable structures."""
+    if isinstance(spec, (list, tuple, set)):
+        return tuple(str(x).strip().lower() for x in spec if str(x).strip())
+    if isinstance(spec, (dict, Mapping)):
+        acc_raw = spec.get("accepted", ())
+        if isinstance(acc_raw, (list, tuple, set)):
+            acc = tuple(str(x).strip().lower() for x in acc_raw if str(x).strip())
+        else:
+            acc = ()
+        ovr_raw = spec.get("overrides", {})
+        if isinstance(ovr_raw, (dict, Mapping)):
+            ovr = MappingProxyType({
+                str(k).strip().lower(): str(v).strip().lower()
+                for k, v in ovr_raw.items()
+                if str(k).strip() and str(v).strip()
+            })
+        else:
+            ovr = MappingProxyType({})
+        return MappingProxyType({"accepted": acc, "overrides": ovr})
+    return spec
+
+
 def parse_effort_maps(raw: Any) -> Mapping[str, Any]:
-    """Parse per-provider effort maps."""
+    """Parse per-provider effort maps into deep immutable structures."""
     if not isinstance(raw, dict):
         return MappingProxyType({})
     result: Dict[str, Any] = {}
@@ -406,7 +430,15 @@ def parse_effort_maps(raw: Any) -> Mapping[str, Any]:
         provider = str(key or "").strip().lower()
         if not provider:
             continue
-        result[provider] = value
+        if isinstance(value, (dict, Mapping)):
+            provider_map = {
+                str(k).strip().lower(): _freeze_effort_spec(v)
+                for k, v in value.items()
+                if str(k).strip()
+            }
+            result[provider] = MappingProxyType(provider_map)
+        else:
+            result[provider] = MappingProxyType({})
     return MappingProxyType(result)
 
 

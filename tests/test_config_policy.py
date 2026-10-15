@@ -205,6 +205,34 @@ def test_the_settings_snapshot_stays_hashable():
     # Equal snapshots hash equal, different ones need not.
     assert len({settings, Settings()}) == 2
 
+    # Nested effort maps stay hashable and immutable
+    settings_with_effort = settings_for({
+        "effort_maps": {
+            "opencode-go": {
+                "deepseek-v4.1-flash": ["low", "medium"],
+                "kimi-k3": {"accepted": ["low", "high"], "overrides": {"medium": "high"}},
+            }
+        }
+    })
+    assert hash(settings_with_effort) == hash(settings_with_effort)
+    assert len({settings, Settings(), settings_with_effort}) == 3
+    with pytest.raises(TypeError):
+        settings_with_effort.effort_maps["opencode-go"] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        settings_with_effort.effort_maps["opencode-go"]["deepseek-v4.1-flash"] = ()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        settings_with_effort.effort_maps["opencode-go"]["kimi-k3"]["accepted"] = ()  # type: ignore[index]
+
+    # Mutating raw input does not affect parsed settings
+    input_list = ["low", "medium"]
+    input_spec = {"accepted": ["low", "high"], "overrides": {"medium": "high"}}
+    raw_maps = {"opencode-go": {"deepseek-v4.1-flash": input_list, "kimi-k3": input_spec}}
+    settings_copy = settings_for({"effort_maps": raw_maps})
+    input_list.append("high")
+    input_spec["accepted"].append("extra")
+    assert settings_copy.effort_maps["opencode-go"]["deepseek-v4.1-flash"] == ("low", "medium")
+    assert settings_copy.effort_maps["opencode-go"]["kimi-k3"]["accepted"] == ("low", "high")
+
 
 def test_defaults_are_unchanged_when_the_key_is_absent():
     settings = settings_for({})
