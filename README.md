@@ -1,8 +1,9 @@
 # jev-effort-router
 
+> **Fork note:** This fork by [RVerdiF](https://github.com/RVerdiF/jev-effort-router) (upstream: [AlphaPerseii3000/jev-effort-router](https://github.com/AlphaPerseii3000/jev-effort-router), MIT license) adds pluggable decider backends (`jev` via OpenRouter Decisions API or `openai_compatible` via OpenAI chat completions like OpenCode) and selectable routable providers with per-provider grids and effort maps.
+
 **Per-turn model *and* reasoning-effort routing for [Hermes Agent](https://github.com/NousResearch/hermes-agent)** —
-both halves decided by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13), a "System One" decision
-model, not an LLM.
+both halves decided by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) or OpenAI-compatible decision endpoints.
 
 Hermes lets you set a reasoning effort. It does not let you set a *different* one on the next turn — the
 level is a session setting, so a two-line question and a gnarly refactor both pay whichever effort you

@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-15
+
+### Added
+
+- **Pluggable Decider Backends:** Introduces pluggable decider architectures supported by `decider.py`:
+  - `jev` (**default**): Preserves legacy TypeSafe Jev via OpenRouter Decisions API (`https://openrouter.ai/api/alpha/decisions`, model `typesafe/jev-1.13`).
+  - `openai_compatible`: Generic OpenAI-compatible chat completions endpoint (e.g. OpenCode `https://opencode.ai/zen/go/v1` with `deepseek-v4.1-flash`), with strict JSON output parsing and multi-candidate extraction.
+- **Selectable Routable Providers (`routable_providers`):** Replaces hardcoded single-provider gate with a configurable list (default `["ollama-cloud"]`).
+- **Per-Provider Grids and Effort Maps:** Optional `grids` and `effort_maps` configuration allowing distinct model grids and reasoning effort translations for each routable provider.
+- **Per-Decider Confidence Thresholds:** `confidence_threshold_per_decider` mapping allowing fine-tuning thresholds per backend.
+- **Fail-open Effort Guarantees:** Unknown or unmapped providers omit `reasoning_effort` on the wire rather than guessing or escalating.
+- **Audit Records:** Enhanced with `decider` and `latency_ms` fields for every decision.
+
 ## [0.3.0] - 2026-10-11
 
 ### Added

@@ -95,10 +95,7 @@ reasoning and generation in the main model — it only steers.
 
 ## Non-goals
 
-- **Not provider-agnostic.** Ollama:Cloud is the only provider this plugin serves: the grid is six
-  Ollama:Cloud models, the effort table is written for that profile's vocabulary, and the middleware is
-  gated on `provider: ollama-cloud`. Supporting another provider means a new grid, a new effort table and
-  a review of the routing logic — a different feature, not a config change.
+- **Provider-agnostic routing.** Ollama:Cloud is the default provider this plugin serves (`routable_providers: ["ollama-cloud"]`). In the v0.4.0 fork, operators can declare additional providers under `routable_providers`, supplying a custom `grids` and `effort_maps` entry for each. Unconfigured non-Ollama providers omit reasoning effort rather than guessing.
 - Not an evaluation loop. Scoring the quality of the generated answer after the fact is a separate
   decision type and a separate feature.
 - No model or reasoning routing of *auxiliary* calls (titling, compression, MoA, vision, approvals) —
