@@ -103,7 +103,7 @@ def test_per_provider_effort_maps_honoured():
         )
         == "medium"
     )
-    # Override applied: medium -> high
+    # Escalating override medium -> high is rejected; clamps to weaker 'low'
     assert (
         resolve_effort(
             "kimi-k3",
@@ -111,7 +111,7 @@ def test_per_provider_effort_maps_honoured():
             provider="opencode-go",
             effort_maps=effort_maps,
         )
-        == "high"
+        == "low"
     )
     # Unmapped model under provider with effort_map omits effort
     assert (
@@ -123,4 +123,22 @@ def test_per_provider_effort_maps_honoured():
         )
         is None
     )
+
+
+def test_per_provider_effort_maps_never_escalates_and_omits_when_unknown():
+    # Higher floor: accepted has only high
+    # low and medium cannot be fulfilled without escalation -> omit (None)
+    spec_high = ["high"]
+    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": spec_high}}) is None
+    assert resolve_effort("m", "medium", provider="opencode-go", effort_maps={"opencode-go": {"m": spec_high}}) is None
+    assert resolve_effort("m", "high", provider="opencode-go", effort_maps={"opencode-go": {"m": spec_high}}) == "high"
+
+    # Empty or invalid specs omit
+    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": []}}) is None
+    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": {"accepted": []}}}) is None
+    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": None}}) is None
+
+    # Non-escalating override is honored
+    override_deescalate = {"accepted": ["low", "medium"], "overrides": {"high": "medium"}}
+    assert resolve_effort("m", "high", provider="opencode-go", effort_maps={"opencode-go": {"m": override_deescalate}}) == "medium"
 

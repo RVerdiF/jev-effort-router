@@ -122,6 +122,65 @@ def clamp(
     return min(candidates, key=LADDER.index)
 
 
+def _resolve_custom_provider_effort(
+    requested_effort: str,
+    spec: Any,
+) -> Optional[str]:
+    """Resolve effort for a custom provider map without escalation.
+
+    Rules (O2):
+    - Never escalate or invent a level: omit (return None) when no declared accepted
+      level is equal to or weaker than requested.
+    - An empty spec, empty accepted list, or unverified model returns None (omit).
+    - An escalating override (mapping a level to a strictly stronger level) is ignored.
+    - If requested is in accepted: return requested.
+    - If requested is in LADDER: clamp only to the nearest *weaker* accepted level.
+      If no weaker accepted level exists, return None (never escalate to a higher floor).
+    """
+    requested = requested_effort.strip().lower()
+    if not requested:
+        return None
+
+    if isinstance(spec, (list, tuple, set)):
+        accepted_raw = spec
+        overrides = {}
+    elif isinstance(spec, (dict, Mapping)):
+        accepted_raw = spec.get("accepted", ())
+        overrides = spec.get("overrides", {})
+    else:
+        return None
+
+    accepted = [str(item).strip().lower() for item in accepted_raw if str(item).strip().lower() in LADDER]
+    # 'none' disables reasoning outright - never a landing target
+    accepted = [lvl for lvl in accepted if lvl != "none"]
+    if not accepted:
+        return None
+
+    # Check overrides, but reject escalating overrides
+    if overrides and requested in overrides:
+        candidate_ovr = str(overrides[requested]).strip().lower()
+        if candidate_ovr in accepted:
+            if requested in LADDER and candidate_ovr in LADDER:
+                if LADDER.index(candidate_ovr) <= LADDER.index(requested):
+                    return candidate_ovr
+            elif candidate_ovr == requested:
+                return candidate_ovr
+
+    if requested in accepted:
+        return requested
+
+    if requested not in LADDER:
+        return None
+
+    req_idx = LADDER.index(requested)
+    weaker = [lvl for lvl in accepted if LADDER.index(lvl) < req_idx]
+    if weaker:
+        return max(weaker, key=LADDER.index)
+
+    # No level equal or weaker exists -> omit, never escalate!
+    return None
+
+
 def resolve_effort(
     model_id: Optional[str],
     effort: Optional[str],
@@ -153,12 +212,7 @@ def resolve_effort(
                     matched_spec = spec
                     break
             if matched_spec is not None:
-                if isinstance(matched_spec, (list, tuple, set)):
-                    return clamp(effort, tuple(matched_spec))
-                if isinstance(matched_spec, (dict, Mapping)):
-                    acc = matched_spec.get("accepted", ("low", "medium", "high"))
-                    ovr = matched_spec.get("overrides", {})
-                    return clamp(effort, tuple(acc), dict(ovr))
+                return _resolve_custom_provider_effort(effort, matched_spec)
             # If model is not in provider's effort_map, omit
             return None
 
