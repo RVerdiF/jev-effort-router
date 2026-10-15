@@ -452,7 +452,10 @@ class OpenAICompatibleDecider(BaseDecider):
         headers = {
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
+            "User-Agent": "Hermes-Agent/0.21.4 (jev-effort-router)",
         }
+        if "opencode" in url.lower():
+            headers["x-opencode-session"] = f"jev-{int(time.time())}"
 
         started = time.monotonic()
         try:
