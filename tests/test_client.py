@@ -427,3 +427,200 @@ def test_a_snapshot_without_a_policy_grid_emits_the_off_grid_default_verbatim(mo
 
     assert decision.model == "deepseek-v4.1-flash"
     assert decision.model != "kimi-k3"
+
+
+# -- openai_compatible backend tests ------------------------------------------
+
+
+def test_openai_compatible_decider_happy_path(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-opencode-secret-123")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "model": "deepseek-v4.1-flash",
+                            "effort": "high",
+                            "confidence": 0.95,
+                        }
+                    )
+                }
+            }
+        ]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_model": "deepseek-v4.1-flash",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "routable_providers": ["opencode-go"],
+        },
+    )
+    effective = settings.effective(None)
+    decision, reason = client.decide(MESSAGES, effective, provider="opencode-go")
+
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "deepseek-v4.1-flash"
+    assert decision.effort_requested == "high"
+    assert decision.model_confidence == 0.95
+    assert decision.decider == "openai_compatible"
+
+    # Verify wire request
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert call["headers"]["Authorization"] == "Bearer sk-opencode-secret-123"
+    assert call["json"]["model"] == "deepseek-v4.1-flash"
+    assert call["json"]["response_format"] == {"type": "json_object"}
+
+
+def test_openai_compatible_missing_api_key(monkeypatch):
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    transport = StubTransport([])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_NO_API_KEY
+    assert transport.call_count == 0
+
+
+def test_openai_compatible_timeout(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-test")
+    transport = StubTransport([ReadTimeout("timed out")])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_TIMEOUT
+
+
+def test_openai_compatible_upstream_error(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-test")
+    transport = StubTransport([StubResponse(status_code=500, text="Internal Error")])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_UPSTREAM_ERROR
+
+
+def test_openai_compatible_malformed_json_content(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-test")
+    resp_payload = {"choices": [{"message": {"content": "not-valid-json"}}]}
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_MALFORMED
+
+
+def test_openai_compatible_markdown_json_fence_handled(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-test")
+    fenced = "```json\n{\"model\": \"kimi-k3\", \"effort\": \"medium\", \"confidence\": 0.88}\n```"
+    resp_payload = {"choices": [{"message": {"content": fenced}}]}
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "kimi-k3"
+
+
+def test_openai_compatible_off_grid_model_degrades_to_fallback(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-test")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"model": "non-existent-model", "effort": "high", "confidence": 0.99}
+                    )
+                }
+            }
+        ]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "default_model": "deepseek-v4.1-flash",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "deepseek-v4.1-flash"
+    assert REASON_UNKNOWN_CHOICE in decision.fallback_reasons
+
+
+def test_openai_compatible_low_confidence_degrades_to_fallback(monkeypatch):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-test")
+    resp_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {"model": "kimi-k3", "effort": "high", "confidence": 0.2}
+                    )
+                }
+            }
+        ]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "openai_compatible",
+            "decider_base_url": "https://opencode.ai/zen/go/v1",
+            "decider_api_key_env": "OPENCODE_GO_API_KEY",
+            "confidence_threshold": 0.5,
+            "default_model": "deepseek-v4.1-flash",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "deepseek-v4.1-flash"
+    assert REASON_LOW_CONFIDENCE in decision.fallback_reasons
+
