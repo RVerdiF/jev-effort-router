@@ -978,16 +978,16 @@ def test_openai_compatible_replay_preserves_decider_in_turn_and_session(tmp_path
     assert sess_records[1]["replayed"] is True
 
 
-def test_cross_provider_memo_replay_isolation_and_effort_map_guard(tmp_path):
+def test_cross_provider_memo_replay_isolation_and_effort_map_guard(tmp_path, monkeypatch):
     """A decision made for provider-a must not replay an incompatible model or leak effort maps to provider-b."""
-    resp_payload = json.dumps({
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    resp_payload = {
         "choices": [{"message": {"content": json.dumps({
             "model": "only-a",
             "effort": "high",
-            "model_confidence": 0.95,
-            "effort_confidence": 0.95,
+            "confidence": 0.95,
         })}}]
-    })
+    }
     transport = StubTransport([StubResponse(resp_payload)])
     conf = {
         "decider": "openai_compatible",
@@ -999,26 +999,119 @@ def test_cross_provider_memo_replay_isolation_and_effort_map_guard(tmp_path):
             "provider-b": [{"model": "shared"}, {"model": "only-b"}],
         },
         "effort_maps": {
-            "provider-a": {"only-a": {"high": "high"}},
-            "provider-b": {"shared": {}},
+            "provider-a": {"only-a": ["high"]},
+            "provider-b": {"shared": []},
         },
     }
+
+    class _CustomCatalog:
+        def is_known(self, model_id, provider_prefixes=(), *, provider=""):
+            if provider == "provider-a":
+                return model_id in ("shared", "only-a")
+            if provider == "provider-b":
+                return model_id in ("shared", "only-b")
+            return None
+
     router, settings = build(
         tmp_path,
         transport,
         config=conf,
-        catalog_resolver=lambda prov: ["shared", "only-a"] if prov == "provider-a" else ["shared", "only-b"],
+        catalog=_CustomCatalog(),
     )
+    req = {"model": "shared", "messages": [{"role": "user", "content": "hi"}]}
+
     # 1. Provider-a routes to only-a with high effort
-    r1 = route(router, provider="provider-a", body={"model": "shared", "messages": [{"role": "user", "content": "hi"}]}, session_id="s1", turn_id="t1")
+    r1 = route(
+        router,
+        request=dict(req),
+        model="shared",
+        provider="provider-a",
+        session_id="s1",
+        turn_id="t1",
+    )
     assert r1 is not None
-    assert r1["model"] == "only-a"
-    assert r1.get("reasoning_effort") == "high"
+    assert r1["request"]["model"] == "only-a"
+    assert r1["request"].get("reasoning_effort") == "high"
     assert transport.call_count == 1
 
     # 2. Provider-b in same turn: provider mismatch fails open, no leakage of model or effort
-    r2 = route(router, provider="provider-b", body={"model": "shared", "messages": [{"role": "user", "content": "hi"}]}, session_id="s1", turn_id="t1")
+    r2 = route(
+        router,
+        request=dict(req),
+        model="shared",
+        provider="provider-b",
+        session_id="s1",
+        turn_id="t1",
+    )
     assert r2 is None
     assert transport.call_count == 1
 
+
+def test_cross_provider_session_replay_isolation(tmp_path, monkeypatch):
+    """In session mode (route_per_turn=False), a decision made for provider-a must not replay to provider-b."""
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-secret")
+    resp_payload = {
+        "choices": [{"message": {"content": json.dumps({
+            "model": "only-a",
+            "effort": "high",
+            "confidence": 0.95,
+        })}}]
+    }
+    transport = StubTransport([StubResponse(resp_payload)])
+    conf = {
+        "decider": "openai_compatible",
+        "decider_base_url": "https://example.com/v1",
+        "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        "route_per_turn": False,
+        "routable_providers": ["provider-a", "provider-b"],
+        "grids": {
+            "provider-a": [{"model": "only-a"}, {"model": "shared"}],
+            "provider-b": [{"model": "shared"}, {"model": "only-b"}],
+        },
+        "effort_maps": {
+            "provider-a": {"only-a": ["high"]},
+            "provider-b": {"shared": []},
+        },
+    }
+
+    class _CustomCatalog:
+        def is_known(self, model_id, provider_prefixes=(), *, provider=""):
+            if provider == "provider-a":
+                return model_id in ("shared", "only-a")
+            if provider == "provider-b":
+                return model_id in ("shared", "only-b")
+            return None
+
+    router, settings = build(
+        tmp_path,
+        transport,
+        config=conf,
+        catalog=_CustomCatalog(),
+    )
+    req = {"model": "shared", "messages": [{"role": "user", "content": "hi"}]}
+
+    # Turn 1 with provider-a: decides only-a
+    r1 = route(
+        router,
+        request=dict(req),
+        model="shared",
+        provider="provider-a",
+        session_id="s1",
+        turn_id="t1",
+    )
+    assert r1 is not None
+    assert r1["request"]["model"] == "only-a"
+    assert transport.call_count == 1
+
+    # Turn 2 with provider-b in the same session: provider mismatch fails open
+    r2 = route(
+        router,
+        request=dict(req),
+        model="shared",
+        provider="provider-b",
+        session_id="s1",
+        turn_id="t2",
+    )
+    assert r2 is None
+    assert transport.call_count == 1
 

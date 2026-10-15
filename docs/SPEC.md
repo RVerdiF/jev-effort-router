@@ -63,7 +63,7 @@ reasoning and generation in the main model — it only steers.
 
 - **CAP-7** — Routing degrades to "do nothing" on every surface or configuration it does not own, instead
   of perturbing it.
-  - **success:** for each of — non-`ollama-cloud` provider, a model absent from the option grid, and an
+  - **success:** for each of — provider not listed in `routable_providers` (by default non-`ollama-cloud`), a model absent from the option grid, and an
     auxiliary/compression/MoA call — the plugin leaves the payload untouched (no `model` and no
     `reasoning_effort` mutation) and appends a skip entry to the audit file naming the trigger.
 
@@ -75,17 +75,19 @@ reasoning and generation in the main model — it only steers.
 - Routing rides `llm_request` middleware (`hermes_cli/middleware.py`, `hermes.middleware.v1`). That kind
   exists in hermes-agent as installed here (0.21.4); a plugin written against it registers with a warning
   instead of failing on an older Hermes, so the fallback is a no-op, never a crash.
-- The API key is read from `OPENROUTER_API_KEY`; it is never written to `config.yaml`, never logged, and
+- The API key is read from the configured environment variable (`OPENROUTER_API_KEY` for Jev by default, or
+  `decider_api_key_env` such as `OPENCODE_GO_API_KEY` for OpenAI-compatible deciders); it is never written to `config.yaml`, never logged, and
   never included in an audit record.
-- Network failure, HTTP status, or malformed Jev response must never raise into the turn. The middleware
+- Network failure, HTTP status, or malformed Jev/decider response must never raise into the turn. The middleware
   timeout is host-owned (`plugins.hook_callback_timeout`, default 30 s and fail-open), so the plugin
   enforces its own much shorter budget (default 2.0 s) and returns `None` on any error.
-- The chosen model must exist in the Ollama:cloud catalog of the running profile; a model id outside the
+- The chosen model must exist in the active provider's catalog (if a catalog is available); a model id outside the
   configured grid is rejected and treated as low confidence.
 - The option list sent to Jev stays short. A longer Choice list measurably dilutes decision quality, so
   the grid is the six benchmarked models and grows only on evidence.
-- One route per user turn: the decision is taken at the first request of the turn and reused for its
-  remainder, so the system prompt and prompt cache are not disturbed mid-turn.
+- Routing interval: one route per user turn by default (`route_per_turn: true`), where the decision is taken
+  at the first request of the turn and reused for its remainder. When `route_per_turn: false`, routing decisions
+  are taken once per session.
 - Effort levels are translated through a per-family mapping table, never sent as a generic parameter:
   families that reject a level must be clamped or the field omitted (see routing-grid.md).
 - Python standard library only in the hot path; the plugin declares `httpx` as a dependency rather than
@@ -129,10 +131,8 @@ the configured model.
   TypeSafe key is needed.
 - The Jev request/response shapes behave as documented in `jev-decisions-api.md`; the exact wire
   contract was verified against OpenRouter's model page, tutorial, and Decisions API reference.
-- The plugin keys effort translation off the provider profile name `ollama-cloud`; operators using a
-  differently-named profile pointing at `ollama.com` are out of scope for the first release.
-- Ollama:cloud is the only provider the routing grid was benchmarked on, so the plugin is a no-op
-  elsewhere by design rather than by omission.
+- The plugin keys effort translation off the provider profile name `ollama-cloud` by default; in this v0.4.0 fork, operators can declare custom `effort_maps` for each routable provider.
+- Ollama:cloud is the default provider the routing grid was benchmarked on; other providers can be configured via `routable_providers`, `grids`, and `effort_maps`.
 
 ## Open Questions
 
@@ -140,8 +140,7 @@ the configured model.
   or clamped to the nearest weaker level? Current contract: clamp low/medium/high onto the family's
   accepted set, and omit rather than send a level the family would reject.
 - Is a per-turn route on *every* message the right default, or should the plugin expose
-  `route_once_per_session` alongside it? Current contract ships per-turn only; the toggle is deferred
-  until the log shows it is wanted.
+  `route_once_per_session` alongside it? Implemented via `route_per_turn`: defaults to `true` (per turn), and when set to `false` routes once per session.
 - Should the grid's model ids be validated live against `GET https://ollama.com/v1/models` at startup,
   or is config-time validation enough? Current contract: config-time against the grid, with a skip entry
   in the audit file when the live catalog disagrees.

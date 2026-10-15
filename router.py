@@ -189,16 +189,6 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                     return None
 
-                # Catalog guard: provider catalog must have the model
-                if not self._provider_has(memo.model, provider=provider):
-                    logger.warning(
-                        "jev-effort-router: memo model %r is not in catalog for provider %r; leaving turn on configured model",
-                        memo.model,
-                        provider,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_UNKNOWN_MODEL, where, extra={"chosen_model": memo.model})
-                    return None
-
                 # Effort map guard: re-resolve effort against the active provider's map (never leaks unmapped effort)
                 re_effort = resolve_effort(
                     memo.model,

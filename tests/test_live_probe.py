@@ -16,14 +16,31 @@ from config import load_settings
 from decider import OpenAICompatibleDecider
 
 
+LIVE_OPT_IN = os.environ.get("JEV_LIVE_PROBE", "").strip().lower() in ("1", "true", "yes")
 OPENCODE_KEY = os.environ.get("OPENCODE_GO_API_KEY", "").strip()
 BASE_URL = os.environ.get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1").rstrip("/")
 
 
-@pytest.mark.skipif(not OPENCODE_KEY, reason="Live probe opt-in requires OPENCODE_GO_API_KEY")
-def test_live_opencode_decider_call():
+def test_offline_safety_with_fake_key_blocks_network(monkeypatch):
+    """With a fake key present in the environment but without JEV_LIVE_PROBE opt-in, no network is touched."""
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-fictitious-key")
+    monkeypatch.delenv("JEV_LIVE_PROBE", raising=False)
+
+    def _fail_on_network(*args, **kwargs):
+        raise AssertionError("Network call attempted without JEV_LIVE_PROBE opt-in!")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fail_on_network)
+
+    # Verify opt-in condition evaluates to False even when key is present
+    opt_in = os.environ.get("JEV_LIVE_PROBE", "").strip().lower() in ("1", "true", "yes")
+    key_present = bool(os.environ.get("OPENCODE_GO_API_KEY", "").strip())
+    assert not (opt_in and key_present)
+
+
+@pytest.mark.skipif(not (LIVE_OPT_IN and OPENCODE_KEY), reason="Live probe opt-in requires JEV_LIVE_PROBE=1 and OPENCODE_GO_API_KEY")
+def test_live_opencode_decider_call(monkeypatch):
     """Verify that OpenAICompatibleDecider works live against the real endpoint."""
-    os.environ["OPENCODE_GO_API_KEY"] = OPENCODE_KEY
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", OPENCODE_KEY)
     conf = {
         "decider": "openai_compatible",
         "decider_base_url": BASE_URL,
@@ -51,7 +68,7 @@ def test_live_opencode_decider_call():
     assert decision.latency_ms > 0
 
 
-@pytest.mark.skipif(not OPENCODE_KEY, reason="Live probe opt-in requires OPENCODE_GO_API_KEY")
+@pytest.mark.skipif(not (LIVE_OPT_IN and OPENCODE_KEY), reason="Live probe opt-in requires JEV_LIVE_PROBE=1 and OPENCODE_GO_API_KEY")
 @pytest.mark.parametrize("effort_level", [None, "low", "medium", "high"])
 def test_live_opencode_reasoning_effort_support(effort_level):
     """Probe which reasoning_effort levels deepseek-v4.1-flash accepts on OpenCode."""

@@ -8,7 +8,7 @@ how a chosen level lands on each model family's wire.
 The Choice options are exactly these six, in this order. The option string is
 `"<model-id>: <one-line profile>"`; the model id is everything before the first `:`.
 
-Every model id here belongs to the **Ollama:Cloud** provider — this plugin routes nothing else. The
+Every model id in this default grid belongs to the **Ollama:Cloud** provider — by default this plugin routes `ollama-cloud`. When custom providers are configured under `routable_providers`, their corresponding provider-specific grids configured in `grids.<provider>` are used instead. The
 profile text is sent to Jev verbatim, **in English**, and is part of the measured payload, so treat it
 as data rather than documentation: it is not a display string, and rewriting or re-translating it
 changes what Jev is choosing between. The criteria were moved from French to English in this pass; the

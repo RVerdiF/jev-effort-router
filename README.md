@@ -15,11 +15,7 @@ Every other routing entry in the catalog picks a **model** and stops there. The 
 reasoning effort make you move it **by hand** from the status bar. Nothing else decides both
 automatically, per turn.
 
-**Scope: this plugin is for Hermes running on Ollama:Cloud.** Its whole routing grid is six Ollama:Cloud
-models, the per-family effort table is written for Ollama:Cloud's reasoning-effort vocabulary, and the
-middleware routes **only** the `ollama-cloud` provider — every other provider passes through untouched, so
-installing it on another provider changes nothing. You need Hermes on `provider: ollama-cloud`, with that
-provider's catalog reachable, for this plugin to have any effect.
+**Scope and defaults:** By default (preserving v0.3.0 legacy compatibility), this plugin targets Hermes running on `ollama-cloud` with the six benchmarked models and OpenRouter Decisions. In this v0.4.0 fork, operators can configure `routable_providers` allowlists, per-provider grids, custom `effort_maps`, pluggable deciders (such as `openai_compatible` for OpenCode), and session-level routing (`route_per_turn: false`). Any provider not listed in `routable_providers` passes through untouched (fail-open).
 
 Hermes normally runs one model at one reasoning-effort for a whole session. `jev-effort-router` asks Jev —
 on every user turn, in ~270 ms and at $0.042/M input tokens — which of six benchmarked Ollama:cloud models
@@ -88,8 +84,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 Restart the session. That is the whole setup: the six-model grid ships as the default.
 
-Requirements: **Hermes Agent on Ollama:Cloud** (`provider: ollama-cloud` — no other provider is routed),
-with the `llm_request` middleware kind (0.21.4 or newer), Python 3.11+, and prepaid OpenRouter credits.
+Requirements: **Hermes Agent** with the `llm_request` middleware kind (0.21.4 or newer) and Python 3.11+. By default, targets `provider: ollama-cloud` with `OPENROUTER_API_KEY`. When configured for custom providers (`routable_providers`) or alternative backends (such as `decider: openai_compatible` for OpenCode), the corresponding API key (e.g. `OPENCODE_GO_API_KEY`) and endpoint are used instead.
 
 ## Verify it is working
 
