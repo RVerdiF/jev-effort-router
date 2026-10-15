@@ -12,7 +12,7 @@ handler below takes ``args`` first.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .client import JevClient
 from .config import Settings, api_key
@@ -148,11 +148,16 @@ def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPL
 
 def _status(router, settings: Settings, recent: int = 5) -> str:
     records = router.tail(settings, limit=max(1, min(int(recent or 5), 50)))
+    key_env = settings.api_key_env_for(settings.decider)
+    endpoint = settings.base_url if settings.decider == "openai_compatible" else settings.endpoint
+    jev_model = settings.decider_model if settings.decider == "openai_compatible" else settings.jev_model
     payload = {
         "enabled": settings.enabled,
-        "api_key_present": bool(api_key()),
-        "endpoint": settings.endpoint,
-        "jev_model": settings.jev_model,
+        "decider": settings.decider,
+        "routable_providers": list(settings.routable_providers),
+        "api_key_present": bool(api_key(key_env)),
+        "endpoint": endpoint,
+        "jev_model": jev_model,
         "confidence_threshold": settings.confidence_threshold,
         "timeout_s": settings.timeout_s,
         "route_per_turn": settings.route_per_turn,
@@ -196,7 +201,7 @@ def _route(router, settings: Settings, task: str, context: str = "") -> str:
             {
                 "routed": False,
                 "reason": reason,
-                "hint": _hint_for(reason),
+                "hint": _hint_for(reason, settings=settings),
             },
             ensure_ascii=False,
         )
@@ -220,15 +225,16 @@ def _route(router, settings: Settings, task: str, context: str = "") -> str:
     )
 
 
-def _hint_for(reason: Any) -> str:
+def _hint_for(reason: Any, settings: Optional[Settings] = None) -> str:
     from .client import REASON_NO_API_KEY, REASON_TIMEOUT, REASON_UPSTREAM_ERROR
 
     if reason == REASON_NO_API_KEY:
-        return "Set OPENROUTER_API_KEY in the Hermes .env file, then restart the session."
+        key_env = settings.api_key_env_for(settings.decider) if settings else "OPENROUTER_API_KEY"
+        return f"Set {key_env} in the Hermes .env file, then restart the session."
     if reason == REASON_TIMEOUT:
-        return "Jev did not answer inside the configured budget; raise timeout_s or retry."
+        return "Decider did not answer inside the configured budget; raise timeout_s or retry."
     if reason == REASON_UPSTREAM_ERROR:
-        return "The Decisions API returned an error — check credits and network access."
+        return "The decision call returned an error — check credits and network access."
     return "The decision was unusable; the turn would keep the configured model."
 
 

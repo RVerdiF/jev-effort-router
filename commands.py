@@ -38,6 +38,7 @@ def _status_text(router, settings: Settings, recent: int = 5) -> str:
     lines = [
         "jev-effort-router",
         f"  enabled:        {payload['enabled']}",
+        f"  decider:        {payload.get('decider', 'jev')}",
         f"  api key:        {'present' if payload['api_key_present'] else 'MISSING (router is inert)'}",
         f"  jev model:      {payload['jev_model']}",
         f"  endpoint:       {payload['endpoint']}",
@@ -127,7 +128,7 @@ def _route_text(router, settings: Settings, task: str) -> str:
         [{"role": "user", "content": task}], settings.effective(None)
     )
     if decision is None:
-        return f"No route ({reason}). {_hint_for(reason)}"
+        return f"No route ({reason}). {_hint_for(reason, settings=settings)}"
     lines = [
         f"model:  {decision.model}",
         f"effort: {decision.effort}  (requested {decision.effort_requested})",

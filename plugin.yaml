@@ -1,21 +1,12 @@
 name: jev-effort-router
-version: 0.3.0
+version: 0.4.0
 manifest_version: 2
 api_version: 1
-description: Route each user turn to the best Ollama:Cloud model and reasoning effort via TypeSafe Jev's decision endpoint. Ollama:Cloud only — no other provider is routed.
-author: AlphaPerseii3000
+description: Route user turns to the best model and reasoning effort via pluggable deciders (TypeSafe Jev or OpenAI-compatible).
+author: AlphaPerseii3000 (forked by RVerdiF)
 license: MIT
-homepage: https://github.com/AlphaPerseii3000/jev-effort-router
-tags: [routing, models, reasoning, ollama-cloud, decisions]
-# ``provides_middleware`` is not in the host's ``_KNOWN_MANIFEST_FIELDS``, so declaring it emits an
-# "unknown manifest field(s) ignored" warning on every load. It is declared anyway, deliberately:
-# ``hermes plugins validate`` diffs the manifest against what ``register(ctx)`` actually wires and
-# FAILS an entry whose middleware is undeclared ("undeclared middleware registered (not in
-# provides_middleware): llm_request"). That failure is the plugin-catalog admission gate, so an
-# undeclared middleware means no catalog entry. A benign load-time warning is the cheaper of the two
-# evils. The middleware itself stays wired in code — ``ctx.register_middleware("llm_request", ...)``
-# in __init__.py. If upstream ever adds the key to the manifest schema, the warning disappears and
-# nothing here needs to change.
+homepage: https://github.com/RVerdiF/jev-effort-router
+tags: [routing, models, reasoning, ollama-cloud, decisions, opencode]
 provides_middleware:
   - llm_request
 provides_hooks:
@@ -24,11 +15,6 @@ provides_hooks:
 provides_tools:
   - jev_effort_router_status
   - jev_effort_router_route
-requires_env:
-  - name: OPENROUTER_API_KEY
-    description: OpenRouter API key - Jev is reached through OpenRouter's Decisions API.
-    url: https://openrouter.ai/settings/keys
-    secret: true
 config_schema:
   enabled:
     type: bool
@@ -39,7 +25,7 @@ config_schema:
     type: str
     default: typesafe/jev-1.13
     label: Jev model
-    description: Decision model id. Use typesafe/jev-latest to follow the newest Jev release.
+    description: Decision model id for the Jev backend. Use typesafe/jev-latest to follow the newest Jev release.
   confidence_threshold:
     type: float
     default: 0.5
@@ -48,7 +34,7 @@ config_schema:
   timeout_s:
     type: float
     default: 2.0
-    label: Jev timeout (seconds)
+    label: Decider timeout (seconds)
     description: Budget for the decision call. Any timeout leaves the request untouched.
   default_model:
     type: str
@@ -64,7 +50,7 @@ config_schema:
     type: int
     default: 4
     label: Context turns
-    description: How many preceding conversation turns are sent to Jev as recent context.
+    description: How many preceding conversation turns are sent to the decider as recent context.
   route_per_turn:
     type: bool
     default: true
@@ -94,4 +80,45 @@ config_schema:
     type: dict
     default: null
     label: Per-surface routing policy
-    description: 'Optional map of platform (cron, telegram, cli, ...) to the settings it overrides, in precedence order enabled, grid, confidence_threshold, max_effort. Absent, null or an unlisted platform reproduces the global settings exactly; enabled: false leaves that surface''s turns untouched.'
+    description: 'Optional map of platform (cron, telegram, cli, ...) to the settings it overrides.'
+  decider:
+    type: str
+    default: jev
+    choices: [jev, openai_compatible]
+    label: Decider backend
+    description: Pluggable decider backend ('jev' or 'openai_compatible').
+  decider_base_url:
+    type: str
+    default: ""
+    label: Decider base URL
+    description: Base URL for openai_compatible decider (e.g. https://opencode.ai/zen/go/v1).
+  decider_model:
+    type: str
+    default: ""
+    label: Decider model
+    description: Model for openai_compatible decider (e.g. deepseek-v4.1-flash).
+  decider_api_key_env:
+    type: str
+    default: ""
+    label: Decider API key env var
+    description: Env var name holding API key for openai_compatible decider.
+  routable_providers:
+    type: list
+    default: [ollama-cloud]
+    label: Routable providers
+    description: List of provider ids the router is permitted to route.
+  grids:
+    type: dict
+    default: null
+    label: Per-provider routing grids
+    description: Optional map of provider id to model grid.
+  effort_maps:
+    type: dict
+    default: null
+    label: Per-provider effort maps
+    description: Optional map of provider id to effort mapping.
+  confidence_threshold_per_decider:
+    type: dict
+    default: null
+    label: Confidence threshold per decider
+    description: Optional map of decider backend to confidence threshold.
