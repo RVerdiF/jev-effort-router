@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from grid import DEFAULT_GRID, Entry, criteria, parse_entry, parse_grid, resolve
+from grid import (
+    DEFAULT_GRID,
+    Entry,
+    criteria,
+    grid_for_provider,
+    parse_entry,
+    parse_grid,
+    parse_grid_strict,
+    resolve,
+)
 
 
 def test_default_grid_is_the_six_benchmarked_models():
@@ -86,3 +95,26 @@ def test_parse_grid_honours_an_override_and_dedupes():
 def test_parse_grid_accepts_a_multiline_string():
     grid = parse_grid("alpha: first\nbeta: second")
     assert [entry.model_id for entry in grid] == ["alpha", "beta"]
+
+
+def test_parse_grid_strict():
+    assert parse_grid_strict(["m1: desc1", "m2: desc2"]) == (
+        Entry("m1", "desc1"),
+        Entry("m2", "desc2"),
+    )
+    assert parse_grid_strict(["   "]) is None
+    assert parse_grid_strict(None) is None
+    # Model ids without alphanumeric characters are dropped
+    assert parse_grid_strict(["???"]) is None
+    assert parse_grid_strict(["??? : desc"]) is None
+
+
+def test_grid_for_provider():
+    grids = {
+        "opencode-go": ["deepseek-v4.1-flash: fast", "kimi-k3: code"],
+    }
+    custom = grid_for_provider("opencode-go", grids)
+    assert [e.model_id for e in custom] == ["deepseek-v4.1-flash", "kimi-k3"]
+    # Fallback when provider not in grids
+    assert grid_for_provider("unknown", grids, fallback=DEFAULT_GRID) == DEFAULT_GRID
+

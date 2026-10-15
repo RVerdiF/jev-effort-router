@@ -19,7 +19,7 @@ now cross-checks the grid against the provider's own model list before a decisio
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -149,6 +149,23 @@ def parse_grid_strict(raw: Any) -> Optional[Tuple[Entry, ...]]:
     """
     parsed = [entry for entry in _parse_entries(raw) if _looks_like_model_id(entry.model_id)]
     return tuple(parsed) if parsed else None
+
+
+def grid_for_provider(
+    provider: str = "",
+    grids: Optional[Mapping[str, Any]] = None,
+    fallback: Tuple[Entry, ...] = DEFAULT_GRID,
+) -> Tuple[Entry, ...]:
+    """The grid configured for ``provider``, or ``fallback`` when unlisted."""
+    if not grids:
+        return fallback
+    key = str(provider or "").strip().lower()
+    if key in grids:
+        val = grids[key]
+        if isinstance(val, tuple) and all(isinstance(e, Entry) for e in val):
+            return val
+        return parse_grid(val, fallback=fallback)
+    return fallback
 
 
 def criteria(grid: Sequence[Entry]) -> dict:
