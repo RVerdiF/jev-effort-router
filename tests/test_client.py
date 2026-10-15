@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from client import (
@@ -54,6 +57,25 @@ def test_payload_matches_the_documented_shape(monkeypatch):
     assert questions["model_route"]["criteria"]["1"].startswith("deepseek-v4.1-flash: ")
     assert questions["reasoning_effort"]["type"] == "choice"
     assert set(questions["reasoning_effort"]["criteria"]) == {"low", "medium", "high"}
+
+
+def test_default_jev_payload_is_frozen(monkeypatch):
+    """The legacy Jev request body must not drift when the decider becomes pluggable."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    transport = StubTransport([StubResponse(decision_payload())])
+    client, settings = make(transport)
+
+    client.decide(MESSAGES, settings.effective(None), platform="cli", provider="ollama-cloud")
+
+    canonical = json.dumps(
+        transport.last_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == (
+        "f6e505a715f828b0c4c7be839c0d08e8e5af38b8ff8b76d5e66e688d7f28884b"
+    )
 
 
 def test_payload_is_stated_in_one_language(monkeypatch):
