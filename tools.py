@@ -32,7 +32,11 @@ STATUS_SCHEMA = {
             "recent": {
                 "type": "integer",
                 "description": "How many recent routing records to include (default 5, max 50).",
-            }
+            },
+            "provider": {
+                "type": "string",
+                "description": "Optional provider whose grid and routing status to inspect.",
+            },
         },
     },
 }
@@ -56,23 +60,35 @@ ROUTE_SCHEMA = {
                 "type": "string",
                 "description": "Optional recent context to help the decision.",
             },
+            "provider": {
+                "type": "string",
+                "description": "Optional provider to route for (default: first routable provider).",
+            },
         },
         "required": ["task"],
     },
 }
 
 
-def _grid_unavailable(router, settings: Settings) -> list:
-    """Whatever the router's catalog knows about the grid, or an empty list.
+def _grid_unavailable(router, settings: Settings, provider: Optional[str] = None) -> list:
+    """Grid models the provider catalog says it does not have.
 
-    A router double without the hook is not a failure: the status view has to work against any
-    router object, and "no report" is the same answer as "no evidence".
+    A model listed here will be refused if chosen by Jev, falling back to the configured model
+    instead of sending an unusable request upstream.
     """
     report = getattr(router, "grid_report", None)
     if not callable(report):
         return []
     try:
-        return [row["model"] for row in report(settings) if not row.get("available")]
+        target_provider = (
+            provider
+            if provider is not None
+            else (settings.routable_providers[0] if settings.routable_providers else "")
+        )
+        raw = report(settings, provider=target_provider)
+        if isinstance(raw, list):
+            return [row["model"] for row in raw if isinstance(row, dict) and not row.get("available")]
+        return []
     except Exception:  # noqa: BLE001 - an observability surface never raises
         return []
 
@@ -82,7 +98,7 @@ def _grid_unavailable(router, settings: Settings) -> list:
 GRID_COVERAGE_SAMPLE = 200
 
 
-def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPLE) -> dict:
+def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPLE, provider: Optional[str] = None) -> dict:
     """Which grid entries are actually being chosen, and which never survive the threshold.
 
     A model that is never routed on is invisible from a single turn: the failure mode that kept
@@ -108,8 +124,15 @@ def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPL
     if not counted:
         return {}
 
+    target_provider = (
+        provider
+        if provider is not None
+        else (settings.routable_providers[0] if settings.routable_providers else "")
+    )
+    active_grid = settings.grid_for(target_provider)
+
     # The probabilities are keyed by position ("1".."6"), so the grid gives the mapping back.
-    by_position = {str(i): entry.model_id for i, entry in enumerate(settings.grid, start=1)}
+    by_position = {str(i): entry.model_id for i, entry in enumerate(active_grid, start=1)}
 
     applied: Dict[str, int] = {}
     below: Dict[str, int] = {}
@@ -136,7 +159,7 @@ def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPL
     }
     never = [
         entry.model_id
-        for entry in settings.grid
+        for entry in active_grid
         if entry.model_id not in applied and entry.model_id not in below
     ]
     if never:
@@ -146,11 +169,18 @@ def _grid_coverage(router, settings: Settings, sample: int = GRID_COVERAGE_SAMPL
     return report
 
 
-def _status(router, settings: Settings, recent: int = 5) -> str:
+def _status(router, settings: Settings, recent: int = 5, provider: Optional[str] = None) -> str:
     records = router.tail(settings, limit=max(1, min(int(recent or 5), 50)))
     key_env = settings.api_key_env_for(settings.decider)
-    endpoint = settings.base_url if settings.decider == "openai_compatible" else settings.endpoint
-    jev_model = settings.decider_model if settings.decider == "openai_compatible" else settings.jev_model
+    endpoint = settings.base_url_for(settings.decider)
+    jev_model = settings.decider_model_for(settings.decider)
+    confidence_threshold = settings.confidence_threshold_for(settings.decider)
+    target_provider = (
+        provider
+        if provider is not None
+        else (settings.routable_providers[0] if settings.routable_providers else "")
+    )
+    active_grid = settings.grid_for(target_provider)
     payload = {
         "enabled": settings.enabled,
         "decider": settings.decider,
@@ -158,12 +188,12 @@ def _status(router, settings: Settings, recent: int = 5) -> str:
         "api_key_present": bool(api_key(key_env)),
         "endpoint": endpoint,
         "jev_model": jev_model,
-        "confidence_threshold": settings.confidence_threshold,
+        "confidence_threshold": confidence_threshold,
         "timeout_s": settings.timeout_s,
         "route_per_turn": settings.route_per_turn,
         "fallback": {"model": settings.default_model, "effort": settings.default_effort},
         "grid": [
-            {"model": entry.model_id, "profile": entry.description} for entry in settings.grid
+            {"model": entry.model_id, "profile": entry.description} for entry in active_grid
         ],
         "audit": {
             "enabled": settings.audit_enabled,
@@ -171,18 +201,29 @@ def _status(router, settings: Settings, recent: int = 5) -> str:
         },
         "recent": records,
     }
-    coverage = _grid_coverage(router, settings)
+    if settings.grids:
+        payload["grids"] = {
+            p: [{"model": entry.model_id, "profile": entry.description} for entry in g]
+            for p, g in settings.grids.items()
+        }
+    coverage = _grid_coverage(router, settings, provider=target_provider)
     if coverage:
         payload["grid_coverage"] = coverage
     # Only present when the provider catalog could actually be read: an empty list is omitted
     # rather than reported as "every model is missing".
-    unavailable = _grid_unavailable(router, settings)
+    unavailable = _grid_unavailable(router, settings, provider=target_provider)
     if unavailable:
         payload["grid_unavailable"] = unavailable
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _route(router, settings: Settings, task: str, context: str = "") -> str:
+def _route(
+    router,
+    settings: Settings,
+    task: str,
+    context: str = "",
+    provider: Optional[str] = None,
+) -> str:
     if not str(task or "").strip():
         return json.dumps({"error": "task must not be empty"})
     messages = [{"role": "user", "content": str(task)}]
@@ -193,8 +234,14 @@ def _route(router, settings: Settings, task: str, context: str = "") -> str:
             {"role": "user", "content": str(task)},
         ]
 
+    target_provider = (
+        provider
+        if provider is not None
+        else (settings.routable_providers[0] if settings.routable_providers else "")
+    )
+    effective = settings.effective(None, provider=target_provider)
     decision, reason = router.client(settings).decide(
-        messages, settings.effective(None)
+        messages, effective, provider=target_provider
     )
     if decision is None:
         return json.dumps(
@@ -256,7 +303,12 @@ def build_tool_registrations(
         return getattr(args, key, default) if args is not None else default
 
     def status_handler(args: Any = None, **_: Any) -> str:
-        return _status(router, get_settings(), recent=_arg(args, "recent", 5))
+        return _status(
+            router,
+            get_settings(),
+            recent=_arg(args, "recent", 5),
+            provider=_arg(args, "provider", None),
+        )
 
     def route_handler(args: Any = None, **_: Any) -> str:
         return _route(
@@ -264,6 +316,7 @@ def build_tool_registrations(
             get_settings(),
             task=_arg(args, "task", ""),
             context=_arg(args, "context", ""),
+            provider=_arg(args, "provider", None),
         )
 
     return [(STATUS_SCHEMA, status_handler), (ROUTE_SCHEMA, route_handler)]

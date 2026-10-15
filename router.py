@@ -12,7 +12,7 @@ The contract is narrow on purpose:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .audit import AuditLog
 from .catalog import ModelCatalog
@@ -381,16 +381,21 @@ class Router:
     def count(self, settings: Settings) -> int:
         return self.audit(settings).count()
 
-    def grid_report(self, settings: Settings) -> List[Dict[str, Any]]:
+    def grid_report(self, settings: Settings, provider: Optional[str] = None) -> List[Dict[str, Any]]:
         """The grid annotated with what the provider catalog says about each entry.
 
         Empty when there is no catalog evidence, so a caller can tell "nothing to report" from
         "every entry is fine".
         """
+        target_provider = (
+            provider
+            if provider is not None
+            else (settings.routable_providers[0] if settings.routable_providers else "")
+        )
         report: List[Dict[str, Any]] = []
-        for entry in settings.grid:
+        for entry in settings.grid_for(target_provider):
             try:
-                known = self._catalog.is_known(entry.model_id)
+                known = self._catalog.is_known(entry.model_id, provider=target_provider)
             except Exception:  # noqa: BLE001 - a status view never raises
                 known = None
             if known is None:

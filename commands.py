@@ -23,18 +23,29 @@ USAGE = (
 SLASH_NAME = "jev-effort-router"
 
 
-def _grid_text(settings: Settings) -> str:
-    lines = [f"Grid ({len(settings.grid)} models):"]
-    for index, entry in enumerate(settings.grid, start=1):
+def _grid_text(settings: Settings, provider: Optional[str] = None) -> str:
+    target_provider = (
+        provider
+        if provider is not None
+        else (settings.routable_providers[0] if settings.routable_providers else "")
+    )
+    grid = settings.grid_for(target_provider)
+    lines = [f"Grid ({len(grid)} models):"]
+    for index, entry in enumerate(grid, start=1):
         default = " (fallback)" if entry.model_id == settings.default_model else ""
         lines.append(f"  {index}. {entry.model_id}{default}")
         lines.append(f"     {entry.description}")
     return "\n".join(lines)
 
 
-def _status_text(router, settings: Settings, recent: int = 5) -> str:
+def _status_text(router, settings: Settings, recent: int = 5, provider: Optional[str] = None) -> str:
     """Plain-text status, for a shell or a chat reply."""
-    payload = json.loads(_status(router, settings, recent=recent))
+    target_provider = (
+        provider
+        if provider is not None
+        else (settings.routable_providers[0] if settings.routable_providers else "")
+    )
+    payload = json.loads(_status(router, settings, recent=recent, provider=target_provider))
     lines = [
         "jev-effort-router",
         f"  enabled:        {payload['enabled']}",
@@ -48,7 +59,7 @@ def _status_text(router, settings: Settings, recent: int = 5) -> str:
         f"  fallback:       {payload['fallback']['model']} / {payload['fallback']['effort']}",
         f"  audit records:  {payload['audit']['records']} (enabled: {payload['audit']['enabled']})",
         "",
-        _grid_text(settings),
+        _grid_text(settings, provider=target_provider),
     ]
     if payload.get("grid_unavailable"):
         lines.append(
@@ -123,9 +134,15 @@ def _coverage_text(coverage: dict) -> list:
     return lines
 
 
-def _route_text(router, settings: Settings, task: str) -> str:
+def _route_text(router, settings: Settings, task: str, provider: Optional[str] = None) -> str:
+    target_provider = (
+        provider
+        if provider is not None
+        else (settings.routable_providers[0] if settings.routable_providers else "")
+    )
+    effective = settings.effective(None, provider=target_provider)
     decision, reason = router.client(settings).decide(
-        [{"role": "user", "content": task}], settings.effective(None)
+        [{"role": "user", "content": task}], effective, provider=target_provider
     )
     if decision is None:
         return f"No route ({reason}). {_hint_for(reason, settings=settings)}"
@@ -149,19 +166,20 @@ def _route_text(router, settings: Settings, task: str) -> str:
 def _handle(router, get_settings, args) -> int:
     settings = get_settings()
     sub = getattr(args, "jev_effort_router_command", None) or "status"
+    provider = getattr(args, "provider", None)
 
     if sub == "status":
-        print(_status_text(router, settings))
+        print(_status_text(router, settings, provider=provider))
         return 0
     if sub == "grid":
-        print(_grid_text(settings))
+        print(_grid_text(settings, provider=provider))
         return 0
     if sub == "route":
         task = " ".join(getattr(args, "task", []) or []).strip()
         if not task:
             print(USAGE, file=sys.stderr)
             return 2
-        text = _route_text(router, settings, task)
+        text = _route_text(router, settings, task, provider=provider)
         print(text)
         return 0 if text.startswith("model:") else 1
     if sub == "tail":
@@ -181,10 +199,13 @@ def _handle(router, get_settings, args) -> int:
 def setup_argparse(subparser: Any) -> None:
     """Build the ``hermes jev-effort-router`` argparse tree."""
     sub = subparser.add_subparsers(dest="jev_effort_router_command")
-    sub.add_parser("status", help="Show routing state, grid and recent decisions")
+    status = sub.add_parser("status", help="Show routing state, grid and recent decisions")
+    status.add_argument("--provider", default=None, help="Provider whose grid and status to inspect")
     route = sub.add_parser("route", help="Ask Jev what it would pick for a task")
     route.add_argument("task", nargs="*", help="Task description to route")
-    sub.add_parser("grid", help="List the models Jev may choose between")
+    route.add_argument("--provider", default=None, help="Provider to route for")
+    grid = sub.add_parser("grid", help="List the models Jev may choose between")
+    grid.add_argument("--provider", default=None, help="Provider whose grid to list")
     tail = sub.add_parser("tail", help="Print the last audit records as JSON")
     tail.add_argument("count", nargs="?", type=int, default=10, help="How many records (default 10)")
     sub.add_parser("reset", help="Drop memoized decisions")
@@ -218,9 +239,11 @@ def register_commands(ctx: Any, router, get_settings: Callable[[], Settings]) ->
             tokens = (raw_args or "").split()
             action = tokens[0].lower() if tokens else "status"
             if action == "status":
-                return _status_text(router, get_settings())
+                provider = tokens[1] if len(tokens) > 1 else None
+                return _status_text(router, get_settings(), provider=provider)
             if action == "grid":
-                return _grid_text(get_settings())
+                provider = tokens[1] if len(tokens) > 1 else None
+                return _grid_text(get_settings(), provider=provider)
             if action == "route":
                 task = " ".join(tokens[1:]).strip()
                 if not task:

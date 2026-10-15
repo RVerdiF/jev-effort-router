@@ -338,6 +338,62 @@ def test_cli_tail_prints_json_records(plugin, tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out.strip() == ""
 
 
+def test_status_and_route_tools_and_commands_support_provider(plugin, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    config = {
+        "routable_providers": ["opencode-go"],
+        "grids": {
+            "opencode-go": [
+                {"model": "deepseek-v4.1-flash", "profile": "Fast generalist"},
+                {"model": "kimi-k3", "profile": "High reasoning"},
+            ]
+        },
+    }
+    ctx = StubContext(config=config, state=StubState(tmp_path))
+    plugin.register(ctx)
+
+    from client import JevClient
+    from stubs import StubResponse, StubTransport, decision_payload
+
+    transport = StubTransport([StubResponse(decision_payload("2", 0.9, "high", 0.9))])
+    router = ctx.middleware["llm_request"].__self__
+    router.client = lambda settings: JevClient(settings, transport=transport)
+
+    # 1. status tool with provider
+    status_payload = json.loads(
+        _dispatch_like_the_host(ctx.tools["jev_effort_router_status"]["handler"], {"provider": "opencode-go"})
+    )
+    assert len(status_payload["grid"]) == 2
+    assert status_payload["grid"][0]["model"] == "deepseek-v4.1-flash"
+
+    # 2. route tool with provider
+    route_payload = json.loads(
+        _dispatch_like_the_host(
+            ctx.tools["jev_effort_router_route"]["handler"],
+            {"task": "solve math problem", "provider": "opencode-go"},
+        )
+    )
+    assert route_payload["routed"] is True
+    assert route_payload["model"] == "kimi-k3"
+
+    # 3. CLI grid with provider
+    cli_handler = ctx.cli_commands["jev-effort-router"]["handler_fn"]
+    assert cli_handler(Args(jev_effort_router_command="grid", provider="opencode-go")) == 0
+    out = capsys.readouterr().out
+    assert "deepseek-v4.1-flash" in out
+    assert "Grid (2 models):" in out
+
+    # 4. CLI status with provider
+    assert cli_handler(Args(jev_effort_router_command="status", provider="opencode-go")) == 0
+    out_status = capsys.readouterr().out
+    assert "deepseek-v4.1-flash" in out_status
+
+    # 5. Slash command grid with provider
+    slash_handler = ctx.slash_commands["jev-effort-router"]["handler"]
+    assert "deepseek-v4.1-flash" in slash_handler("grid opencode-go")
+    assert "deepseek-v4.1-flash" in slash_handler("status opencode-go")
+
+
 # -- ctx/state stubs ---------------------------------------------------------------
 
 
