@@ -13,7 +13,7 @@ reference implementation of the clamping rule ("nearest weaker level, never stro
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 #: Hermes' ladder, low to high. Used only for nearest-weaker arithmetic.
 LADDER: Tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
@@ -51,8 +51,14 @@ FAMILIES: Tuple[Family, ...] = (
     Family("nemotron", OLLAMA_CLOUD.accepted, dict(OLLAMA_CLOUD.overrides)),
 )
 
+#: Table of default families by provider
+PROVIDER_FAMILIES: Dict[str, Tuple[Family, ...]] = {
+    "ollama-cloud": FAMILIES,
+    "ollama_cloud": FAMILIES,
+}
 
-def family_for(model_id: Optional[str]) -> Family:
+
+def family_for(model_id: Optional[str], provider: str = "") -> Family:
     """Pick the family contract for a model id.
 
     Matching is a substring test on the bare slug, so ``kimi-k3``, ``kimi-k3-256k`` and a
@@ -116,13 +122,62 @@ def clamp(
     return min(candidates, key=LADDER.index)
 
 
-def resolve_effort(model_id: Optional[str], effort: Optional[str]) -> Optional[str]:
-    """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field."""
-    family = family_for(model_id)
+def resolve_effort(
+    model_id: Optional[str],
+    effort: Optional[str],
+    *,
+    provider: str = "",
+    effort_maps: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field.
+
+    When ``effort_maps`` specifies a map for ``provider``, it takes precedence.
+    For unmapped non-Ollama providers (like opencode-go), reasoning effort is unverified
+    and defaults to None (omitted on wire, never escalated).
+    """
+    if not effort:
+        return None
+
+    provider_key = (provider or "").strip().lower()
+
+    # Check per-provider custom effort_maps if present
+    if effort_maps and provider_key in effort_maps:
+        pmap = effort_maps[provider_key]
+        if isinstance(pmap, (dict, Mapping)):
+            model_key = (model_id or "").strip().lower().rsplit("/", 1)[-1]
+            # Look for exact match or slug match
+            matched_spec = None
+            for k, spec in pmap.items():
+                cand = str(k).strip().lower()
+                if cand == model_key or cand == (model_id or "").strip().lower() or cand in model_key:
+                    matched_spec = spec
+                    break
+            if matched_spec is not None:
+                if isinstance(matched_spec, (list, tuple, set)):
+                    return clamp(effort, tuple(matched_spec))
+                if isinstance(matched_spec, (dict, Mapping)):
+                    acc = matched_spec.get("accepted", ("low", "medium", "high"))
+                    ovr = matched_spec.get("overrides", {})
+                    return clamp(effort, tuple(acc), dict(ovr))
+            # If model is not in provider's effort_map, omit
+            return None
+
+    # For providers other than ollama-cloud, if no effort map is declared, default is omit
+    if provider_key and provider_key not in ("ollama-cloud", "ollama_cloud"):
+        return None
+
+    # Default built-in Ollama:cloud families
+    family = family_for(model_id, provider=provider_key)
     clamped = clamp(effort, family.accepted, family.overrides)
     return clamped
 
 
-def is_omitted(model_id: Optional[str], effort: Optional[str]) -> bool:
+def is_omitted(
+    model_id: Optional[str],
+    effort: Optional[str],
+    *,
+    provider: str = "",
+    effort_maps: Optional[Mapping[str, Any]] = None,
+) -> bool:
     """True when the request would go out without a reasoning-effort field."""
-    return resolve_effort(model_id, effort) is None
+    return resolve_effort(model_id, effort, provider=provider, effort_maps=effort_maps) is None

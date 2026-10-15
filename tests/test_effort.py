@@ -78,3 +78,49 @@ def test_empty_effort_means_omit():
     assert resolve_effort("deepseek-v4.1-flash", "") is None
     assert is_omitted("deepseek-v4.1-flash", "")
     assert not is_omitted("deepseek-v4.1-flash", "medium")
+
+
+def test_non_ollama_provider_defaults_to_omitting_effort():
+    # For unmapped providers (like opencode-go), effort is omitted (never escalated or guessed)
+    assert resolve_effort("deepseek-v4.1-flash", "medium", provider="opencode-go") is None
+    assert is_omitted("deepseek-v4.1-flash", "medium", provider="opencode-go")
+
+
+def test_per_provider_effort_maps_honoured():
+    effort_maps = {
+        "opencode-go": {
+            "deepseek-v4.1-flash": ["low", "medium"],
+            "kimi-k3": {"accepted": ["low", "high"], "overrides": {"medium": "high"}},
+        }
+    }
+    # Clamping without escalation: high clamped to medium
+    assert (
+        resolve_effort(
+            "deepseek-v4.1-flash",
+            "high",
+            provider="opencode-go",
+            effort_maps=effort_maps,
+        )
+        == "medium"
+    )
+    # Override applied: medium -> high
+    assert (
+        resolve_effort(
+            "kimi-k3",
+            "medium",
+            provider="opencode-go",
+            effort_maps=effort_maps,
+        )
+        == "high"
+    )
+    # Unmapped model under provider with effort_map omits effort
+    assert (
+        resolve_effort(
+            "unknown-model",
+            "medium",
+            provider="opencode-go",
+            effort_maps=effort_maps,
+        )
+        is None
+    )
+
