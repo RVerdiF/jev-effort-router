@@ -217,7 +217,7 @@ Isso sustenta rigorosamente a declaração de `docs/routing-grid.md:102-104` e a
 ## 6. Implementação OpenCode Console Jev & Catálogo de 2 Modelos (`t_6ec7a94d`)
 
 ### 6.1 Resumo Normativo e Decisões de Escopo
-- **Gate do Dono Atendido**: O dono do produto definiu formalmente em comentário no card a escolha do ID padrão `mimo-v2.6-flash` (não-free), rejeitando a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. O Jev atua como decider na camada OpenCode Console com suporte a modelo primário (`console_jev_model`) e fallback (`console_jev_fallback_model`), ambos configuráveis.
+- **Diretiva do Dono & Status Operacional do MiMo**: O dono do produto definiu formalmente em comentário no card a escolha do ID padrão `mimo-v2.6-flash` (não-free), rejeitando estritamente a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. Contudo, a consulta pública à API oficial (`GET https://opencode.ai/inference/v1/models`) confirma `mimo-v2.6-flash-free`, `jev-1.13-free`, `jev-1.13` e `deepseek-v4.1-flash`, mas não lista `mimo-v2.6-flash`. Em conformidade estrita com o gate, a variante free nunca é substituída. Estruturalmente, o código, catálogo e allowlist suportam `mimo-v2.6-flash` e `deepseek-v4.1-flash` conforme especificado; no entanto, a ausência de confirmação pública oficial para o ID não-free é expressamente registrada como bloqueio operacional, sem alegar dois modelos operacionais em produção live.
 - **Isolamento Estrito**: O provedor `opencode-console` (e alias `opencode_console`) opera com grade própria (`OPENCODE_CONSOLE_GRID`) e allowlist restrita aos dois modelos autorizados (`deepseek-v4.1-flash`, `mimo-v2.6-flash`). Modelos fora da allowlist falham aberto.
 - **Política Explícita de Reasoning por Modelo**: Distingue explicitamente (1) o nível de esforço lógico que o Jev decide/devolve (`effort_requested`) e (2) o parâmetro de reasoning no endpoint de geração (`effort`). Sem evidência ou documentação empírica confirmando suporte no endpoint de geração do `opencode-console`, o parâmetro de reasoning é estritamente omitido do wire para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, sem inferir suporte a partir de OpenCode Go ou Ollama, e sem alegar que o modelo de geração downstream recebeu o reasoning escolhido.
 - **Operação Estritamente Offline**: Nenhuma chamada paga ou de rede foi realizada; nenhum perfil real foi modificado (conforme o gate do card, instalação e chamadas de rede exigem autorização operacional separada).
@@ -236,39 +236,50 @@ platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/rafael/hermes/workspaces/jev-effort-router/.worktrees/t_6ec7a94d
 configfile: pyproject.toml
 plugins: anyio-4.15.1
-collected 204 items
+collected 218 items
 
 tests/test_audit.py ...........                                          [  5%]
-tests/test_catalog.py ..................                                 [ 14%]
-tests/test_catalog_status.py ....                                        [ 16%]
-tests/test_client.py ..........................................          [ 36%]
-tests/test_config_policy.py ............................                 [ 50%]
-tests/test_effort.py .................                                   [ 58%]
-tests/test_grid.py ............                                          [ 64%]
-tests/test_grid_coverage.py ....                                         [ 66%]
-tests/test_live_probe.py .sssss                                          [ 69%]
+tests/test_catalog.py ..................                                 [ 13%]
+tests/test_catalog_status.py ....                                        [ 15%]
+tests/test_client.py ................................................... [ 38%]
+.                                                                        [ 38%]
+tests/test_config_policy.py .............................                [ 52%]
+tests/test_effort.py .................                                   [ 60%]
+tests/test_grid.py ............                                          [ 65%]
+tests/test_grid_coverage.py ....                                         [ 67%]
+tests/test_live_probe.py .sssss                                          [ 70%]
 tests/test_registration.py .ss..s.............                           [ 78%]
-tests/test_router.py ...........................................         [100%]
+tests/test_router.py ..............................................      [100%]
 
-======================== 196 passed, 8 skipped in 0.79s ========================
+======================== 210 passed, 8 skipped in 0.81s ========================
 ```
 
-Todos os 196 testes offline passaram com sucesso (8 testes de live probe/sockets externos pulados por design offline).
+Todos os 210 testes offline passaram com sucesso. Os 8 skips consistem em: 5 testes de live probe (`test_live_probe.py`) que requerem conexão de rede externa/sockets, e 3 testes em `test_registration.py` condicionados à biblioteca opcional PyYAML (`yaml = pytest.importorskip("yaml")`).
 
 ### 6.3 Verificação de Cobertura nos Testes Adicionados
 1. **`tests/test_client.py`**:
    - `test_jev_console_decider_happy_path`: valida wire SystemOne (`POST`, URL, Authorization header com `OPENCODE_CONSOLE_API_KEY`, payload com `state`/`questions`, decodificação de `answers`).
-   - `test_jev_console_decider_fallback_model`: valida iteração do modelo primário para o secundário em caso de falha no primário.
+   - `test_jev_console_decider_fallback_to_paid_jev` / `test_jev_console_decider_fallback_model`: valida iteração do modelo primário (`jev-1.13-free`) para o secundário (`jev-1.13`) em caso de falha no primário.
+   - `test_jev_console_decider_both_models_fail` / `test_jev_console_decider_network_failure_fail_open`: valida tratamento de erro 500/502 com fail-open sem exceção.
+   - `test_jev_console_decider_timeout`: valida timeout de rede com marcação `REASON_TIMEOUT` e fail-open.
+   - `test_jev_console_decider_http_error_matrix`: matriz com status 401, 403, 429, 500, 503 e verificação estrita de que segredos da API (`OPENCODE_CONSOLE_API_KEY`) nunca são expostos em logs/auditoria.
+   - `test_jev_console_decider_real_non_json_body`: valida corpo HTML/texto não-JSON com `REASON_MALFORMED` e redaction de credenciais.
+   - `test_jev_console_decider_response_defined_probability_domain`: valida que o domínio de probabilidades é estritamente restrito às opções enviadas na grade e rejeita chaves externas inventadas pela resposta com `REASON_MALFORMED`.
+   - `test_jev_console_decider_invalid_types_and_float_choice`: valida rejeição de escolhas float, tipos inválidos e escolhas de esforço numéricas.
    - `test_jev_console_decider_low_confidence_degrades`: valida degradação graciosa (fail-open) em confiança abaixo do limiar.
-   - `test_jev_console_decider_network_failure_fail_open`: valida tratamento de erro 500/timeout com fail-open sem exceção.
+   - `test_jev_console_decider_allowlist_containment`: valida contenção estrita à allowlist.
 2. **`tests/test_catalog.py`**:
    - `test_opencode_console_catalog_allowlist`: valida `is_known` True para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, False para modelos fora da allowlist (`kimi-k3`, etc.) sob `opencode-console` e `opencode_console`.
 3. **`tests/test_config_policy.py`**:
    - `test_console_config_options_parsed_and_queried`: valida parsing das configurações `console_endpoint`, `console_jev_model`, `console_jev_fallback_model`, `console_api_key_env`, e métodos `base_url_for`, `decider_model_for`, `api_key_env_for`.
+   - `test_materialized_schema_defaults`: valida os defaults materializados diretamente de `plugin.yaml` (`console_jev_model` = `jev-1.13-free`, `console_jev_fallback_model` = `jev-1.13`, decider default `jev`, routable_providers default `[ollama-cloud]`).
 4. **`tests/test_router.py`**:
    - `test_jev_console_decider_routing_end_to_end`: valida roteamento completo ponta a ponta com `decider: jev_console` e `provider: opencode-console`.
    - `test_cross_provider_memo_replay_isolation`: valida que transições de provider não reutilizam memo incompatível.
    - `test_cross_decider_memo_replay_isolation`: valida que transições de decider não reutilizam memo incompatível.
+   - `test_memo_replay_invalidated_by_confidence_threshold_elevation`: valida que elevação de limiar de confiança no mesmo turno invalida o memo anterior e falha aberto sem chamada duplicada.
+   - `test_memo_replay_invalidated_by_fallback_backend_or_key_env_change`: valida que alteração de backend de fallback ou de variável de chave invalida o replay de memo.
+   - `test_middleware_fail_open_byte_identical_on_console_errors`: valida que em caso de erro upstream o middleware fail-open preserva o payload original idêntico.
    - `test_opencode_console_distinguishes_logical_effort_from_wire`: valida que o Jev decide esforço lógico (`effort_requested='high'`), enquanto o wire payload omite `reasoning_effort` e o log de auditoria registra `effort=null`, sem alegar execução downstream.
 5. **`tests/test_effort.py`**:
    - `test_opencode_console_explicit_reasoning_policies`: valida políticas explícitas (`ModelReasoningPolicy`) para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, confirmando `omitted=True`, `wire_parameter=None` e decisões registradas.

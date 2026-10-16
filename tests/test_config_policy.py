@@ -317,3 +317,62 @@ def test_opencode_console_grid_resolution():
     assert settings.grid_for("opencode_console") == grid
 
 
+def _load_schema_defaults():
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    manifest_path = root / "plugin.yaml"
+    text = manifest_path.read_text(encoding="utf-8")
+    defaults = {}
+    in_schema = False
+    current_key = None
+    for line in text.splitlines():
+        if line.startswith("config_schema:"):
+            in_schema = True
+            continue
+        if in_schema:
+            if line and not line.startswith(" "):
+                break
+            if line.startswith("  ") and not line.startswith("    "):
+                key = line.strip().rstrip(":")
+                if key:
+                    current_key = key
+            elif current_key and line.startswith("    default:"):
+                val_str = line.split(":", 1)[1].strip()
+                if val_str.startswith('"') and val_str.endswith('"'):
+                    defaults[current_key] = val_str[1:-1]
+                elif val_str == "true":
+                    defaults[current_key] = True
+                elif val_str == "false":
+                    defaults[current_key] = False
+                elif val_str == "null":
+                    defaults[current_key] = None
+                elif val_str.startswith("[") and val_str.endswith("]"):
+                    items = [x.strip().strip("'\"") for x in val_str[1:-1].split(",") if x.strip()]
+                    defaults[current_key] = items
+                else:
+                    try:
+                        defaults[current_key] = int(val_str)
+                    except ValueError:
+                        try:
+                            defaults[current_key] = float(val_str)
+                        except ValueError:
+                            defaults[current_key] = val_str
+    return defaults
+
+
+def test_materialized_schema_defaults():
+    defaults = _load_schema_defaults()
+    assert defaults["console_jev_model"] == "jev-1.13-free"
+    assert defaults["console_jev_fallback_model"] == "jev-1.13"
+    assert defaults["decider"] == "jev"
+
+    settings = settings_for(defaults)
+    assert settings.decider == "jev"
+    assert settings.console_jev_model == "jev-1.13-free"
+    assert settings.console_jev_fallback_model == "jev-1.13"
+    assert settings.decider_model_for("jev_console") == "jev-1.13-free"
+    assert settings.base_url_for("jev_console") == "https://opencode.ai/inference/systemone/v1/systemone"
+    assert settings.api_key_env_for("jev_console") == "OPENCODE_CONSOLE_API_KEY"
+    assert settings.is_provider_routable("opencode-console") is False
+    assert settings.is_provider_routable("ollama-cloud") is True
+

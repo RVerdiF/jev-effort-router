@@ -38,6 +38,7 @@ from .config import (
     ROUTED_PROVIDER_ALIASES,
     EffectiveSettings,
     Settings,
+    api_key,
 )
 from .effort import resolve_effort
 from .memo import Memo, TurnMemo
@@ -203,7 +204,7 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
                     return None
 
-                # Decider configuration guard: endpoint and decider model must match active backend
+                # Decider configuration guard: endpoint, decider model, fallback model, and key env
                 memo_endpoint = getattr(memo, "decider_endpoint", "")
                 curr_endpoint = settings.base_url_for(settings.decider)
                 if memo_endpoint and curr_endpoint and memo_endpoint != curr_endpoint:
@@ -226,11 +227,45 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
                     return None
 
-                # Policy confidence threshold guard: replayed confidence must meet active threshold
-                if memo.model_confidence < effective.confidence_threshold and REASON_LOW_CONFIDENCE not in memo.fallback_reasons:
+                memo_fallback = getattr(memo, "decider_fallback_model", "")
+                curr_fallback = (settings.console_jev_fallback_model or "").strip() if settings.decider == "jev_console" else ""
+                if memo_fallback != curr_fallback:
                     logger.info(
-                        "jev-effort-router: memo confidence %.2f is below active threshold %.2f; failing open",
+                        "jev-effort-router: memo fallback model %r != active %r; failing open",
+                        memo_fallback,
+                        curr_fallback,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                memo_key_env = getattr(memo, "decider_key_env", "")
+                curr_key_env = settings.api_key_env_for(settings.decider)
+                if memo_key_env and curr_key_env and memo_key_env != curr_key_env:
+                    logger.info(
+                        "jev-effort-router: memo key env %r != active %r; failing open",
+                        memo_key_env,
+                        curr_key_env,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                if not api_key(curr_key_env):
+                    logger.info(
+                        "jev-effort-router: active decider key env %r has no key; failing open",
+                        curr_key_env,
+                    )
+                    self._record_skip(settings, REASON_NO_API_KEY, where)
+                    return None
+
+                # Policy confidence threshold guard: replayed confidence must meet active threshold
+                if (
+                    memo.model_confidence < effective.confidence_threshold
+                    or (memo.effort_confidence > 0.0 and memo.effort_confidence < effective.confidence_threshold)
+                ) and REASON_LOW_CONFIDENCE not in memo.fallback_reasons:
+                    logger.info(
+                        "jev-effort-router: memo confidence (model=%.2f, effort=%.2f) is below active threshold %.2f; failing open",
                         memo.model_confidence,
+                        memo.effort_confidence,
                         effective.confidence_threshold,
                     )
                     self._record_skip(settings, REASON_LOW_CONFIDENCE, where)
@@ -242,6 +277,16 @@ class Router:
                         "jev-effort-router: memo model %r is not in grid for provider %r; failing open",
                         memo.model,
                         provider,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
+                    return None
+
+                # Grid signature guard: criteria and options must match active grid
+                curr_grid_sig = tuple((e.model_id, e.description) for e in effective.grid)
+                memo_grid_sig = getattr(memo, "grid_signature", ())
+                if memo_grid_sig and memo_grid_sig != curr_grid_sig:
+                    logger.info(
+                        "jev-effort-router: memo grid criteria signature does not match active grid; failing open",
                     )
                     self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                     return None
@@ -306,6 +351,9 @@ class Router:
                     decider_model=settings.decider_model_for(decision.decider),
                     confidence_threshold=effective.confidence_threshold,
                     max_effort=effective.max_effort,
+                    decider_fallback_model=(settings.console_jev_fallback_model or "").strip() if decision.decider == "jev_console" else "",
+                    decider_key_env=settings.api_key_env_for(decision.decider),
+                    grid_signature=tuple((e.model_id, e.description) for e in effective.grid),
                 )
                 # Storing on "no memo found" rather than on an api_call_count test is deliberate:
                 # Hermes passes the *incremented* counter, so the first provider call of a turn

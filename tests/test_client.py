@@ -779,16 +779,79 @@ def test_jev_console_decider_low_confidence_degrades(monkeypatch):
     assert reason == REASON_LOW_CONFIDENCE
 
 
-def test_jev_console_decider_allowlist_containment(monkeypatch):
+def test_jev_console_decider_fallback_model(monkeypatch):
+    # Explicit alias matching EVIDENCIAS_OPERACIONAIS.md
+    return test_jev_console_decider_fallback_to_paid_jev(monkeypatch)
+
+
+def test_jev_console_decider_network_failure_fail_open(monkeypatch):
+    # Explicit alias matching EVIDENCIAS_OPERACIONAIS.md
+    return test_jev_console_decider_both_models_fail(monkeypatch)
+
+
+def test_jev_console_decider_timeout(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
-    # Model answer picks an unknown choice "99" while default_model is outside allowlist
-    resp_payload = decision_payload(model_choice="99", model_confidence=0.9, grid_size=2)
-    transport = StubTransport([StubResponse(resp_payload)])
+    transport = StubTransport([ReadTimeout("connection timeout")])
     client, settings = make(
         transport,
         config={
             "decider": "jev_console",
-            "default_model": "kimi-k3",
+            "console_jev_fallback_model": "",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_TIMEOUT
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429, 500, 503])
+def test_jev_console_decider_http_error_matrix(monkeypatch, status_code, caplog):
+    key = "test-console-key-secret-999"
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", key)
+    transport = StubTransport([StubResponse({"error": f"error with {key}"}, status_code=status_code)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "console_jev_fallback_model": "",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_UPSTREAM_ERROR
+    # Verify secret is never logged in plaintext
+    assert key not in caplog.text
+
+
+def test_jev_console_decider_real_non_json_body(monkeypatch, caplog):
+    key = "test-console-key-secret-888"
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", key)
+    transport = StubTransport([StubResponse(payload=None, status_code=200, text=f"<html>Bad Gateway {key}</html>")])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "console_jev_fallback_model": "",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_MALFORMED
+    # Verify secret is redacted
+    assert key not in caplog.text
+
+
+def test_jev_console_decider_response_defined_probability_domain(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    payload = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
+    answer = payload["answers"]["model_route"]
+    answer["criteria"] = {"outsider": "unrequested option"}
+    answer["probabilities"] = {"outsider": 1.0}
+    transport = StubTransport([StubResponse(payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
             "console_jev_fallback_model": "",
         },
     )
@@ -798,6 +861,46 @@ def test_jev_console_decider_allowlist_containment(monkeypatch):
         provider="opencode-console",
     )
     assert decision is None
-    assert reason == REASON_UNKNOWN_CHOICE
+    assert reason == REASON_MALFORMED
 
+
+def test_jev_console_decider_invalid_types_and_float_choice(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    # Float choice
+    payload_float = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
+    payload_float["answers"]["model_route"]["choice"] = 2.0
+    # Non-choice type
+    payload_bad_type = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
+    payload_bad_type["answers"]["model_route"]["type"] = "free_text"
+    # Numeric effort choice
+    payload_bad_effort = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
+    payload_bad_effort["answers"]["reasoning_effort"]["choice"] = 3
+    payload_bad_effort["answers"]["reasoning_effort"]["probabilities"] = {"3": 1.0}
+
+    transport = StubTransport([
+        StubResponse(payload_float),
+        StubResponse(payload_bad_type),
+        StubResponse(payload_bad_effort),
+    ])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "console_jev_fallback_model": "",
+        },
+    )
+    # 1: float choice -> unknown choice
+    dec1, r1 = client.decide(MESSAGES, settings.effective(None, provider="opencode-console"), provider="opencode-console")
+    assert dec1 is None
+    assert r1 == REASON_UNKNOWN_CHOICE
+
+    # 2: bad type -> malformed
+    dec2, r2 = client.decide(MESSAGES, settings.effective(None, provider="opencode-console"), provider="opencode-console")
+    assert dec2 is None
+    assert r2 == REASON_MALFORMED
+
+    # 3: bad effort -> unknown choice
+    dec3, r3 = client.decide(MESSAGES, settings.effective(None, provider="opencode-console"), provider="opencode-console")
+    assert dec3 is None
+    assert r3 == REASON_UNKNOWN_CHOICE
 

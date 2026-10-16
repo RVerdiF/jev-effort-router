@@ -775,7 +775,7 @@ class JevConsoleDecider(BaseDecider):
                 return None, REASON_MALFORMED
             grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
             grid_model_ids = {entry.model_id for entry in effective.grid}
-            allowed_prob_keys = grid_positions | grid_model_ids | set(_criteria_map(model_answer).keys())
+            allowed_prob_keys = grid_positions | grid_model_ids
             prob_sum = 0.0
             for k, v in probs_raw.items():
                 k_str = str(k).strip()

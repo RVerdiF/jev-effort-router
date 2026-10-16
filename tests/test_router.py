@@ -1234,3 +1234,92 @@ def test_opencode_console_distinguishes_logical_effort_from_wire(tmp_path, monke
     assert record["effort"] is None  # Never claimed as sent on wire
 
 
+def test_memo_replay_invalidated_by_confidence_threshold_elevation(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    # Model confidence 0.95, effort confidence 0.70
+    resp_payload = decision_payload(
+        model_choice="2",
+        model_confidence=0.95,
+        effort_choice="medium",
+        effort_confidence=0.70,
+        grid_size=2,
+    )
+    transport = StubTransport([StubResponse(resp_payload)])
+    current_config = {
+        "decider": "jev_console",
+        "routable_providers": ["opencode-console"],
+        "confidence_threshold": 0.50,
+    }
+    audit = StubState(tmp_path)
+    router = Router(
+        lambda: load_settings(lambda k, d=None: current_config.get(k, d)),
+        get_state=lambda: audit,
+        client_factory=lambda s: _ClientWith(transport, s),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    # First call: applies memo
+    res1 = route(router, ollama_request(), provider="opencode-console", session_id="s1", turn_id="t1")
+    assert res1 is not None
+    assert res1["request"]["model"] == "mimo-v2.6-flash"
+    assert transport.call_count == 1
+
+    # Elevate threshold above effort confidence (0.80 > 0.70)
+    current_config["confidence_threshold"] = 0.80
+
+    # Second call in same turn: fail open because memo effort confidence is below active threshold
+    res2 = route(router, ollama_request(), provider="opencode-console", session_id="s1", turn_id="t1", api_call_count=1)
+    assert res2 is None
+    assert transport.call_count == 1  # No extra decider call was made
+
+
+def test_memo_replay_invalidated_by_fallback_backend_or_key_env_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    current_config = {
+        "decider": "jev_console",
+        "routable_providers": ["opencode-console"],
+        "console_jev_fallback_model": "jev-1.13",
+    }
+    audit = StubState(tmp_path)
+    router = Router(
+        lambda: load_settings(lambda k, d=None: current_config.get(k, d)),
+        get_state=lambda: audit,
+        client_factory=lambda s: _ClientWith(transport, s),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    res1 = route(router, ollama_request(), provider="opencode-console", session_id="s2", turn_id="t1")
+    assert res1 is not None
+
+    # Change fallback backend model
+    current_config["console_jev_fallback_model"] = "other-fallback-model"
+    res2 = route(router, ollama_request(), provider="opencode-console", session_id="s2", turn_id="t1", api_call_count=1)
+    assert res2 is None
+
+
+def test_middleware_fail_open_byte_identical_on_console_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    # 500 error from upstream
+    transport = StubTransport([StubResponse({"error": "upstream down"}, status_code=500)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["opencode-console"],
+            "console_jev_fallback_model": "",
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    original_req = ollama_request()
+    import copy
+    req_copy = copy.deepcopy(original_req)
+    result = route(router, original_req, provider="opencode-console")
+    assert result is None
+    assert original_req == req_copy
+

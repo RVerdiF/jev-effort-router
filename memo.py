@@ -48,6 +48,9 @@ class Memo:
     decider_model: str = ""
     confidence_threshold: float = 0.0
     max_effort: Optional[str] = None
+    decider_fallback_model: str = ""
+    decider_key_env: str = ""
+    grid_signature: tuple = ()
 
 
 class TurnMemo:
