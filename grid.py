@@ -78,6 +78,19 @@ DEFAULT_GRID: Tuple[Entry, ...] = (
     ),
 )
 
+#: The initial two-model grid for OpenCode Console.
+OPENCODE_CONSOLE_GRID: Tuple[Entry, ...] = (
+    Entry(
+        "deepseek-v4.1-flash",
+        "the usual choice for general work: everyday writing, explanation, summarising, "
+        "ordinary coding and tool use; 1M context",
+    ),
+    Entry(
+        "mimo-v2.6-flash",
+        "fast multimodal reasoning, coding, and efficient agentic tool calling",
+    ),
+)
+
 
 def parse_entry(raw: Any) -> Optional[Entry]:
     """Parse ``"model-id: description"`` (or a ``{model_id, description}`` mapping)."""

@@ -2,9 +2,10 @@
 
 Companion of SPEC.md. Verified against TypeSafe Jev Decisions API and OpenAI-compatible endpoints (including OpenCode `opencode-go`).
 
-The plugin supports two pluggable decider backends configured via `decider`:
+The plugin supports three pluggable decider backends configured via `decider`:
 1. `jev` (default): TypeSafe Jev on the OpenRouter Decisions API.
-2. `openai_compatible`: OpenAI-compatible Chat Completions endpoint (e.g. OpenCode).
+2. `openai_compatible`: OpenAI-compatible Chat Completions endpoint (e.g. OpenCode Go).
+3. `jev_console`: OpenCode Console SystemOne API (`https://opencode.ai/inference/systemone/v1/systemone`).
 
 ---
 
@@ -155,3 +156,81 @@ Unlike unstructured chat responses, the decider's output is subjected to strict 
 3. **Valid Effort**: `effort` is required and must be one of `low`, `medium`, or `high`.
 4. **Finite Numeric Confidence**: `confidence` must be a finite float between `0.0` and `1.0`. String values, NaN, infinity, or values out of bounds trigger immediate validation failure without hallucinating a default confidence.
 5. **Fail-Open Policy**: Any validation violation, HTTP error, timeout, or missing key immediately aborts routing (`decide` returns `(None, reason)`), keeping the original turn request 100% byte-identical.
+
+---
+
+## Wire 3: OpenCode Console SystemOne API (`decider: jev_console`)
+
+### Comparison: OpenCode Console vs OpenCode Go vs OpenRouter
+
+| Feature / Aspect | OpenCode Console (`jev_console`) | OpenCode Go (`openai_compatible`) | OpenRouter (`jev`) |
+|---|---|---|---|
+| **Endpoint** | `POST https://opencode.ai/inference/systemone/v1/systemone` | `POST https://opencode.ai/zen/go/v1/chat/completions` | `POST https://openrouter.ai/api/alpha/decisions` |
+| **Protocol** | SystemOne typed decisions (`model`, `state`, `questions` -> `answers`) | OpenAI Chat Completions JSON mode | OpenRouter Decisions API |
+| **Credential Env** | `OPENCODE_CONSOLE_API_KEY` (or `console_api_key_env`) | `OPENCODE_GO_API_KEY` (or `decider_api_key_env`) | `OPENROUTER_API_KEY` |
+| **Decider Model** | `jev-1.13` (with fallback model support) | `deepseek-v4.1-flash` (or custom chat model) | `typesafe/jev-1.13` |
+| **Target Generation Provider** | `opencode-console` (generation models: `deepseek-v4.1-flash`, `mimo-v2.6-flash`) | `opencode-go` | `ollama-cloud` (by default) |
+| **Decider Role** | Steering decider only, not generation model | Steering decider only | Steering decider only |
+
+### Endpoint
+
+```
+POST {console_endpoint:-https://opencode.ai/inference/systemone/v1/systemone}
+Authorization: Bearer ${OPENCODE_CONSOLE_API_KEY}
+Content-Type: application/json
+User-Agent: Hermes-Agent/0.21.4 (jev-effort-router)
+```
+
+### Request Shape
+
+```json
+{
+  "model": "jev-1.13",
+  "state": {
+    "user_message": "...",
+    "recent_context": "...",
+    "surface": "cli",
+    "provider": "opencode-console"
+  },
+  "questions": {
+    "model_route": {
+      "type": "choice",
+      "instructions": "Which model is best suited to handle this task?",
+      "criteria": {
+        "1": "deepseek-v4.1-flash: general work, ordinary coding and tool use; 1M context",
+        "2": "mimo-v2.6-flash: multi-modal, agentic coding and fast reasoning"
+      }
+    },
+    "reasoning_effort": {
+      "type": "choice",
+      "instructions": "Which level of reasoning effort does this message require?",
+      "criteria": { "low": "...", "medium": "...", "high": "..." }
+    }
+  }
+}
+```
+
+### Answer Shape & Fallback Model Iteration
+
+The decider responds with SystemOne envelope carrying `answers`:
+
+```json
+{
+  "answers": {
+    "model_route": {
+      "type": "choice",
+      "choice": "1",
+      "probabilities": {"1": 0.95, "2": 0.05},
+      "confidence": 0.95
+    },
+    "reasoning_effort": {
+      "type": "choice",
+      "choice": "low",
+      "probabilities": {"low": 0.90, "medium": 0.10},
+      "confidence": 0.90
+    }
+  }
+}
+```
+
+When the primary `console_jev_model` fails (HTTP error, timeout, malformed payload), the backend iterates to `console_jev_fallback_model` (e.g. standard/paid Jev on OpenCode Console). If both fail or confidence falls below threshold, the router fails open gracefully leaving the original request intact.

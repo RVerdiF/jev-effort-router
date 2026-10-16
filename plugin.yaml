@@ -84,9 +84,9 @@ config_schema:
   decider:
     type: str
     default: jev
-    choices: [jev, openai_compatible]
+    choices: [jev, openai_compatible, jev_console]
     label: Decider backend
-    description: Pluggable decider backend ('jev' or 'openai_compatible').
+    description: Pluggable decider backend ('jev', 'openai_compatible', or 'jev_console').
   decider_base_url:
     type: str
     default: ""
@@ -102,6 +102,26 @@ config_schema:
     default: ""
     label: Decider API key env var
     description: Env var name holding API key for openai_compatible decider.
+  console_endpoint:
+    type: str
+    default: ""
+    label: OpenCode Console SystemOne endpoint
+    description: SystemOne endpoint for jev_console decider (defaults to https://opencode.ai/inference/systemone/v1/systemone).
+  console_jev_model:
+    type: str
+    default: ""
+    label: OpenCode Console primary Jev model
+    description: Primary model for jev_console decider (defaults to jev-1.13-free).
+  console_jev_fallback_model:
+    type: str
+    default: ""
+    label: OpenCode Console fallback Jev model
+    description: Fallback model for jev_console decider when primary fails (defaults to jev-1.13).
+  console_api_key_env:
+    type: str
+    default: ""
+    label: OpenCode Console API key env var
+    description: Env var name holding API key for jev_console decider (defaults to OPENCODE_CONSOLE_API_KEY).
   routable_providers:
     type: list
     default: [ollama-cloud]

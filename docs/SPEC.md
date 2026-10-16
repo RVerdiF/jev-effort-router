@@ -25,9 +25,12 @@ reasoning and generation in the main model — it only steers.
 ## Capabilities
 
 - **CAP-1** — An operator can install and enable the plugin in one command, and a fresh Hermes session
-  routes every turn without any further configuration beyond an OpenRouter API key.
+  routes every turn without any further configuration beyond an OpenRouter API key (or OpenCode Console API key when using `decider: jev_console`).
   - **success:** `hermes plugins enable jev-effort-router` followed by `hermes plugins list` shows the plugin
     enabled with its declared middleware/hook/tool surface; `hermes plugins doctor <repo>` exits 0.
+
+- **CAP-1b** — Decider pluggability and OpenCode Console: The operator can configure `decider: jev_console` to use the SystemOne protocol (`POST https://opencode.ai/inference/systemone/v1/systemone`) authenticated via `OPENCODE_CONSOLE_API_KEY`. It targets `opencode-console` providers with an initial strict allowlist of two models (`deepseek-v4.1-flash` and `mimo-v2.6-flash`).
+  - **success:** When `decider: jev_console` is configured, Jev decisions are fetched via SystemOne wire format, supporting primary model (`jev-1.13`) and fallback model iteration, failing open gracefully on errors, and isolating memo replays across providers and deciders.
 
 - **CAP-2** — On the first LLM request of each user turn, the effective provider kwargs are rewritten so
   that `model` is Jev's chosen model and `reasoning_effort` is Jev's chosen level, mapped onto that

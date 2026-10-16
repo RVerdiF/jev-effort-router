@@ -648,3 +648,160 @@ def test_openai_compatible_invalid_confidence_fails_open(monkeypatch):
         assert decision is None
         assert reason == REASON_MALFORMED
 
+
+# -- jev_console backend tests ------------------------------------------------
+
+def test_jev_console_decider_happy_path(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.9, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "confidence_threshold": 0.5,
+        },
+    )
+    decision, reason = client.decide(
+        MESSAGES,
+        settings.effective(None, provider="opencode-console"),
+        provider="opencode-console",
+    )
+    assert reason is None
+    assert decision is not None
+    assert decision.decider == "jev_console"
+    assert decision.model == "deepseek-v4.1-flash"
+    assert decision.model_confidence == 0.9
+
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
+    assert call["headers"]["Authorization"] == "Bearer test-console-key-123"
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert call["json"]["model"] == "jev-1.13-free"
+    assert "state" in call["json"]
+    assert "questions" in call["json"]
+
+
+def test_jev_console_decider_fallback_to_paid_jev(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    # First call (free jev) fails with 500; second call (paid jev) succeeds with 200
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.88, grid_size=2)
+    transport = StubTransport([
+        StubResponse({"error": "free quota exhausted"}, status_code=500),
+        StubResponse(resp_payload, status_code=200),
+    ])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+        },
+    )
+    decision, reason = client.decide(
+        MESSAGES,
+        settings.effective(None, provider="opencode-console"),
+        provider="opencode-console",
+    )
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "mimo-v2.6-flash"
+    assert len(transport.calls) == 2
+    assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
+    assert transport.calls[1]["json"]["model"] == "jev-1.13"
+
+
+def test_jev_console_decider_missing_api_key(monkeypatch):
+    monkeypatch.delenv("OPENCODE_CONSOLE_API_KEY", raising=False)
+    transport = StubTransport([])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_NO_API_KEY
+    assert len(transport.calls) == 0
+
+
+def test_jev_console_decider_both_models_fail(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    transport = StubTransport([
+        StubResponse({"error": "server error 1"}, status_code=500),
+        StubResponse({"error": "server error 2"}, status_code=502),
+    ])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_UPSTREAM_ERROR
+    assert len(transport.calls) == 2
+
+
+def test_jev_console_decider_malformed_json(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    transport = StubTransport([StubResponse({"invalid": "structure"})])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "console_jev_fallback_model": "",
+        },
+    )
+    decision, reason = client.decide(MESSAGES, settings.effective(None))
+    assert decision is None
+    assert reason == REASON_MALFORMED
+
+
+def test_jev_console_decider_low_confidence_degrades(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.2, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "confidence_threshold": 0.5,
+            "console_jev_fallback_model": "",
+        },
+    )
+    decision, reason = client.decide(
+        MESSAGES,
+        settings.effective(None, provider="opencode-console"),
+        provider="opencode-console",
+    )
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "deepseek-v4.1-flash"
+    assert REASON_LOW_CONFIDENCE in decision.fallback_reasons
+
+
+def test_jev_console_decider_allowlist_containment(monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    # Model answer picks an unknown choice "99" while default_model is outside allowlist
+    resp_payload = decision_payload(model_choice="99", model_confidence=0.9, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    client, settings = make(
+        transport,
+        config={
+            "decider": "jev_console",
+            "default_model": "kimi-k3",
+            "console_jev_fallback_model": "",
+        },
+    )
+    decision, reason = client.decide(
+        MESSAGES,
+        settings.effective(None, provider="opencode-console"),
+        provider="opencode-console",
+    )
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "deepseek-v4.1-flash"
+    assert REASON_UNKNOWN_CHOICE in decision.fallback_reasons
+
+

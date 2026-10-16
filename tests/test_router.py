@@ -1115,3 +1115,78 @@ def test_cross_provider_session_replay_isolation(tmp_path, monkeypatch):
     assert r2 is None
     assert transport.call_count == 1
 
+
+def test_jev_console_decider_routing_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    audit_dir = tmp_path / "audit"
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["opencode-console"],
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(audit_dir))
+
+    result = route(
+        router,
+        ollama_request(),
+        provider="opencode-console",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    assert result["request"]["model"] == "mimo-v2.6-flash"
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
+
+
+def test_cross_decider_memo_replay_isolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.95, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    audit_dir = tmp_path / "audit"
+    current_config = {
+        "decider": "jev_console",
+        "routable_providers": ["opencode-console"],
+    }
+    audit = StubState(tmp_path)
+    router = Router(
+        lambda: load_settings(lambda k, d=None: current_config.get(k, d)),
+        get_state=lambda: audit,
+        client_factory=lambda s: _ClientWith(transport, s),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(audit_dir))
+
+    # Turn 1: routes with jev_console
+    res1 = route(
+        router,
+        ollama_request(),
+        provider="opencode-console",
+        model="deepseek-v4.1-flash",
+        session_id="s-dec",
+        turn_id="t1",
+    )
+    assert res1 is not None
+    assert res1["request"]["model"] == "deepseek-v4.1-flash"
+    assert transport.call_count == 1
+
+    # Switch active decider to legacy "jev" (which has no OPENROUTER_API_KEY in env)
+    current_config["decider"] = "jev"
+
+    # Turn 1 retry / replay in same turn with different decider: fails open due to decider mismatch
+    res2 = route(
+        router,
+        ollama_request(),
+        provider="opencode-console",
+        model="deepseek-v4.1-flash",
+        session_id="s-dec",
+        turn_id="t1",
+    )
+    assert res2 is None
+
+

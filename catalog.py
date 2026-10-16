@@ -22,6 +22,12 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple
 
+from .config import (
+    OPENCODE_CONSOLE_ALLOWLIST,
+    OPENCODE_CONSOLE_PROVIDER,
+    OPENCODE_CONSOLE_PROVIDER_ALIASES,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Hermes' provider-model cache, relative to the active HERMES_HOME.
@@ -130,6 +136,11 @@ class ModelCatalog:
         for a formatting difference.
         """
         provider_key = (provider or "").strip().lower()
+        if provider_key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
+            wanted = (model_id or "").strip()
+            if not wanted:
+                return False
+            return wanted in OPENCODE_CONSOLE_ALLOWLIST
         if provider_key and provider_key not in ("ollama-cloud", "ollama_cloud"):
             return None
         models = self.models()

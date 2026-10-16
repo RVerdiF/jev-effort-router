@@ -12,6 +12,10 @@ import pytest
 
 from config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_CONSOLE_BASE_URL,
+    DEFAULT_CONSOLE_JEV_FALLBACK_MODEL,
+    DEFAULT_CONSOLE_JEV_MODEL,
+    DEFAULT_CONSOLE_KEY_ENV,
     DEFAULT_MODEL,
     EFFORT_LEVELS,
     PlatformPolicy,
@@ -243,6 +247,13 @@ def test_defaults_are_unchanged_when_the_key_is_absent():
     assert settings.decider_base_url == ""
     assert settings.decider_model == ""
     assert settings.decider_api_key_env == ""
+    assert settings.console_endpoint == ""
+    assert settings.console_jev_model == ""
+    assert settings.console_jev_fallback_model == DEFAULT_CONSOLE_JEV_FALLBACK_MODEL
+    assert settings.console_api_key_env == ""
+    assert settings.base_url_for("jev_console") == DEFAULT_CONSOLE_BASE_URL
+    assert settings.decider_model_for("jev_console") == DEFAULT_CONSOLE_JEV_MODEL
+    assert settings.api_key_env_for("jev_console") == DEFAULT_CONSOLE_KEY_ENV
     assert settings.routable_providers == ("ollama-cloud",)
     assert len(settings.grids) == 0
     assert len(settings.effort_maps) == 0
@@ -274,4 +285,35 @@ def test_new_config_options_parsed_and_queried():
     assert settings.api_key_env_for("jev") == "OPENROUTER_API_KEY"
     assert settings.confidence_threshold_for("openai_compatible") == 0.8
     assert settings.confidence_threshold_for("jev") == 0.5
+
+
+def test_console_config_options_parsed_and_queried():
+    config = {
+        "decider": "jev_console",
+        "console_endpoint": "https://custom.opencode.ai/v1",
+        "console_jev_model": "custom-jev-free",
+        "console_jev_fallback_model": "custom-jev-paid",
+        "console_api_key_env": "CUSTOM_CONSOLE_KEY",
+        "routable_providers": ["ollama-cloud", "opencode-console"],
+    }
+    settings = settings_for(config)
+
+    assert settings.decider == "jev_console"
+    assert settings.console_endpoint == "https://custom.opencode.ai/v1"
+    assert settings.console_jev_model == "custom-jev-free"
+    assert settings.console_jev_fallback_model == "custom-jev-paid"
+    assert settings.console_api_key_env == "CUSTOM_CONSOLE_KEY"
+    assert settings.base_url_for("jev_console") == "https://custom.opencode.ai/v1"
+    assert settings.decider_model_for("jev_console") == "custom-jev-free"
+    assert settings.api_key_env_for("jev_console") == "CUSTOM_CONSOLE_KEY"
+    assert settings.is_provider_routable("opencode-console") is True
+    assert settings.is_provider_routable("opencode_console") is True
+
+
+def test_opencode_console_grid_resolution():
+    settings = settings_for({})
+    grid = settings.grid_for("opencode-console")
+    assert [e.model_id for e in grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+    assert settings.grid_for("opencode_console") == grid
+
 

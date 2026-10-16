@@ -111,22 +111,24 @@ which it does for the recent-context window (a bounded tail, never the whole tra
 
 The API key is read from the process environment at call time and never from `config.yaml`; it is never
 logged and never included in an audit record. `OPENROUTER_API_KEY` is treated as an ambient requirement for `jev`,
-while `decider_api_key_env` (e.g. `OPENCODE_GO_API_KEY`) is read for `openai_compatible`.
+`OPENCODE_CONSOLE_API_KEY` (or `console_api_key_env`) for `jev_console`, and `decider_api_key_env` (e.g. `OPENCODE_GO_API_KEY`) for `openai_compatible`.
 
 ## Multi-provider and pluggable decider architecture (v0.4.0+)
 
 1. **Single non-invasive seam:** `llm_request` middleware remains the single point of interception. No core Hermes files are modified.
 2. **Pluggable Decider backends (`BaseDecider`):**
-   - Factory `build_decider(settings)` instantiates either `JevDecider` (Wire 1: OpenRouter Decisions API) or `OpenAICompatibleDecider` (Wire 2: OpenCode / OpenAI chat completions API).
-   - Both implement `decide(features, effective_settings, provider) -> Tuple[Optional[Decision], Optional[str]]`.
-3. **Provider Allowlist (`routable_providers`):**
+   - Factory `build_decider(settings)` instantiates `JevDecider` (Wire 1: OpenRouter Decisions API), `OpenAICompatibleDecider` (Wire 2: OpenCode / OpenAI chat completions API), or `JevConsoleDecider` (Wire 3: OpenCode Console SystemOne API).
+   - All implement `decide(messages, effective, *, platform, provider) -> Tuple[Optional[Decision], Optional[str]]`.
+3. **Provider Allowlist (`routable_providers`) & Console Provider (`opencode-console`):**
    - Replaces hardcoded `ollama-cloud` check with an allowlist gate (`settings.routable_providers`).
+   - Built-in support for `opencode-console` (and alias `opencode_console`) with dedicated two-model allowlist (`deepseek-v4.1-flash`, `mimo-v2.6-flash`).
    - Providers not on the list pass through 100% untouched.
 4. **Isolated Provider Catalog Checks:**
-   - The host's `ollama_cloud_models_cache.json` check is strictly scoped to `provider == "ollama-cloud"`. Non-Ollama providers (like `opencode-go`) are not falsely rejected by an Ollama catalog.
-5. **Decider Provenance & Memoization:**
-   - Each `Decision` object tags its originating decider (`decider: "jev"` or `decider: "openai_compatible"`).
-   - Memoization across multi-step tool loops (`route_per_turn=true`) or entire sessions (`route_per_turn=false`) preserves this decider provenance, ensuring audit records never misattribute an OpenAI-compatible decision to Jev or vice versa.
+   - The host's `ollama_cloud_models_cache.json` check is strictly scoped to `provider == "ollama-cloud"`. Non-Ollama providers (like `opencode-console` or `opencode-go`) are not falsely rejected by an Ollama catalog.
+   - OpenCode Console validates models against `OPENCODE_CONSOLE_ALLOWLIST`.
+5. **Decider Provenance & Replay Isolation:**
+   - Each `Decision` / `Memo` tags its originating provider and decider (`jev`, `openai_compatible`, or `jev_console`).
+   - Replay guards strictly verify that a cached turn memo matches both the active request's `provider` and the configured `decider`; mismatches fail open immediately without cross-contaminating turns.
 
 ## Verification surface
 

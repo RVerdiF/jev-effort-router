@@ -219,6 +219,15 @@ def test_ollama_catalog_does_not_veto_models_for_other_providers(tmp_path):
     assert res["request"]["model"] == "kimi-k3"
 
 
+def test_opencode_console_catalog_allowlist(tmp_path):
+    catalog = catalog_for(tmp_path, None)
+    assert catalog.is_known("deepseek-v4.1-flash", provider="opencode-console") is True
+    assert catalog.is_known("mimo-v2.6-flash", provider="opencode-console") is True
+    assert catalog.is_known("mimo-v2.6-flash", provider="opencode_console") is True
+    assert catalog.is_known("kimi-k3", provider="opencode-console") is False
+    assert catalog.is_known("", provider="opencode-console") is False
+
+
 class _State:
     def __init__(self, data_dir):
         self.data_dir = data_dir

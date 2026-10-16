@@ -179,6 +179,17 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
                     return None
 
+                # Decider guard: memo decided with a different decider must not be reused
+                memo_dec = getattr(memo, "decider", "")
+                if memo_dec and memo_dec != settings.decider:
+                    logger.info(
+                        "jev-effort-router: memo decided with decider %r is incompatible with active decider %r; failing open",
+                        memo_dec,
+                        settings.decider,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
                 # Grid guard: the replayed model must exist in the active provider's grid
                 if effective.entry_for(memo.model) is None:
                     logger.info(

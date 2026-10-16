@@ -59,7 +59,22 @@ below threshold: `medium`.
 In v0.4.0+, the router supports multiple providers declared under `routable_providers`.
 
 - **Default (`ollama-cloud`)**: Uses the built-in six-model grid and the built-in effort table below.
+- **OpenCode Console (`opencode-console`)**: Uses the built-in two-model grid (`OPENCODE_CONSOLE_GRID`) and strict allowlist (`deepseek-v4.1-flash`, `mimo-v2.6-flash`).
 - **Custom providers (e.g. `opencode-go`)**: Configured via `grids.<provider>` and `effort_maps.<provider>`.
+
+### OpenCode Console Grid (`opencode-console`)
+
+The OpenCode Console catalog is strictly gated to an initial allowlist of two models:
+
+| # | Model id | Profile line sent to Jev | Scope / Notes |
+|---|---|---|---|
+| 1 | `deepseek-v4.1-flash` | the usual choice for general work: everyday writing, explanation, summarising, ordinary coding and tool use; 1M context; cheap for its size | General work, code and reasoning |
+| 2 | `mimo-v2.6-flash` | multi-modal, agentic coding and fast reasoning; high throughput | Standard non-free variant |
+
+#### Gate & Privacy Decision (Owner Directive)
+- **Decision Gate Closed**: The owner explicitly mandated the standard non-free ID `mimo-v2.6-flash`, rejecting the free variant `mimo-v2.6-flash-free` and its data retention/model training terms. Free tier is strictly reserved for Jev as decider, with fallback to paid Jev on OpenCode Console.
+- **Effort Omission**: For `opencode-console`, `reasoning_effort` is intentionally omitted from outgoing requests until wire compatibility is empirically verified per model family. It does NOT inherit the Ollama:cloud mapping table.
+- **Isolation**: OpenCode Console and Ollama:cloud remain fully isolated; the Ollama cache never inspects or filters Console models.
 
 ### Effort-to-wire mapping (Ollama:Cloud built-in)
 

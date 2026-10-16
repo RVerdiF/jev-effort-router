@@ -1,9 +1,9 @@
 # jev-effort-router
 
-> **Fork note:** This fork by [RVerdiF](https://github.com/RVerdiF/jev-effort-router) (upstream: [AlphaPerseii3000/jev-effort-router](https://github.com/AlphaPerseii3000/jev-effort-router), MIT license) adds pluggable decider backends (`jev` via OpenRouter Decisions API or `openai_compatible` via OpenAI chat completions like OpenCode) and selectable routable providers with per-provider grids and effort maps.
+> **Fork note:** This fork by [RVerdiF](https://github.com/RVerdiF/jev-effort-router) (upstream: [AlphaPerseii3000/jev-effort-router](https://github.com/AlphaPerseii3000/jev-effort-router), MIT license) adds pluggable decider backends (`jev` via OpenRouter Decisions API, `openai_compatible` via OpenAI chat completions like OpenCode Go, or `jev_console` via OpenCode Console SystemOne API) and selectable routable providers with per-provider grids and effort maps.
 
 **Per-turn model *and* reasoning-effort routing for [Hermes Agent](https://github.com/NousResearch/hermes-agent)** —
-both halves decided by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13) or OpenAI-compatible decision endpoints.
+both halves decided by [TypeSafe Jev](https://openrouter.ai/typesafe/jev-1.13), OpenCode Console SystemOne, or OpenAI-compatible decision endpoints.
 
 Hermes lets you set a reasoning effort. It does not let you set a *different* one on the next turn — the
 level is a session setting, so a two-line question and a gnarly refactor both pay whichever effort you
@@ -84,7 +84,21 @@ OPENROUTER_API_KEY=sk-or-...
 
 Restart the session. That is the whole setup: the six-model grid ships as the default.
 
-Requirements: **Hermes Agent** with the `llm_request` middleware kind (0.21.4 or newer) and Python 3.11+. By default, targets `provider: ollama-cloud` with `OPENROUTER_API_KEY`. When configured for custom providers (`routable_providers`) or alternative backends (such as `decider: openai_compatible` for OpenCode), the corresponding API key (e.g. `OPENCODE_GO_API_KEY`) and endpoint are used instead.
+Requirements: **Hermes Agent** with the `llm_request` middleware kind (0.21.4 or newer) and Python 3.11+. By default, targets `provider: ollama-cloud` with `OPENROUTER_API_KEY`. When configured for custom providers (`routable_providers`) or alternative backends (such as `decider: jev_console` for OpenCode Console or `decider: openai_compatible` for OpenCode Go), the corresponding API key (e.g. `OPENCODE_CONSOLE_API_KEY`, `OPENCODE_GO_API_KEY`) and endpoint are used instead.
+
+### Decider Backends: OpenRouter vs OpenCode Console vs OpenCode Go
+
+1. **`decider: jev` (default)**:
+   - Uses OpenRouter Decisions API (`https://openrouter.ai/api/alpha/decisions`) with `OPENROUTER_API_KEY`.
+   - Decider model: `typesafe/jev-1.13`.
+   - Routes default `ollama-cloud` provider across the six benchmarked models.
+2. **`decider: jev_console` (OpenCode Console)**:
+   - Uses OpenCode Console SystemOne API (`https://opencode.ai/inference/systemone/v1/systemone`) with `OPENCODE_CONSOLE_API_KEY`.
+   - Decider model: `console_jev_model` (`jev-1.13`) with automatic fallback iteration to `console_jev_fallback_model` (`jev-1.13` or paid Jev).
+   - Routes `opencode-console` provider across the two authorized models: `deepseek-v4.1-flash` and standard `mimo-v2.6-flash`.
+3. **`decider: openai_compatible` (OpenCode Go / Generic)**:
+   - Uses OpenAI-compatible chat completions (`https://opencode.ai/zen/go/v1/chat/completions`) with `OPENCODE_GO_API_KEY`.
+   - Decider model: `decider_model` (e.g. `deepseek-v4.1-flash`).
 
 ## Verify it is working
 
