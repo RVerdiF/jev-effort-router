@@ -217,7 +217,10 @@ Isso sustenta rigorosamente a declaração de `docs/routing-grid.md:102-104` e a
 ## 6. Implementação OpenCode Console Jev & Catálogo de 2 Modelos (`t_6ec7a94d`)
 
 ### 6.1 Resumo Normativo e Decisões de Escopo
-- **Diretiva do Dono & Status Operacional do MiMo**: O dono do produto definiu formalmente em comentário no card a escolha do ID padrão `mimo-v2.6-flash` (não-free), rejeitando estritamente a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. Contudo, a consulta pública à API oficial (`GET https://opencode.ai/inference/v1/models`) confirma `mimo-v2.6-flash-free`, `jev-1.13-free`, `jev-1.13` e `deepseek-v4.1-flash`, mas não lista `mimo-v2.6-flash`. Em conformidade estrita com o gate, a variante free nunca é substituída. Estruturalmente, o código, catálogo e allowlist suportam `mimo-v2.6-flash` e `deepseek-v4.1-flash` conforme especificado; no entanto, a ausência de confirmação pública oficial para o ID não-free é expressamente registrada como bloqueio operacional, sem alegar dois modelos operacionais em produção live.
+- **Diretiva do Dono & Separação de Rotas (Console Decider / Go Geração)**: O dono do produto definiu formalmente a escolha do ID padrão `mimo-v2.6-flash` (não-free) na geração, rejeitando estritamente a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. Conforme orientado pelo dono (Comentário 108), as fontes oficiais distinguem claramente os produtos:
+  - **Decider Jev Console**: Opera via SystemOne (`https://opencode.ai/inference/systemone/v1/systemone`) com modelo primário gratuito `jev-1.13-free` e fallback automático para o Jev pago (`jev-1.13`).
+  - **Geração OpenCode Go**: A geração dos modelos `deepseek-v4.1-flash` e `mimo-v2.6-flash` é atendida pelo provider `opencode-go`, onde a documentação oficial do OpenCode Go confirma explicitamente MiMo-V2.6-Flash normal e DeepSeek V4.1 Flash com tarifação por token.
+  - **Isolamento e Segurança**: O MiMo normal não é enviado ao endpoint Console, e a variante `mimo-v2.6-flash-free` nunca é substituída. Ambas as rotas permanecem estritamente isoladas e verificadas offline sem chamadas pagas nem inferência live.
 - **Isolamento Estrito**: O provedor `opencode-console` (e alias `opencode_console`) opera com grade própria (`OPENCODE_CONSOLE_GRID`) e allowlist restrita aos dois modelos autorizados (`deepseek-v4.1-flash`, `mimo-v2.6-flash`). Modelos fora da allowlist falham aberto.
 - **Política Explícita de Reasoning por Modelo**: Distingue explicitamente (1) o nível de esforço lógico que o Jev decide/devolve (`effort_requested`) e (2) o parâmetro de reasoning no endpoint de geração (`effort`). Sem evidência ou documentação empírica confirmando suporte no endpoint de geração do `opencode-console`, o parâmetro de reasoning é estritamente omitido do wire para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, sem inferir suporte a partir de OpenCode Go ou Ollama, e sem alegar que o modelo de geração downstream recebeu o reasoning escolhido.
 - **Operação Estritamente Offline**: Nenhuma chamada paga ou de rede foi realizada; nenhum perfil real foi modificado (conforme o gate do card, instalação e chamadas de rede exigem autorização operacional separada).
@@ -250,12 +253,12 @@ tests/test_grid_coverage.py ....                                         [ 58%]
 tests/test_live_probe.py .sssss                                          [ 60%]
 tests/test_registration.py .ss..s.............                           [ 67%]
 tests/test_router.py ................................................... [ 88%]
-..............................                                           [100%]
+...............................                                          [100%]
 
-======================== 245 passed, 8 skipped in 0.74s ========================
+======================== 246 passed, 8 skipped in 0.61s ========================
 ```
 
-Todos os 245 testes offline passaram com sucesso (evolução sobre os 210 testes históricos da round 1). Os 8 skips consistem em: 5 testes de live probe (`test_live_probe.py`) que requerem conexão de rede externa/sockets, e 3 testes em `test_registration.py` condicionados à biblioteca opcional PyYAML (`yaml = pytest.importorskip("yaml")`).
+Todos os 246 testes offline passaram com sucesso (evolução sobre os 245 testes da round 4 e 210 testes históricos da round 1). Os 8 skips consistem em: 5 testes de live probe (`test_live_probe.py`) que requerem conexão de rede externa/sockets, e 3 testes em `test_registration.py` condicionados à biblioteca opcional PyYAML (`yaml = pytest.importorskip("yaml")`).
 
 ### 6.3 Verificação de Cobertura nos Testes Adicionados
 1. **`tests/test_client.py`**:
@@ -275,6 +278,7 @@ Todos os 245 testes offline passaram com sucesso (evolução sobre os 210 testes
    - `test_materialized_schema_defaults`: valida os defaults materializados diretamente de `plugin.yaml` (`console_jev_model` = `jev-1.13-free`, `console_jev_fallback_model` = `jev-1.13`, decider default `jev`, routable_providers default `[ollama-cloud]`).
 4. **`tests/test_router.py`**:
    - `test_jev_console_decider_routing_end_to_end`: valida roteamento completo ponta a ponta com `decider: jev_console` e `provider: opencode-console`.
+   - `test_jev_console_decider_with_opencode_go_generation`: valida roteamento completo ponta a ponta separando o decider Jev Console (SystemOne com `OPENCODE_CONSOLE_API_KEY`) da geração downstream no provider `opencode-go` (com `mimo-v2.6-flash`), verificando integridade dos headers, payload e snapshots.
    - `test_cross_provider_memo_replay_isolation`: valida que transições de provider não reutilizam memo incompatível.
    - `test_cross_decider_memo_replay_isolation`: valida que transições de decider não reutilizam memo incompatível.
    - `test_memo_replay_invalidated_by_confidence_threshold_elevation`: valida que elevação de limiar de confiança no mesmo turno invalida o memo anterior e falha aberto sem chamada duplicada.

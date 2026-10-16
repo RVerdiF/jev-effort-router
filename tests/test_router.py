@@ -1146,6 +1146,42 @@ def test_jev_console_decider_routing_end_to_end(tmp_path, monkeypatch):
     assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
 
 
+def test_jev_console_decider_with_opencode_go_generation(tmp_path, monkeypatch):
+    """Verify Jev Console decider (SystemOne) routing generation models for provider: opencode-go."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "«redacted:sk-…»")
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    audit_dir = tmp_path / "audit"
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["opencode-go"],
+            "grids": {
+                "opencode-go": [
+                    "deepseek-v4.1-flash: fast, efficient baseline model for routine coding and reasoning",
+                    "mimo-v2.6-flash: advanced multimodal reasoning model with deep analysis capabilities",
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(audit_dir))
+
+    req = ollama_request()
+    result = route(
+        router,
+        req,
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    assert result["request"]["model"] == "mimo-v2.6-flash"
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
+    assert "Bearer «redacted:sk-…»" in transport.calls[0]["headers"]["Authorization"]
+
+
 def test_cross_decider_memo_replay_isolation(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
