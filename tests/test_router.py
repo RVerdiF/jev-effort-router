@@ -1417,17 +1417,20 @@ def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(
     assert transport_no_eff.call_count == 1
 
 
+_CONSOLE_TEST_SECRET = "test-console-secret-key-999888"
+
+
 @pytest.mark.parametrize(
     "case_name,resp_or_exc",
     [
-        ("http_401", StubResponse({"error": "unauthorized"}, status_code=401)),
-        ("http_403", StubResponse({"error": "forbidden"}, status_code=403)),
-        ("http_429", StubResponse({"error": "rate limited"}, status_code=429)),
-        ("http_500", StubResponse({"error": "internal error"}, status_code=500)),
-        ("http_503", StubResponse({"error": "unavailable"}, status_code=503)),
-        ("timeout", ReadTimeout("upstream timeout")),
-        ("real_non_json_html", StubResponse(payload=None, status_code=200, text="<html><body>Gateway Timeout</body></html>")),
-        ("real_non_json_raw", StubResponse(payload=None, status_code=200, text="Plain error text")),
+        ("http_401", StubResponse({"error": f"unauthorized bearer {_CONSOLE_TEST_SECRET}"}, status_code=401)),
+        ("http_403", StubResponse({"error": f"forbidden key {_CONSOLE_TEST_SECRET}"}, status_code=403)),
+        ("http_429", StubResponse({"error": f"rate limited on {_CONSOLE_TEST_SECRET}"}, status_code=429)),
+        ("http_500", StubResponse({"error": f"internal error key={_CONSOLE_TEST_SECRET}"}, status_code=500)),
+        ("http_503", StubResponse({"error": f"unavailable server key {_CONSOLE_TEST_SECRET}"}, status_code=503)),
+        ("timeout", ReadTimeout(f"upstream timeout connecting with Bearer {_CONSOLE_TEST_SECRET}")),
+        ("real_non_json_html", StubResponse(payload=None, status_code=200, text=f"<html><body>Gateway Timeout {_CONSOLE_TEST_SECRET}</body></html>")),
+        ("real_non_json_raw", StubResponse(payload=None, status_code=200, text=f"Plain error text with auth {_CONSOLE_TEST_SECRET}")),
         ("empty_dict", StubResponse({})),
         ("missing_answers_envelope", StubResponse({"result": "ok"})),
         ("answers_not_dict", StubResponse({"answers": ["not", "a", "dict"]})),
@@ -1456,8 +1459,7 @@ def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(
     ],
 )
 def test_middleware_fail_open_console_negative_matrix(tmp_path, monkeypatch, caplog, case_name, resp_or_exc):
-    secret_key = "test-console-secret-key-999888"
-    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", secret_key)
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", _CONSOLE_TEST_SECRET)
     transport = StubTransport([resp_or_exc])
     router, settings = build(
         tmp_path,
@@ -1471,17 +1473,58 @@ def test_middleware_fail_open_console_negative_matrix(tmp_path, monkeypatch, cap
     )
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
 
-    original_req = ollama_request(model="deepseek-v4.1-flash")
-    req_copy = copy.deepcopy(original_req)
-    req_json_before = json.dumps(original_req, sort_keys=True)
+    working_req = {
+        "model": "deepseek-v4.1-flash",
+        "messages": [{"role": "user", "content": "analyze problem step"}],
+        "temperature": 0.7,
+        "working_stage": "pre_routing",
+        "metadata": {"caller": "orchestrator", "hop": 1, "nested": {"active": True}},
+    }
+    original_req = {
+        "model": "deepseek-v4.1-flash",
+        "messages": [{"role": "user", "content": "analyze problem step"}],
+        "temperature": 0.7,
+        "pristine_stage": "entrypoint",
+        "metadata": {"caller": "client", "hop": 0, "nested": {"active": False}},
+    }
+    working_snapshot = json.dumps(working_req, sort_keys=True)
+    original_snapshot = json.dumps(original_req, sort_keys=True)
+    working_copy = copy.deepcopy(working_req)
+    original_copy = copy.deepcopy(original_req)
 
-    result = route(router, original_req, provider="opencode-console")
+    result = router.on_llm_request(
+        working_req,
+        original_req,
+        turn_id=f"turn-{case_name}",
+        session_id=f"session-{case_name}",
+        platform="cli",
+        model="deepseek-v4.1-flash",
+        provider="opencode-console",
+        base_url="https://opencode.ai/inference/openai/v1",
+        api_mode="chat_completions",
+        api_call_count=0,
+        api_request_id=f"turn-{case_name}:api:0",
+    )
     assert result is None, f"Expected fail-open (None) for case {case_name}"
-    # Verify request and original_request unchanged
-    assert json.dumps(original_req, sort_keys=True) == req_json_before
-    assert original_req == req_copy
-    # Verify secret is never logged or exposed in audit
-    assert secret_key not in caplog.text
+    # Verify working request unchanged (both top-level and nested)
+    assert json.dumps(working_req, sort_keys=True) == working_snapshot
+    assert working_req == working_copy
+    # Verify original request unchanged (both top-level and nested)
+    assert json.dumps(original_req, sort_keys=True) == original_snapshot
+    assert original_req == original_copy
+
+    # Verify audit trail recorded a skip without leaking secret
+    audit_file = tmp_path / "audit" / "routes.jsonl"
+    assert audit_file.exists(), f"Expected audit file for case {case_name}"
+    records = router.tail(settings, limit=10)
+    assert len(records) >= 1
+    assert records[-1]["event"] == "skip"
+    audit_text = audit_file.read_text(encoding="utf-8")
+    assert _CONSOLE_TEST_SECRET not in audit_text
+    # Verify secret is never logged in caplog and redaction is exercised when present
+    assert _CONSOLE_TEST_SECRET not in caplog.text
+    if case_name in ("http_401", "http_403", "http_429", "http_500", "http_503", "real_non_json_html", "real_non_json_raw"):
+        assert "[REDACTED]" in caplog.text
 
 
 def test_middleware_fail_open_both_models_fail(tmp_path, monkeypatch, caplog):
@@ -1502,14 +1545,53 @@ def test_middleware_fail_open_both_models_fail(tmp_path, monkeypatch, caplog):
     )
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
 
-    original_req = ollama_request(model="deepseek-v4.1-flash")
-    req_copy = copy.deepcopy(original_req)
-    req_json_before = json.dumps(original_req, sort_keys=True)
+    working_req = {
+        "model": "deepseek-v4.1-flash",
+        "messages": [{"role": "user", "content": "analyze problem step"}],
+        "temperature": 0.7,
+        "working_stage": "pre_routing",
+        "metadata": {"caller": "orchestrator", "hop": 1, "nested": {"active": True}},
+    }
+    original_req = {
+        "model": "deepseek-v4.1-flash",
+        "messages": [{"role": "user", "content": "analyze problem step"}],
+        "temperature": 0.7,
+        "pristine_stage": "entrypoint",
+        "metadata": {"caller": "client", "hop": 0, "nested": {"active": False}},
+    }
+    working_snapshot = json.dumps(working_req, sort_keys=True)
+    original_snapshot = json.dumps(original_req, sort_keys=True)
+    working_copy = copy.deepcopy(working_req)
+    original_copy = copy.deepcopy(original_req)
 
-    result = route(router, original_req, provider="opencode-console")
+    result = router.on_llm_request(
+        working_req,
+        original_req,
+        turn_id="turn-both-fail",
+        session_id="session-both-fail",
+        platform="cli",
+        model="deepseek-v4.1-flash",
+        provider="opencode-console",
+        base_url="https://opencode.ai/inference/openai/v1",
+        api_mode="chat_completions",
+        api_call_count=0,
+        api_request_id="turn-both-fail:api:0",
+    )
     assert result is None
-    assert json.dumps(original_req, sort_keys=True) == req_json_before
-    assert original_req == req_copy
-    assert secret_key not in caplog.text
+    # Verify working request unchanged (both top-level and nested)
+    assert json.dumps(working_req, sort_keys=True) == working_snapshot
+    assert working_req == working_copy
+    # Verify original request unchanged (both top-level and nested)
+    assert json.dumps(original_req, sort_keys=True) == original_snapshot
+    assert original_req == original_copy
 
+    audit_file = tmp_path / "audit" / "routes.jsonl"
+    assert audit_file.exists()
+    records = router.tail(settings, limit=10)
+    assert len(records) >= 1
+    assert records[-1]["event"] == "skip"
+    audit_text = audit_file.read_text(encoding="utf-8")
+    assert secret_key not in audit_text
+    assert secret_key not in caplog.text
+    assert "[REDACTED]" in caplog.text
 

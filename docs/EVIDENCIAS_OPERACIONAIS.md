@@ -229,32 +229,33 @@ Comando executado no worktree isolado (`.worktrees/t_6ec7a94d`):
 uv run --extra dev pytest
 ```
 
-Saída obtida:
+Saída obtida (execução atual):
 ```text
 ============================= test session starts ==============================
 platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/rafael/hermes/workspaces/jev-effort-router/.worktrees/t_6ec7a94d
 configfile: pyproject.toml
 plugins: anyio-4.15.1
-collected 218 items
+collected 253 items
 
-tests/test_audit.py ...........                                          [  5%]
-tests/test_catalog.py ..................                                 [ 13%]
-tests/test_catalog_status.py ....                                        [ 15%]
-tests/test_client.py ................................................... [ 38%]
-.                                                                        [ 38%]
-tests/test_config_policy.py .............................                [ 52%]
-tests/test_effort.py .................                                   [ 60%]
-tests/test_grid.py ............                                          [ 65%]
-tests/test_grid_coverage.py ....                                         [ 67%]
-tests/test_live_probe.py .sssss                                          [ 70%]
-tests/test_registration.py .ss..s.............                           [ 78%]
-tests/test_router.py ..............................................      [100%]
+tests/test_audit.py ...........                                          [  4%]
+tests/test_catalog.py ..................                                 [ 11%]
+tests/test_catalog_status.py ....                                        [ 13%]
+tests/test_client.py ................................................... [ 33%]
+.                                                                        [ 33%]
+tests/test_config_policy.py .............................                [ 45%]
+tests/test_effort.py .................                                   [ 51%]
+tests/test_grid.py ............                                          [ 56%]
+tests/test_grid_coverage.py ....                                         [ 58%]
+tests/test_live_probe.py .sssss                                          [ 60%]
+tests/test_registration.py .ss..s.............                           [ 67%]
+tests/test_router.py ................................................... [ 88%]
+..............................                                           [100%]
 
-======================== 210 passed, 8 skipped in 0.81s ========================
+======================== 245 passed, 8 skipped in 0.74s ========================
 ```
 
-Todos os 210 testes offline passaram com sucesso. Os 8 skips consistem em: 5 testes de live probe (`test_live_probe.py`) que requerem conexão de rede externa/sockets, e 3 testes em `test_registration.py` condicionados à biblioteca opcional PyYAML (`yaml = pytest.importorskip("yaml")`).
+Todos os 245 testes offline passaram com sucesso (evolução sobre os 210 testes históricos da round 1). Os 8 skips consistem em: 5 testes de live probe (`test_live_probe.py`) que requerem conexão de rede externa/sockets, e 3 testes em `test_registration.py` condicionados à biblioteca opcional PyYAML (`yaml = pytest.importorskip("yaml")`).
 
 ### 6.3 Verificação de Cobertura nos Testes Adicionados
 1. **`tests/test_client.py`**:
@@ -280,8 +281,8 @@ Todos os 210 testes offline passaram com sucesso. Os 8 skips consistem em: 5 tes
    - `test_memo_replay_invalidated_by_fallback_backend_or_key_env_change`: valida que alteração de backend de fallback ou de variável de chave invalida o replay de memo.
    - `test_middleware_rejects_invented_criteria_or_outsider_choice`: valida rejeição de choice com critérios inventados ou opção fora da grade enviada, mantendo request byte-idêntico.
    - `test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response`: valida que effort_confidence 0.0 é distinguida de ausência de resposta no replay (invalidada quando limiar sobe), enquanto resposta sem esforço não sofre regressão.
-   - `test_middleware_fail_open_console_negative_matrix`: matriz completa offline (HTTP 401/403/429/500/503, timeout, non-JSON real, envelope, confidence bool/str/NaN/Inf/range/threshold, probabilidades nulas/tipos/domínio/soma, choice fora da grade/critérios inventados, effort malformado/critérios remapeados) comprovando retorno None, request e original_request serializados byte-idênticos e chave secreta não exposta em logs/auditoria.
-   - `test_middleware_fail_open_both_models_fail`: valida fail-open byte-idêntico quando ambos os modelos (primário e fallback) falham.
+   - `test_middleware_fail_open_console_negative_matrix`: matriz completa offline (HTTP 401/403/429/500/503, timeout, non-JSON real, envelope, confidence bool/str/NaN/Inf/range/threshold, probabilidades nulas/tipos/domínio/soma, choice fora da grade/critérios inventados, effort malformado/critérios remapeados) invocando `on_llm_request` diretamente com dois objetos de request independentes e distinguíveis (top-level e aninhados), comprovando retorno None (fail-open), preservação exata dos snapshots serializados de ambos os payloads (`working_req` e `original_req`), geração do registro de skip na trilha de auditoria real (`routes.jsonl`), e ausência da chave secreta tanto nos logs (`caplog.text`) quanto na auditoria, com exerção real de redaction (`[REDACTED]`) em corpos de erro e payloads não-JSON com segredo embutido.
+   - `test_middleware_fail_open_both_models_fail`: valida fail-open quando ambos os modelos (primário e fallback) falham, invocando `on_llm_request` com objetos independentes e distinguíveis, comprovando preservação dos snapshots serializados de ambos, escrita de skip na auditoria, redaction efetiva do segredo no log (`[REDACTED]`) e ausência da chave secreta na auditoria e nos logs.
    - `test_opencode_console_distinguishes_logical_effort_from_wire`: valida que o Jev decide esforço lógico (`effort_requested='high'`), enquanto o wire payload omite `reasoning_effort` e o log de auditoria registra `effort=null`, sem alegar execução downstream.
 5. **`tests/test_effort.py`**:
    - `test_opencode_console_explicit_reasoning_policies`: valida políticas explícitas (`ModelReasoningPolicy`) para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, confirmando `omitted=True`, `wire_parameter=None` e decisões registradas.
