@@ -73,7 +73,11 @@ The OpenCode Console catalog is strictly gated to an initial allowlist of two mo
 
 #### Gate & Privacy Decision (Owner Directive)
 - **Decision Gate Closed**: The owner explicitly mandated the standard non-free ID `mimo-v2.6-flash`, rejecting the free variant `mimo-v2.6-flash-free` and its data retention/model training terms. Free tier is strictly reserved for Jev as decider, with fallback to paid Jev on OpenCode Console.
-- **Effort Omission**: For `opencode-console`, `reasoning_effort` is intentionally omitted from outgoing requests until wire compatibility is empirically verified per model family. It does NOT inherit the Ollama:cloud mapping table.
+- **Explicit Reasoning Policy per Model**: The router distinguishes (1) the logical effort level chosen and returned by Jev (`effort_requested`), and (2) the reasoning parameter/mode accepted by the generation endpoint (`effort`). For `opencode-console`:
+  - `deepseek-v4.1-flash`: Unconfirmed on OpenCode Console generation endpoint. Support on OpenCode Go (`/zen/go/v1`) or Ollama:cloud CANNOT be inferred. The wire parameter is explicitly omitted (`effort: null`) to prevent HTTP 400 rejection.
+  - `mimo-v2.6-flash`: Standard non-free multimodal/agentic model with no documented reasoning effort contract. Wire parameter is explicitly omitted.
+  - **Audit Semantics**: Logical effort evaluated by Jev is recorded in audit logs under `effort_requested` and `effort_choice`, but wire `effort` is recorded as `null`, without claiming that the downstream generation model received or executed the chosen reasoning.
+  - **Custom Override**: Operators can supply custom `effort_maps` if an endpoint is verified, which is applied strictly without escalation.
 - **Isolation**: OpenCode Console and Ollama:cloud remain fully isolated; the Ollama cache never inspects or filters Console models.
 
 ### Effort-to-wire mapping (Ollama:Cloud built-in)

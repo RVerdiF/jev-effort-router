@@ -181,6 +181,150 @@ def _resolve_custom_provider_effort(
     return None
 
 
+@dataclass(frozen=True)
+class ModelReasoningPolicy:
+    """Explicit reasoning effort policy for a model under a target provider."""
+
+    provider: str
+    model_id: str
+    wire_parameter: Optional[str]
+    accepted_levels: Tuple[str, ...]
+    evidence: str
+    omitted: bool
+    decision: str
+
+
+#: Explicit reasoning policies for OpenCode Console models.
+#: Neither model has empirical evidence or documentation confirming reasoning parameter support
+#: on the opencode-console generation endpoint. Support CANNOT be inferred from OpenCode Go or Ollama:cloud.
+OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
+    "deepseek-v4.1-flash": ModelReasoningPolicy(
+        provider="opencode-console",
+        model_id="deepseek-v4.1-flash",
+        wire_parameter=None,
+        accepted_levels=(),
+        evidence=(
+            "Unconfirmed on opencode-console generation endpoint. Support on opencode-go (/zen/go/v1) "
+            "or ollama-cloud cannot be inferred."
+        ),
+        omitted=True,
+        decision=(
+            "Explicit omission: Documentation and empirical probe evidence do not confirm reasoning_effort parameter "
+            "support on the opencode-console generation endpoint for deepseek-v4.1-flash. The parameter is omitted on "
+            "the wire to prevent HTTP 400 rejection. The Jev logical effort choice is recorded as effort_requested in "
+            "audit trails, but wire effort remains None without claiming downstream model execution."
+        ),
+    ),
+    "mimo-v2.6-flash": ModelReasoningPolicy(
+        provider="opencode-console",
+        model_id="mimo-v2.6-flash",
+        wire_parameter=None,
+        accepted_levels=(),
+        evidence=(
+            "Unconfirmed on opencode-console generation endpoint. Standard non-free multimodal/agentic "
+            "model with no documented reasoning effort knob."
+        ),
+        omitted=True,
+        decision=(
+            "Explicit omission: Neither provider documentation nor live probe evidence confirms a reasoning knob for "
+            "mimo-v2.6-flash on opencode-console. Wire parameter is omitted; Jev logical effort choice is preserved in "
+            "effort_requested without asserting that the downstream model executed at that effort level."
+        ),
+    ),
+}
+
+
+def model_reasoning_policy(
+    model_id: Optional[str],
+    *,
+    provider: str = "",
+    effort_maps: Optional[Mapping[str, Any]] = None,
+) -> ModelReasoningPolicy:
+    """Return the explicit reasoning policy for a given model and provider."""
+    provider_key = (provider or "").strip().lower()
+    mid = (model_id or "").strip().lower().rsplit("/", 1)[-1]
+
+    # Custom configured effort_maps
+    if effort_maps and provider_key in effort_maps:
+        pmap = effort_maps[provider_key]
+        if isinstance(pmap, (dict, Mapping)):
+            for k, spec in pmap.items():
+                cand = str(k).strip().lower()
+                if cand == mid or cand == (model_id or "").strip().lower() or cand in mid:
+                    if isinstance(spec, (list, tuple, set)):
+                        acc = tuple(
+                            str(x).strip().lower()
+                            for x in spec
+                            if str(x).strip().lower() in LADDER and str(x).strip().lower() != "none"
+                        )
+                    elif isinstance(spec, (dict, Mapping)):
+                        acc = tuple(
+                            str(x).strip().lower()
+                            for x in spec.get("accepted", ())
+                            if str(x).strip().lower() in LADDER and str(x).strip().lower() != "none"
+                        )
+                    else:
+                        acc = ()
+                    if acc:
+                        return ModelReasoningPolicy(
+                            provider=provider_key,
+                            model_id=model_id or "",
+                            wire_parameter="reasoning_effort",
+                            accepted_levels=acc,
+                            evidence="Explicitly configured by operator via settings.effort_maps",
+                            omitted=False,
+                            decision=f"Operator declared effort map for {provider_key}/{model_id} with accepted levels {acc}.",
+                        )
+                    return ModelReasoningPolicy(
+                            provider=provider_key,
+                            model_id=model_id or "",
+                            wire_parameter=None,
+                            accepted_levels=(),
+                            evidence="Empty or invalid operator effort map specification",
+                            omitted=True,
+                            decision=f"Operator configured empty or invalid effort map for {provider_key}/{model_id}; omitting on wire.",
+                    )
+
+    # opencode-console built-in policy
+    if provider_key in ("opencode-console", "opencode_console"):
+        for k, pol in OPENCODE_CONSOLE_REASONING_POLICIES.items():
+            if k == mid or k in mid:
+                return pol
+        return ModelReasoningPolicy(
+            provider=provider_key,
+            model_id=model_id or "",
+            wire_parameter=None,
+            accepted_levels=(),
+            evidence="Model not in opencode-console allowlist; unconfirmed reasoning support.",
+            omitted=True,
+            decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
+        )
+
+    # ollama-cloud built-in policy
+    if not provider_key or provider_key in ("ollama-cloud", "ollama_cloud"):
+        fam = family_for(model_id, provider=provider_key)
+        return ModelReasoningPolicy(
+            provider="ollama-cloud",
+            model_id=model_id or "",
+            wire_parameter="reasoning_effort",
+            accepted_levels=fam.accepted,
+            evidence="Empirically verified against Ollama:cloud chat completions contract.",
+            omitted=False,
+            decision=f"Mapped to family '{fam.name}' with accepted levels {fam.accepted}.",
+        )
+
+    # Generic unmapped provider
+    return ModelReasoningPolicy(
+        provider=provider_key,
+        model_id=model_id or "",
+        wire_parameter=None,
+        accepted_levels=(),
+        evidence="Unmapped provider without confirmed contract or operator effort_maps.",
+        omitted=True,
+        decision=f"Provider {provider_key} is unmapped and lacks verified reasoning contract; omitted on wire.",
+    )
+
+
 def resolve_effort(
     model_id: Optional[str],
     effort: Optional[str],
@@ -191,20 +335,23 @@ def resolve_effort(
     """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field.
 
     When ``effort_maps`` specifies a map for ``provider``, it takes precedence.
-    For unmapped non-Ollama providers (like opencode-go), reasoning effort is unverified
-    and defaults to None (omitted on wire, never escalated).
+    For opencode-console and other unmapped providers without verified contracts,
+    reasoning effort is unverified and explicitly omitted (never guessed or escalated).
     """
     if not effort:
         return None
 
+    policy = model_reasoning_policy(model_id, provider=provider, effort_maps=effort_maps)
+    if policy.omitted or not policy.wire_parameter:
+        return None
+
     provider_key = (provider or "").strip().lower()
 
-    # Check per-provider custom effort_maps if present
+    # If resolved via custom effort_maps
     if effort_maps and provider_key in effort_maps:
         pmap = effort_maps[provider_key]
         if isinstance(pmap, (dict, Mapping)):
             model_key = (model_id or "").strip().lower().rsplit("/", 1)[-1]
-            # Look for exact match or slug match
             matched_spec = None
             for k, spec in pmap.items():
                 cand = str(k).strip().lower()
@@ -213,12 +360,6 @@ def resolve_effort(
                     break
             if matched_spec is not None:
                 return _resolve_custom_provider_effort(effort, matched_spec)
-            # If model is not in provider's effort_map, omit
-            return None
-
-    # For providers other than ollama-cloud, if no effort map is declared, default is omit
-    if provider_key and provider_key not in ("ollama-cloud", "ollama_cloud"):
-        return None
 
     # Default built-in Ollama:cloud families
     family = family_for(model_id, provider=provider_key)

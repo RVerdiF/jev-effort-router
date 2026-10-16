@@ -43,6 +43,11 @@ class Memo:
     fallback_reasons: tuple = ()
     decider: str = "jev"
     provider: str = ""
+    session_id: str = ""
+    decider_endpoint: str = ""
+    decider_model: str = ""
+    confidence_threshold: float = 0.0
+    max_effort: Optional[str] = None
 
 
 class TurnMemo:
@@ -55,12 +60,22 @@ class TurnMemo:
         self._max_turns = max_turns
         self._max_sessions = max_sessions
 
-    def get_turn(self, turn_id: Optional[str], provider: Optional[str] = None) -> Optional[Memo]:
+    def get_turn(
+        self,
+        turn_id: Optional[str],
+        provider: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Optional[Memo]:
         memo = self._get(self._turns, turn_id, TURN_TTL_S)
-        if memo is not None and provider is not None:
-            memo_prov = getattr(memo, "provider", "")
-            if memo_prov and memo_prov != provider:
-                return None
+        if memo is not None:
+            if provider is not None:
+                memo_prov = getattr(memo, "provider", "")
+                if memo_prov and memo_prov != provider:
+                    return None
+            if session_id is not None:
+                memo_session = getattr(memo, "session_id", "")
+                if memo_session and memo_session != session_id:
+                    return None
         return memo
 
     def put_turn(self, turn_id: Optional[str], memo: Memo) -> None:

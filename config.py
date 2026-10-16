@@ -512,6 +512,23 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
     else:
         routable_providers = DEFAULT_ROUTABLE_PROVIDERS
 
+    _marker = object()
+    raw_console_model = read("console_jev_model", _marker)
+    if raw_console_model is _marker or raw_console_model is None:
+        console_jev_model = ""
+    else:
+        console_jev_model = str(raw_console_model).strip()
+
+    raw_fallback = read("console_jev_fallback_model", _marker)
+    if raw_fallback is _marker or raw_fallback is None:
+        console_jev_fallback = DEFAULT_CONSOLE_JEV_FALLBACK_MODEL
+    else:
+        txt = str(raw_fallback).strip()
+        if txt.lower() in ("none", "false", "off", "disabled") or txt == "":
+            console_jev_fallback = ""
+        else:
+            console_jev_fallback = txt
+
     settings = Settings(
         enabled=_as_bool(read("enabled", True), True),
         jev_model=_as_text(read("jev_model", DEFAULT_JEV_MODEL), DEFAULT_JEV_MODEL),
@@ -538,11 +555,8 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         decider_model=_as_text(read("decider_model", ""), ""),
         decider_api_key_env=_as_text(read("decider_api_key_env", ""), ""),
         console_endpoint=_as_text(read("console_endpoint", ""), ""),
-        console_jev_model=_as_text(read("console_jev_model", ""), ""),
-        console_jev_fallback_model=_as_text(
-            read("console_jev_fallback_model", DEFAULT_CONSOLE_JEV_FALLBACK_MODEL),
-            "",
-        ),
+        console_jev_model=console_jev_model,
+        console_jev_fallback_model=console_jev_fallback,
         console_api_key_env=_as_text(read("console_api_key_env", ""), ""),
         routable_providers=routable_providers if routable_providers else DEFAULT_ROUTABLE_PROVIDERS,
         grids=parse_grids(read("grids", None)),

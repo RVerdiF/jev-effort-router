@@ -1190,3 +1190,47 @@ def test_cross_decider_memo_replay_isolation(tmp_path, monkeypatch):
     assert res2 is None
 
 
+def test_opencode_console_distinguishes_logical_effort_from_wire(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    # Jev returns model choice "2" (mimo-v2.6-flash) and effort choice "high" with confidence 0.95
+    resp_payload = decision_payload(
+        model_choice="2",
+        model_confidence=0.95,
+        effort_choice="high",
+        effort_confidence=0.95,
+        grid_size=2,
+    )
+    transport = StubTransport([StubResponse(resp_payload)])
+    audit_dir = tmp_path / "audit"
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["opencode-console"],
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(audit_dir))
+
+    result = route(
+        router,
+        ollama_request(),
+        provider="opencode-console",
+        model="deepseek-v4.1-flash",
+    )
+    assert result is not None
+    assert result["request"]["model"] == "mimo-v2.6-flash"
+    # Wire payload MUST omit reasoning_effort because opencode-console support is unconfirmed
+    assert "reasoning_effort" not in result["request"]
+
+    # Audit record must distinguish logical effort (high) from wire (None / omitted)
+    records = router.tail(settings, limit=10)
+    assert len(records) == 1
+    record = records[0]
+    assert record["event"] == "route"
+    assert record["model"] == "mimo-v2.6-flash"
+    assert record["effort_requested"] == "high"
+    assert record["effort_choice"] == "high"
+    assert record["effort"] is None  # Never claimed as sent on wire
+
+

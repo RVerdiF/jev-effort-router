@@ -745,23 +745,17 @@ class JevConsoleDecider(BaseDecider):
         answers = data.get("answers")
         if not isinstance(answers, dict):
             return None, REASON_MALFORMED
-        model_answer = _answer(answers, MODEL_QUESTION_ID)
-        effort_answer = _answer(answers, EFFORT_QUESTION_ID)
-        if model_answer is None and effort_answer is None:
-            return None, REASON_MALFORMED
 
-        reasons: List[str] = []
-
-        # -- model -----------------------------------------------------------------
-        chosen: Optional[Entry] = None
-        model_confidence = 0.0
-        model_choice_text = ""
-        model_probabilities: Dict[str, float] = {}
-        if model_answer is None:
+        if MODEL_QUESTION_ID not in answers:
             return None, REASON_MALFORMED
+        model_answer = answers[MODEL_QUESTION_ID]
         if not isinstance(model_answer, dict):
             return None, REASON_MALFORMED
-        if answer_type(model_answer) != "choice":
+
+        # Specific wire validation: type must be explicitly present, string, and 'choice'
+        if "type" not in model_answer or not isinstance(model_answer["type"], str):
+            return None, REASON_MALFORMED
+        if model_answer["type"].strip().lower() != "choice":
             return None, REASON_MALFORMED
 
         conf_raw = model_answer.get("confidence")
@@ -774,42 +768,60 @@ class JevConsoleDecider(BaseDecider):
         if not math.isfinite(model_confidence) or model_confidence < 0.0 or model_confidence > 1.0:
             return None, REASON_MALFORMED
 
+        model_probabilities: Dict[str, float] = {}
         probs_raw = model_answer.get("probabilities")
         if probs_raw is not None:
-            if not isinstance(probs_raw, dict):
+            if not isinstance(probs_raw, dict) or not probs_raw:
                 return None, REASON_MALFORMED
+            grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
+            grid_model_ids = {entry.model_id for entry in effective.grid}
+            allowed_prob_keys = grid_positions | grid_model_ids | set(_criteria_map(model_answer).keys())
+            prob_sum = 0.0
             for k, v in probs_raw.items():
+                k_str = str(k).strip()
+                if k_str not in allowed_prob_keys:
+                    return None, REASON_MALFORMED
                 if isinstance(v, bool) or not isinstance(v, (int, float)):
                     return None, REASON_MALFORMED
                 vf = float(v)
                 if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
                     return None, REASON_MALFORMED
-                model_probabilities[str(k)] = vf
+                model_probabilities[k_str] = vf
+                prob_sum += vf
+            if abs(prob_sum - 1.0) > 0.02:
+                return None, REASON_MALFORMED
 
-        model_choice_text = _choice_text(model_answer)
+        if "choice" not in model_answer or model_answer["choice"] is None:
+            return None, REASON_MALFORMED
+        model_choice_text = str(model_answer["choice"]).strip()
+        if not model_choice_text:
+            return None, REASON_MALFORMED
+
         chosen = resolve(_criteria_map(model_answer), model_choice_text, effective.grid)
         if chosen is None:
-            reasons.append(REASON_UNKNOWN_CHOICE)
-        elif model_confidence < effective.confidence_threshold:
-            reasons.append(REASON_LOW_CONFIDENCE)
-            chosen = None
+            return None, REASON_UNKNOWN_CHOICE
+        if model_confidence < effective.confidence_threshold:
+            return None, REASON_LOW_CONFIDENCE
 
-        model = chosen.model_id if chosen is not None else _fallback_model(effective)
+        model = chosen.model_id
         prov_key = (provider or "").strip().lower()
         if prov_key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
             if model not in OPENCODE_CONSOLE_ALLOWLIST:
-                model = OPENCODE_CONSOLE_MODELS[0]
+                return None, REASON_UNKNOWN_CHOICE
 
         # -- effort ----------------------------------------------------------------
         requested: Optional[str] = None
         effort_confidence = 0.0
         effort_choice_text = ""
         effort_probabilities: Dict[str, float] = {}
-        answered = False
-        if effort_answer is not None:
+
+        if EFFORT_QUESTION_ID in answers:
+            effort_answer = answers[EFFORT_QUESTION_ID]
             if not isinstance(effort_answer, dict):
                 return None, REASON_MALFORMED
-            if answer_type(effort_answer) != "choice":
+            if "type" not in effort_answer or not isinstance(effort_answer["type"], str):
+                return None, REASON_MALFORMED
+            if effort_answer["type"].strip().lower() != "choice":
                 return None, REASON_MALFORMED
 
             e_conf_raw = effort_answer.get("confidence")
@@ -824,32 +836,36 @@ class JevConsoleDecider(BaseDecider):
 
             e_probs_raw = effort_answer.get("probabilities")
             if e_probs_raw is not None:
-                if not isinstance(e_probs_raw, dict):
+                if not isinstance(e_probs_raw, dict) or not e_probs_raw:
                     return None, REASON_MALFORMED
+                allowed_effort_keys = set(EFFORT_LEVELS) | {"1", "2", "3"}
+                e_prob_sum = 0.0
                 for k, v in e_probs_raw.items():
+                    k_str = str(k).strip().lower()
+                    if k_str not in allowed_effort_keys:
+                        return None, REASON_MALFORMED
                     if isinstance(v, bool) or not isinstance(v, (int, float)):
                         return None, REASON_MALFORMED
                     vf = float(v)
                     if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
                         return None, REASON_MALFORMED
-                    effort_probabilities[str(k)] = vf
+                    effort_probabilities[k_str] = vf
+                    e_prob_sum += vf
+                if abs(e_prob_sum - 1.0) > 0.02:
+                    return None, REASON_MALFORMED
 
-            answered = True
-            effort_choice_text = _choice_text(effort_answer)
+            if "choice" not in effort_answer or effort_answer["choice"] is None:
+                return None, REASON_MALFORMED
+            effort_choice_text = str(effort_answer["choice"]).strip()
             candidate = normalise_effort_choice(effort_choice_text)
             if candidate is None:
-                reasons.append(REASON_UNKNOWN_CHOICE)
-            elif effort_confidence < effective.confidence_threshold:
-                reasons.append(REASON_LOW_CONFIDENCE)
-            else:
-                requested = candidate
+                return None, REASON_UNKNOWN_CHOICE
+            if effort_confidence < effective.confidence_threshold:
+                return None, REASON_LOW_CONFIDENCE
+            requested = candidate
 
-        if requested is None and answered:
-            requested = effective.default_effort
-
-        if requested is None and effective.max_effort:
-            requested = effective.max_effort
-        requested = _cap_effort(requested, effective.max_effort)
+        if requested is not None:
+            requested = _cap_effort(requested, effective.max_effort)
 
         effort = resolve_effort(
             model,
@@ -874,7 +890,7 @@ class JevConsoleDecider(BaseDecider):
                 effort_probabilities=effort_probabilities,
                 alternatives=alternatives,
                 latency_ms=latency_ms,
-                fallback_reasons=tuple(reasons),
+                fallback_reasons=(),
                 decider="jev_console",
             ),
             None,

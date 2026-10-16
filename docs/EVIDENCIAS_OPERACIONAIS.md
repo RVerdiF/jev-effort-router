@@ -219,7 +219,7 @@ Isso sustenta rigorosamente a declaração de `docs/routing-grid.md:102-104` e a
 ### 6.1 Resumo Normativo e Decisões de Escopo
 - **Gate do Dono Atendido**: O dono do produto definiu formalmente em comentário no card a escolha do ID padrão `mimo-v2.6-flash` (não-free), rejeitando a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. O Jev atua como decider na camada OpenCode Console com suporte a modelo primário (`console_jev_model`) e fallback (`console_jev_fallback_model`), ambos configuráveis.
 - **Isolamento Estrito**: O provedor `opencode-console` (e alias `opencode_console`) opera com grade própria (`OPENCODE_CONSOLE_GRID`) e allowlist restrita aos dois modelos autorizados (`deepseek-v4.1-flash`, `mimo-v2.6-flash`). Modelos fora da allowlist falham aberto.
-- **Omissão de Esforço**: Para `opencode-console`, `reasoning_effort` é omitido do wire de geração até validação empírica por modelo, não herdando o mapa do Ollama.
+- **Política Explícita de Reasoning por Modelo**: Distingue explicitamente (1) o nível de esforço lógico que o Jev decide/devolve (`effort_requested`) e (2) o parâmetro de reasoning no endpoint de geração (`effort`). Sem evidência ou documentação empírica confirmando suporte no endpoint de geração do `opencode-console`, o parâmetro de reasoning é estritamente omitido do wire para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, sem inferir suporte a partir de OpenCode Go ou Ollama, e sem alegar que o modelo de geração downstream recebeu o reasoning escolhido.
 - **Operação Estritamente Offline**: Nenhuma chamada paga ou de rede foi realizada; nenhum perfil real foi modificado (conforme o gate do card, instalação e chamadas de rede exigem autorização operacional separada).
 
 ### 6.2 Execução da Suíte de Testes Offline
@@ -236,24 +236,24 @@ platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
 rootdir: /home/rafael/hermes/workspaces/jev-effort-router/.worktrees/t_6ec7a94d
 configfile: pyproject.toml
 plugins: anyio-4.15.1
-collected 200 items
+collected 204 items
 
 tests/test_audit.py ...........                                          [  5%]
 tests/test_catalog.py ..................                                 [ 14%]
 tests/test_catalog_status.py ....                                        [ 16%]
-tests/test_client.py ..........................................          [ 37%]
-tests/test_config_policy.py ............................                 [ 51%]
-tests/test_effort.py ..............                                      [ 58%]
+tests/test_client.py ..........................................          [ 36%]
+tests/test_config_policy.py ............................                 [ 50%]
+tests/test_effort.py .................                                   [ 58%]
 tests/test_grid.py ............                                          [ 64%]
 tests/test_grid_coverage.py ....                                         [ 66%]
 tests/test_live_probe.py .sssss                                          [ 69%]
-tests/test_registration.py .ss..s.............                           [ 79%]
-tests/test_router.py ..........................................          [100%]
+tests/test_registration.py .ss..s.............                           [ 78%]
+tests/test_router.py ...........................................         [100%]
 
-======================== 192 passed, 8 skipped in 0.65s ========================
+======================== 196 passed, 8 skipped in 0.79s ========================
 ```
 
-Todos os 192 testes offline passaram com sucesso (8 testes de live probe/sockets externos pulados por design offline).
+Todos os 196 testes offline passaram com sucesso (8 testes de live probe/sockets externos pulados por design offline).
 
 ### 6.3 Verificação de Cobertura nos Testes Adicionados
 1. **`tests/test_client.py`**:
@@ -269,3 +269,17 @@ Todos os 192 testes offline passaram com sucesso (8 testes de live probe/sockets
    - `test_jev_console_decider_routing_end_to_end`: valida roteamento completo ponta a ponta com `decider: jev_console` e `provider: opencode-console`.
    - `test_cross_provider_memo_replay_isolation`: valida que transições de provider não reutilizam memo incompatível.
    - `test_cross_decider_memo_replay_isolation`: valida que transições de decider não reutilizam memo incompatível.
+   - `test_opencode_console_distinguishes_logical_effort_from_wire`: valida que o Jev decide esforço lógico (`effort_requested='high'`), enquanto o wire payload omite `reasoning_effort` e o log de auditoria registra `effort=null`, sem alegar execução downstream.
+5. **`tests/test_effort.py`**:
+   - `test_opencode_console_explicit_reasoning_policies`: valida políticas explícitas (`ModelReasoningPolicy`) para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, confirmando `omitted=True`, `wire_parameter=None` e decisões registradas.
+   - `test_opencode_console_effort_cannot_be_inferred_from_other_providers`: comprova que suporte em `ollama-cloud` ou `opencode-go` não é inferido para `opencode-console`.
+   - `test_opencode_console_custom_effort_map_overrides_omission`: valida que mapeamentos explícitos em `effort_maps` pelo operador têm precedência e são honrados sem escalada.
+
+### 6.4 Matriz da Política de Reasoning por Modelo
+
+| Provedor | Modelo | Esforço Lógico (Jev) | Parâmetro no Wire | Níveis Aceitos | Evidência / Decisão |
+|---|---|---|---|---|---|
+| `opencode-console` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: Sem evidência empírica ou contrato no endpoint de geração do console. Não se infere de `opencode-go` ou `ollama-cloud`. Omitido para prevenir HTTP 400. |
+| `opencode-console` | `mimo-v2.6-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: Modelo multimodal/agentic não-free sem contrato de reasoning documentado. Omitido no wire. |
+| `ollama-cloud` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `reasoning_effort` | low, medium, high, max | **Verificado**: Contrato formal Ollama:cloud (`DEEPSEEK_V4_EFFORTS`). |
+| `ollama-cloud` | Outros (Kimi, GLM, etc.) | Sim (`low`/`medium`/`high`) | `reasoning_effort` | Por família | **Verificado**: Mapeamento e clamping estrito sem escalada. |

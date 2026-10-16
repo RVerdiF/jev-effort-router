@@ -109,12 +109,12 @@ config_schema:
     description: SystemOne endpoint for jev_console decider (defaults to https://opencode.ai/inference/systemone/v1/systemone).
   console_jev_model:
     type: str
-    default: ""
+    default: "jev-1.13-free"
     label: OpenCode Console primary Jev model
     description: Primary model for jev_console decider (defaults to jev-1.13-free).
   console_jev_fallback_model:
     type: str
-    default: ""
+    default: "jev-1.13"
     label: OpenCode Console fallback Jev model
     description: Fallback model for jev_console decider when primary fails (defaults to jev-1.13).
   console_api_key_env:

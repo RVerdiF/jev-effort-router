@@ -19,6 +19,7 @@ from .catalog import ModelCatalog
 from .client import (
     REASON_DISABLED,
     REASON_EXCEPTION,
+    REASON_LOW_CONFIDENCE,
     REASON_NO_API_KEY,
     REASON_SKIPPED_API_MODE,
     REASON_SKIPPED_MODEL,
@@ -29,6 +30,7 @@ from .client import (
     REASON_USER_DATA,
     Decision,
     JevClient,
+    _cap_effort,
 )
 from .config import (
     ROUTED_API_MODES,
@@ -179,6 +181,17 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
                     return None
 
+                # Session guard: a decision made for another session must not be replayed to this one
+                memo_session = getattr(memo, "session_id", "")
+                if memo_session and session_id and memo_session != session_id:
+                    logger.info(
+                        "jev-effort-router: memo decided for session %r is incompatible with active session %r; failing open",
+                        memo_session,
+                        session_id,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
                 # Decider guard: memo decided with a different decider must not be reused
                 memo_dec = getattr(memo, "decider", "")
                 if memo_dec and memo_dec != settings.decider:
@@ -188,6 +201,39 @@ class Router:
                         settings.decider,
                     )
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                # Decider configuration guard: endpoint and decider model must match active backend
+                memo_endpoint = getattr(memo, "decider_endpoint", "")
+                curr_endpoint = settings.base_url_for(settings.decider)
+                if memo_endpoint and curr_endpoint and memo_endpoint != curr_endpoint:
+                    logger.info(
+                        "jev-effort-router: memo decider endpoint %r != active %r; failing open",
+                        memo_endpoint,
+                        curr_endpoint,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                memo_model = getattr(memo, "decider_model", "")
+                curr_model = settings.decider_model_for(settings.decider)
+                if memo_model and curr_model and memo_model != curr_model:
+                    logger.info(
+                        "jev-effort-router: memo decider model %r != active %r; failing open",
+                        memo_model,
+                        curr_model,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                # Policy confidence threshold guard: replayed confidence must meet active threshold
+                if memo.model_confidence < effective.confidence_threshold and REASON_LOW_CONFIDENCE not in memo.fallback_reasons:
+                    logger.info(
+                        "jev-effort-router: memo confidence %.2f is below active threshold %.2f; failing open",
+                        memo.model_confidence,
+                        effective.confidence_threshold,
+                    )
+                    self._record_skip(settings, REASON_LOW_CONFIDENCE, where)
                     return None
 
                 # Grid guard: the replayed model must exist in the active provider's grid
@@ -200,14 +246,34 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                     return None
 
-                # Effort map guard: re-resolve effort against the active provider's map (never leaks unmapped effort)
+                # Effort map guard: re-resolve effort against the active provider's map and respect active max_effort cap
+                req_effort = memo.effort_requested or memo.effort
+                if req_effort is not None and effective.max_effort:
+                    req_effort = _cap_effort(req_effort, effective.max_effort)
+
                 re_effort = resolve_effort(
                     memo.model,
-                    memo.effort_requested or memo.effort,
+                    req_effort,
                     provider=provider,
                     effort_maps=settings.effort_maps,
                 )
                 decision = _decision_from_memo(memo, effort=re_effort)
+                if req_effort != memo.effort_requested:
+                    decision = Decision(
+                        model=decision.model,
+                        effort=decision.effort,
+                        effort_requested=req_effort,
+                        model_confidence=decision.model_confidence,
+                        effort_confidence=decision.effort_confidence,
+                        model_choice=decision.model_choice,
+                        effort_choice=decision.effort_choice,
+                        model_probabilities=decision.model_probabilities,
+                        effort_probabilities=decision.effort_probabilities,
+                        alternatives=decision.alternatives,
+                        latency_ms=decision.latency_ms,
+                        fallback_reasons=decision.fallback_reasons,
+                        decider=decision.decider,
+                    )
             else:
                 fetched = self._decide(settings, effective, request, where)
                 if fetched is None:
@@ -235,6 +301,11 @@ class Router:
                     fallback_reasons=decision.fallback_reasons,
                     decider=decision.decider,
                     provider=provider,
+                    session_id=session_id,
+                    decider_endpoint=settings.base_url_for(decision.decider),
+                    decider_model=settings.decider_model_for(decision.decider),
+                    confidence_threshold=effective.confidence_threshold,
+                    max_effort=effective.max_effort,
                 )
                 # Storing on "no memo found" rather than on an api_call_count test is deliberate:
                 # Hermes passes the *incremented* counter, so the first provider call of a turn
@@ -287,14 +358,14 @@ class Router:
         session instead, which routes once per conversation.
         """
         if settings.route_per_turn:
-            memo = self._memo.get_turn(turn_id)
+            memo = self._memo.get_turn(turn_id, session_id=session_id)
             return memo, memo is not None
         memo = self._memo.get_session(session_id)
         if memo is not None:
             return memo, True
         # No session decision yet, but this turn may already have decided one: don't re-decide
         # inside the same turn's tool loop.
-        memo = self._memo.get_turn(turn_id)
+        memo = self._memo.get_turn(turn_id, session_id=session_id)
         return memo, memo is not None
 
     def _decide(

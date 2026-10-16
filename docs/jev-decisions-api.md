@@ -168,7 +168,7 @@ Unlike unstructured chat responses, the decider's output is subjected to strict 
 | **Endpoint** | `POST https://opencode.ai/inference/systemone/v1/systemone` | `POST https://opencode.ai/zen/go/v1/chat/completions` | `POST https://openrouter.ai/api/alpha/decisions` |
 | **Protocol** | SystemOne typed decisions (`model`, `state`, `questions` -> `answers`) | OpenAI Chat Completions JSON mode | OpenRouter Decisions API |
 | **Credential Env** | `OPENCODE_CONSOLE_API_KEY` (or `console_api_key_env`) | `OPENCODE_GO_API_KEY` (or `decider_api_key_env`) | `OPENROUTER_API_KEY` |
-| **Decider Model** | `jev-1.13` (with fallback model support) | `deepseek-v4.1-flash` (or custom chat model) | `typesafe/jev-1.13` |
+| **Decider Model** | `jev-1.13-free` (primary) with fallback to `jev-1.13` (paid) | `deepseek-v4.1-flash` (or custom chat model) | `typesafe/jev-1.13` |
 | **Target Generation Provider** | `opencode-console` (generation models: `deepseek-v4.1-flash`, `mimo-v2.6-flash`) | `opencode-go` | `ollama-cloud` (by default) |
 | **Decider Role** | Steering decider only, not generation model | Steering decider only | Steering decider only |
 
@@ -176,7 +176,7 @@ Unlike unstructured chat responses, the decider's output is subjected to strict 
 
 ```
 POST {console_endpoint:-https://opencode.ai/inference/systemone/v1/systemone}
-Authorization: Bearer ${OPENCODE_CONSOLE_API_KEY}
+Authorization: Bearer ${OPEN...KEY}
 Content-Type: application/json
 User-Agent: Hermes-Agent/0.21.4 (jev-effort-router)
 ```
@@ -185,7 +185,7 @@ User-Agent: Hermes-Agent/0.21.4 (jev-effort-router)
 
 ```json
 {
-  "model": "jev-1.13",
+  "model": "jev-1.13-free",
   "state": {
     "user_message": "...",
     "recent_context": "...",

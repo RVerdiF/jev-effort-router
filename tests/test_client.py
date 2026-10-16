@@ -775,10 +775,8 @@ def test_jev_console_decider_low_confidence_degrades(monkeypatch):
         settings.effective(None, provider="opencode-console"),
         provider="opencode-console",
     )
-    assert reason is None
-    assert decision is not None
-    assert decision.model == "deepseek-v4.1-flash"
-    assert REASON_LOW_CONFIDENCE in decision.fallback_reasons
+    assert decision is None
+    assert reason == REASON_LOW_CONFIDENCE
 
 
 def test_jev_console_decider_allowlist_containment(monkeypatch):
@@ -799,9 +797,7 @@ def test_jev_console_decider_allowlist_containment(monkeypatch):
         settings.effective(None, provider="opencode-console"),
         provider="opencode-console",
     )
-    assert reason is None
-    assert decision is not None
-    assert decision.model == "deepseek-v4.1-flash"
-    assert REASON_UNKNOWN_CHOICE in decision.fallback_reasons
+    assert decision is None
+    assert reason == REASON_UNKNOWN_CHOICE
 
 
