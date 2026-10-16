@@ -6,11 +6,14 @@ stub Decisions API, so the contract under test is the one that ships.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
 
-from stubs import StubContext, StubResponse, StubState, StubTransport, decision_payload, ollama_request
+from client import JevClient
+from decider import REASON_LOW_CONFIDENCE
+from stubs import ReadTimeout, StubContext, StubResponse, StubState, StubTransport, decision_payload, ollama_request
 from config import load_settings
 from router import Router
 
@@ -1276,12 +1279,14 @@ def test_memo_replay_invalidated_by_confidence_threshold_elevation(tmp_path, mon
 
 def test_memo_replay_invalidated_by_fallback_backend_or_key_env_change(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    monkeypatch.setenv("CUSTOM_CONSOLE_KEY", "custom-console-key")
     resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
     transport = StubTransport([StubResponse(resp_payload)])
     current_config = {
         "decider": "jev_console",
         "routable_providers": ["opencode-console"],
         "console_jev_fallback_model": "jev-1.13",
+        "console_api_key_env": "OPENCODE_CONSOLE_API_KEY",
     }
     audit = StubState(tmp_path)
     router = Router(
@@ -1295,16 +1300,38 @@ def test_memo_replay_invalidated_by_fallback_backend_or_key_env_change(tmp_path,
     res1 = route(router, ollama_request(), provider="opencode-console", session_id="s2", turn_id="t1")
     assert res1 is not None
 
-    # Change fallback backend model
+    # Change fallback backend model -> invalidates replay
     current_config["console_jev_fallback_model"] = "other-fallback-model"
     res2 = route(router, ollama_request(), provider="opencode-console", session_id="s2", turn_id="t1", api_call_count=1)
     assert res2 is None
 
+    # Reset fallback model, verify replay with key env change invalidation
+    transport2 = StubTransport([StubResponse(resp_payload)])
+    current_config["console_jev_fallback_model"] = "jev-1.13"
+    router2 = Router(
+        lambda: load_settings(lambda k, d=None: current_config.get(k, d)),
+        get_state=lambda: audit,
+        client_factory=lambda s: _ClientWith(transport2, s),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router2, "_data_dir", lambda: str(tmp_path / "audit"))
+    res3 = route(router2, ollama_request(), provider="opencode-console", session_id="s3", turn_id="t1")
+    assert res3 is not None
 
-def test_middleware_fail_open_byte_identical_on_console_errors(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
-    # 500 error from upstream
-    transport = StubTransport([StubResponse({"error": "upstream down"}, status_code=500)])
+    # Change key env -> invalidates replay
+    current_config["console_api_key_env"] = "CUSTOM_CONSOLE_KEY"
+    res4 = route(router2, ollama_request(), provider="opencode-console", session_id="s3", turn_id="t1", api_call_count=1)
+    assert res4 is None
+
+
+def test_middleware_rejects_invented_criteria_or_outsider_choice(tmp_path, monkeypatch, caplog):
+    secret_key = "test-secret-console-key-probe1"
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", secret_key)
+    p = decision_payload(model_choice="2", model_confidence=0.99, effort_choice="high", effort_confidence=0.8, grid_size=2)
+    p["answers"]["model_route"]["choice"] = "outsider"
+    p["answers"]["model_route"]["criteria"] = {"2": "outsider"}
+
+    transport = StubTransport([StubResponse(p)])
     router, settings = build(
         tmp_path,
         transport,
@@ -1316,10 +1343,173 @@ def test_middleware_fail_open_byte_identical_on_console_errors(tmp_path, monkeyp
     )
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
 
-    original_req = ollama_request()
-    import copy
+    original_req = ollama_request(model="deepseek-v4.1-flash")
     req_copy = copy.deepcopy(original_req)
+    req_json_before = json.dumps(original_req, sort_keys=True)
+
     result = route(router, original_req, provider="opencode-console")
     assert result is None
+    assert json.dumps(original_req, sort_keys=True) == req_json_before
     assert original_req == req_copy
+    assert secret_key not in caplog.text
+
+
+def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-probe2")
+    # Case A: Probe 2 - zero effort confidence distinguishes presence from value
+    p_zero_effort = decision_payload(model_choice="2", model_confidence=0.99, effort_choice="high", effort_confidence=0.0, grid_size=2)
+    transport = StubTransport([StubResponse(p_zero_effort)])
+    current_config = {
+        "decider": "jev_console",
+        "routable_providers": ["opencode-console"],
+        "console_jev_fallback_model": "",
+        "confidence_threshold": 0.0,
+    }
+    audit = StubState(tmp_path)
+    router = Router(
+        lambda: load_settings(lambda k, d=None: current_config.get(k, d)),
+        get_state=lambda: audit,
+        client_factory=lambda s: _ClientWith(transport, s),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    req1 = ollama_request(model="deepseek-v4.1-flash")
+    res1 = route(router, req1, provider="opencode-console", session_id="s_zero", turn_id="t1")
+    assert res1 is not None
+    assert res1["request"]["model"] == "mimo-v2.6-flash"
+    assert transport.call_count == 1
+
+    # Elevate threshold to 0.5 in same turn: replay must FAIL because effort_confidence 0.0 < 0.5
+    current_config["confidence_threshold"] = 0.5
+    res2 = route(router, req1, provider="opencode-console", session_id="s_zero", turn_id="t1", api_call_count=1)
+    assert res2 is None
+    assert transport.call_count == 1  # No extra decider call
+
+    # Fresh decision with threshold 0.5 also returns None (low_confidence)
+    fresh_decision, fresh_reason = JevClient(
+        load_settings(lambda k, d=None: current_config.get(k, d)),
+        transport=StubTransport([StubResponse(p_zero_effort)]),
+    ).decide(req1["messages"], load_settings(lambda k, d=None: current_config.get(k, d)).effective(None, provider="opencode-console"), provider="opencode-console")
+    assert fresh_decision is None
+    assert fresh_reason == REASON_LOW_CONFIDENCE
+
+    # Case B: Response without effort question (include_effort=False)
+    p_no_effort = decision_payload(model_choice="2", model_confidence=0.99, grid_size=2, include_effort=False)
+    transport_no_eff = StubTransport([StubResponse(p_no_effort)])
+    current_config["confidence_threshold"] = 0.5
+    router_no_eff = Router(
+        lambda: load_settings(lambda k, d=None: current_config.get(k, d)),
+        get_state=lambda: audit,
+        client_factory=lambda s: _ClientWith(transport_no_eff, s),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router_no_eff, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    req2 = ollama_request(model="deepseek-v4.1-flash")
+    res3 = route(router_no_eff, req2, provider="opencode-console", session_id="s_no_eff", turn_id="t1")
+    assert res3 is not None
+    assert res3["request"]["model"] == "mimo-v2.6-flash"
+    # Second call in same turn: replay should succeed because response has no effort confidence
+    res4 = route(router_no_eff, req2, provider="opencode-console", session_id="s_no_eff", turn_id="t1", api_call_count=1)
+    assert res4 is not None
+    assert res4["request"]["model"] == "mimo-v2.6-flash"
+    assert transport_no_eff.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "case_name,resp_or_exc",
+    [
+        ("http_401", StubResponse({"error": "unauthorized"}, status_code=401)),
+        ("http_403", StubResponse({"error": "forbidden"}, status_code=403)),
+        ("http_429", StubResponse({"error": "rate limited"}, status_code=429)),
+        ("http_500", StubResponse({"error": "internal error"}, status_code=500)),
+        ("http_503", StubResponse({"error": "unavailable"}, status_code=503)),
+        ("timeout", ReadTimeout("upstream timeout")),
+        ("real_non_json_html", StubResponse(payload=None, status_code=200, text="<html><body>Gateway Timeout</body></html>")),
+        ("real_non_json_raw", StubResponse(payload=None, status_code=200, text="Plain error text")),
+        ("empty_dict", StubResponse({})),
+        ("missing_answers_envelope", StubResponse({"result": "ok"})),
+        ("answers_not_dict", StubResponse({"answers": ["not", "a", "dict"]})),
+        ("confidence_bool", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": True, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("confidence_string", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": "0.95", "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("confidence_nan", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": float("nan"), "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("confidence_inf", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": float("inf"), "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("confidence_negative", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": -0.5, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("confidence_above_one", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 1.5, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("confidence_below_threshold", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.3, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("probabilities_null", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": None}}})),
+        ("probabilities_not_dict", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": [0.5, 0.5]}}})),
+        ("probabilities_outside_domain", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"outsider": 1.0}}}})),
+        ("probabilities_bool_val", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": True, "2": False}}}})),
+        ("probabilities_nan_val", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": float("nan"), "2": 0.5}}}})),
+        ("probabilities_sum_mismatch", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": 0.2, "2": 0.2}}}})),
+        ("choice_missing", StubResponse({"answers": {"model_route": {"type": "choice", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("choice_empty", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "   ", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("choice_outside_grid", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "outsider", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("choice_invented_criteria", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "outsider", "criteria": {"2": "outsider"}, "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}}})),
+        ("effort_confidence_bool", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}, "reasoning_effort": {"type": "choice", "choice": "high", "confidence": True, "probabilities": {"low": 0.0, "medium": 0.0, "high": 1.0}}}})),
+        ("effort_confidence_nan", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}, "reasoning_effort": {"type": "choice", "choice": "high", "confidence": float("nan"), "probabilities": {"low": 0.0, "medium": 0.0, "high": 1.0}}}})),
+        ("effort_probabilities_bad_key", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}, "reasoning_effort": {"type": "choice", "choice": "high", "confidence": 0.95, "probabilities": {"extreme": 1.0}}}})),
+        ("effort_choice_invalid", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}, "reasoning_effort": {"type": "choice", "choice": "maximum", "confidence": 0.95, "probabilities": {"low": 0.0, "medium": 0.0, "high": 1.0}}}})),
+        ("effort_criteria_remapped", StubResponse({"answers": {"model_route": {"type": "choice", "choice": "2", "confidence": 0.95, "probabilities": {"1": 0.0, "2": 1.0}}, "reasoning_effort": {"type": "choice", "choice": "high", "criteria": {"3": "extreme"}, "confidence": 0.95, "probabilities": {"low": 0.0, "medium": 0.0, "high": 1.0}}}})),
+    ],
+)
+def test_middleware_fail_open_console_negative_matrix(tmp_path, monkeypatch, caplog, case_name, resp_or_exc):
+    secret_key = "test-console-secret-key-999888"
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", secret_key)
+    transport = StubTransport([resp_or_exc])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["opencode-console"],
+            "console_jev_fallback_model": "",  # fallback explicitly disabled
+            "confidence_threshold": 0.70,
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    original_req = ollama_request(model="deepseek-v4.1-flash")
+    req_copy = copy.deepcopy(original_req)
+    req_json_before = json.dumps(original_req, sort_keys=True)
+
+    result = route(router, original_req, provider="opencode-console")
+    assert result is None, f"Expected fail-open (None) for case {case_name}"
+    # Verify request and original_request unchanged
+    assert json.dumps(original_req, sort_keys=True) == req_json_before
+    assert original_req == req_copy
+    # Verify secret is never logged or exposed in audit
+    assert secret_key not in caplog.text
+
+
+def test_middleware_fail_open_both_models_fail(tmp_path, monkeypatch, caplog):
+    secret_key = "test-console-secret-both-fail"
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", secret_key)
+    transport = StubTransport([
+        StubResponse({"error": f"primary failed with {secret_key}"}, status_code=500),
+        StubResponse({"error": f"fallback failed with {secret_key}"}, status_code=500),
+    ])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["opencode-console"],
+            "console_jev_fallback_model": "jev-1.13",
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    original_req = ollama_request(model="deepseek-v4.1-flash")
+    req_copy = copy.deepcopy(original_req)
+    req_json_before = json.dumps(original_req, sort_keys=True)
+
+    result = route(router, original_req, provider="opencode-console")
+    assert result is None
+    assert json.dumps(original_req, sort_keys=True) == req_json_before
+    assert original_req == req_copy
+    assert secret_key not in caplog.text
+
 

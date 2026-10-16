@@ -37,7 +37,7 @@ from .config import (
     redact,
 )
 from .effort import resolve_effort
-from .grid import Entry, resolve
+from .grid import Entry, criteria, resolve
 from .state import (
     EFFORT_CRITERIA,
     EFFORT_QUESTION_ID,
@@ -86,6 +86,7 @@ class Decision:
     latency_ms: int = 0
     fallback_reasons: Tuple[str, ...] = ()
     decider: str = "jev"
+    has_effort_confidence: bool = False
 
     @property
     def degraded(self) -> bool:
@@ -349,6 +350,7 @@ class JevDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=tuple(reasons),
                 decider="jev",
+                has_effort_confidence=answered,
             ),
             None,
         )
@@ -616,6 +618,7 @@ class OpenAICompatibleDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=(),
                 decider="openai_compatible",
+                has_effort_confidence=True,
             ),
             None,
         )
@@ -769,27 +772,28 @@ class JevConsoleDecider(BaseDecider):
             return None, REASON_MALFORMED
 
         model_probabilities: Dict[str, float] = {}
-        probs_raw = model_answer.get("probabilities")
-        if probs_raw is not None:
-            if not isinstance(probs_raw, dict) or not probs_raw:
+        if "probabilities" not in model_answer or model_answer["probabilities"] is None:
+            return None, REASON_MALFORMED
+        probs_raw = model_answer["probabilities"]
+        if not isinstance(probs_raw, dict) or not probs_raw:
+            return None, REASON_MALFORMED
+        grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
+        grid_model_ids = {entry.model_id for entry in effective.grid}
+        allowed_prob_keys = grid_positions | grid_model_ids
+        prob_sum = 0.0
+        for k, v in probs_raw.items():
+            k_str = str(k).strip()
+            if k_str not in allowed_prob_keys:
                 return None, REASON_MALFORMED
-            grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
-            grid_model_ids = {entry.model_id for entry in effective.grid}
-            allowed_prob_keys = grid_positions | grid_model_ids
-            prob_sum = 0.0
-            for k, v in probs_raw.items():
-                k_str = str(k).strip()
-                if k_str not in allowed_prob_keys:
-                    return None, REASON_MALFORMED
-                if isinstance(v, bool) or not isinstance(v, (int, float)):
-                    return None, REASON_MALFORMED
-                vf = float(v)
-                if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
-                    return None, REASON_MALFORMED
-                model_probabilities[k_str] = vf
-                prob_sum += vf
-            if abs(prob_sum - 1.0) > 0.02:
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
                 return None, REASON_MALFORMED
+            vf = float(v)
+            if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
+                return None, REASON_MALFORMED
+            model_probabilities[k_str] = vf
+            prob_sum += vf
+        if abs(prob_sum - 1.0) > 0.02:
+            return None, REASON_MALFORMED
 
         if "choice" not in model_answer or model_answer["choice"] is None:
             return None, REASON_MALFORMED
@@ -797,7 +801,19 @@ class JevConsoleDecider(BaseDecider):
         if not model_choice_text:
             return None, REASON_MALFORMED
 
-        chosen = resolve(_criteria_map(model_answer), model_choice_text, effective.grid)
+        # Resolve choice strictly against sent criteria and options (rejecting invented/remapped criteria)
+        sent_criteria = criteria(effective.grid)
+        echoed_criteria = model_answer.get("criteria")
+        if echoed_criteria is not None:
+            if not isinstance(echoed_criteria, dict):
+                return None, REASON_MALFORMED
+            for k, v in echoed_criteria.items():
+                k_str = str(k).strip()
+                v_str = str(v).strip()
+                if k_str not in sent_criteria or v_str != sent_criteria[k_str]:
+                    return None, REASON_UNKNOWN_CHOICE
+
+        chosen = resolve(sent_criteria, model_choice_text, effective.grid)
         if chosen is None:
             return None, REASON_UNKNOWN_CHOICE
         if model_confidence < effective.confidence_threshold:
@@ -834,25 +850,36 @@ class JevConsoleDecider(BaseDecider):
             if not math.isfinite(effort_confidence) or effort_confidence < 0.0 or effort_confidence > 1.0:
                 return None, REASON_MALFORMED
 
-            e_probs_raw = effort_answer.get("probabilities")
-            if e_probs_raw is not None:
-                if not isinstance(e_probs_raw, dict) or not e_probs_raw:
+            if "probabilities" not in effort_answer or effort_answer["probabilities"] is None:
+                return None, REASON_MALFORMED
+            e_probs_raw = effort_answer["probabilities"]
+            if not isinstance(e_probs_raw, dict) or not e_probs_raw:
+                return None, REASON_MALFORMED
+            allowed_effort_keys = set(EFFORT_LEVELS) | {"1", "2", "3"}
+            e_prob_sum = 0.0
+            for k, v in e_probs_raw.items():
+                k_str = str(k).strip().lower()
+                if k_str not in allowed_effort_keys:
                     return None, REASON_MALFORMED
-                allowed_effort_keys = set(EFFORT_LEVELS) | {"1", "2", "3"}
-                e_prob_sum = 0.0
-                for k, v in e_probs_raw.items():
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    return None, REASON_MALFORMED
+                vf = float(v)
+                if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
+                    return None, REASON_MALFORMED
+                effort_probabilities[k_str] = vf
+                e_prob_sum += vf
+            if abs(e_prob_sum - 1.0) > 0.02:
+                return None, REASON_MALFORMED
+
+            e_criteria = effort_answer.get("criteria")
+            if e_criteria is not None:
+                if not isinstance(e_criteria, dict):
+                    return None, REASON_MALFORMED
+                sent_effort_criteria = dict(EFFORT_CRITERIA)
+                for k, v in e_criteria.items():
                     k_str = str(k).strip().lower()
-                    if k_str not in allowed_effort_keys:
-                        return None, REASON_MALFORMED
-                    if isinstance(v, bool) or not isinstance(v, (int, float)):
-                        return None, REASON_MALFORMED
-                    vf = float(v)
-                    if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
-                        return None, REASON_MALFORMED
-                    effort_probabilities[k_str] = vf
-                    e_prob_sum += vf
-                if abs(e_prob_sum - 1.0) > 0.02:
-                    return None, REASON_MALFORMED
+                    if k_str not in sent_effort_criteria or str(v).strip() != sent_effort_criteria[k_str]:
+                        return None, REASON_UNKNOWN_CHOICE
 
             if "choice" not in effort_answer or effort_answer["choice"] is None:
                 return None, REASON_MALFORMED
@@ -877,6 +904,7 @@ class JevConsoleDecider(BaseDecider):
         alternatives = tuple(
             entry.model_id for entry in effective.grid if entry.model_id != model
         )
+        has_effort = EFFORT_QUESTION_ID in answers
         return (
             Decision(
                 model=model,
@@ -892,6 +920,7 @@ class JevConsoleDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=(),
                 decider="jev_console",
+                has_effort_confidence=has_effort,
             ),
             None,
         )

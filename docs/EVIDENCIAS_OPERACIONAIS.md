@@ -267,7 +267,6 @@ Todos os 210 testes offline passaram com sucesso. Os 8 skips consistem em: 5 tes
    - `test_jev_console_decider_response_defined_probability_domain`: valida que o domínio de probabilidades é estritamente restrito às opções enviadas na grade e rejeita chaves externas inventadas pela resposta com `REASON_MALFORMED`.
    - `test_jev_console_decider_invalid_types_and_float_choice`: valida rejeição de escolhas float, tipos inválidos e escolhas de esforço numéricas.
    - `test_jev_console_decider_low_confidence_degrades`: valida degradação graciosa (fail-open) em confiança abaixo do limiar.
-   - `test_jev_console_decider_allowlist_containment`: valida contenção estrita à allowlist.
 2. **`tests/test_catalog.py`**:
    - `test_opencode_console_catalog_allowlist`: valida `is_known` True para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, False para modelos fora da allowlist (`kimi-k3`, etc.) sob `opencode-console` e `opencode_console`.
 3. **`tests/test_config_policy.py`**:
@@ -279,7 +278,10 @@ Todos os 210 testes offline passaram com sucesso. Os 8 skips consistem em: 5 tes
    - `test_cross_decider_memo_replay_isolation`: valida que transições de decider não reutilizam memo incompatível.
    - `test_memo_replay_invalidated_by_confidence_threshold_elevation`: valida que elevação de limiar de confiança no mesmo turno invalida o memo anterior e falha aberto sem chamada duplicada.
    - `test_memo_replay_invalidated_by_fallback_backend_or_key_env_change`: valida que alteração de backend de fallback ou de variável de chave invalida o replay de memo.
-   - `test_middleware_fail_open_byte_identical_on_console_errors`: valida que em caso de erro upstream o middleware fail-open preserva o payload original idêntico.
+   - `test_middleware_rejects_invented_criteria_or_outsider_choice`: valida rejeição de choice com critérios inventados ou opção fora da grade enviada, mantendo request byte-idêntico.
+   - `test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response`: valida que effort_confidence 0.0 é distinguida de ausência de resposta no replay (invalidada quando limiar sobe), enquanto resposta sem esforço não sofre regressão.
+   - `test_middleware_fail_open_console_negative_matrix`: matriz completa offline (HTTP 401/403/429/500/503, timeout, non-JSON real, envelope, confidence bool/str/NaN/Inf/range/threshold, probabilidades nulas/tipos/domínio/soma, choice fora da grade/critérios inventados, effort malformado/critérios remapeados) comprovando retorno None, request e original_request serializados byte-idênticos e chave secreta não exposta em logs/auditoria.
+   - `test_middleware_fail_open_both_models_fail`: valida fail-open byte-idêntico quando ambos os modelos (primário e fallback) falham.
    - `test_opencode_console_distinguishes_logical_effort_from_wire`: valida que o Jev decide esforço lógico (`effort_requested='high'`), enquanto o wire payload omite `reasoning_effort` e o log de auditoria registra `effort=null`, sem alegar execução downstream.
 5. **`tests/test_effort.py`**:
    - `test_opencode_console_explicit_reasoning_policies`: valida políticas explícitas (`ModelReasoningPolicy`) para `deepseek-v4.1-flash` e `mimo-v2.6-flash`, confirmando `omitted=True`, `wire_parameter=None` e decisões registradas.

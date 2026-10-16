@@ -258,9 +258,14 @@ class Router:
                     return None
 
                 # Policy confidence threshold guard: replayed confidence must meet active threshold
+                has_effort_conf = getattr(memo, "has_effort_confidence", None)
+                if has_effort_conf is None:
+                    has_effort_conf = bool(memo.effort_confidence > 0.0 or memo.effort_requested is not None)
+
+                effort_failed = has_effort_conf and (memo.effort_confidence < effective.confidence_threshold)
                 if (
                     memo.model_confidence < effective.confidence_threshold
-                    or (memo.effort_confidence > 0.0 and memo.effort_confidence < effective.confidence_threshold)
+                    or effort_failed
                 ) and REASON_LOW_CONFIDENCE not in memo.fallback_reasons:
                     logger.info(
                         "jev-effort-router: memo confidence (model=%.2f, effort=%.2f) is below active threshold %.2f; failing open",
@@ -354,6 +359,7 @@ class Router:
                     decider_fallback_model=(settings.console_jev_fallback_model or "").strip() if decision.decider == "jev_console" else "",
                     decider_key_env=settings.api_key_env_for(decision.decider),
                     grid_signature=tuple((e.model_id, e.description) for e in effective.grid),
+                    has_effort_confidence=getattr(decision, "has_effort_confidence", False),
                 )
                 # Storing on "no memo found" rather than on an api_call_count test is deliberate:
                 # Hermes passes the *incremented* counter, so the first provider call of a turn
@@ -620,4 +626,5 @@ def _decision_from_memo(memo: Memo, effort: Any = _UNSET) -> Decision:
         latency_ms=0,
         fallback_reasons=memo.fallback_reasons,
         decider=getattr(memo, "decider", "jev") or "jev",
+        has_effort_confidence=bool(getattr(memo, "has_effort_confidence", False)),
     )

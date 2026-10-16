@@ -51,6 +51,15 @@ class Memo:
     decider_fallback_model: str = ""
     decider_key_env: str = ""
     grid_signature: tuple = ()
+    has_effort_confidence: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        if self.has_effort_confidence is None:
+            object.__setattr__(
+                self,
+                "has_effort_confidence",
+                bool(self.effort_confidence > 0.0 or self.effort_requested is not None),
+            )
 
 
 class TurnMemo:

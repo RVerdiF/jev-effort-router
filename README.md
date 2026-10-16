@@ -95,7 +95,7 @@ Requirements: **Hermes Agent** with the `llm_request` middleware kind (0.21.4 or
 2. **`decider: jev_console` (OpenCode Console)**:
    - Uses OpenCode Console SystemOne API (`https://opencode.ai/inference/systemone/v1/systemone`) with `OPENCODE_CONSOLE_API_KEY`.
    - Decider model: primary `console_jev_model` (`jev-1.13-free`) with automatic fallback iteration to `console_jev_fallback_model` (`jev-1.13`, standard/paid Jev).
-   - Routes `opencode-console` provider across the two authorized models: `deepseek-v4.1-flash` and standard `mimo-v2.6-flash`.
+   - Routes `opencode-console` provider across the two authorized models: `deepseek-v4.1-flash` and standard `mimo-v2.6-flash` (note: per product owner directive, standard non-free `mimo-v2.6-flash` is configured and `mimo-v2.6-flash-free` is rejected; however, standard `mimo-v2.6-flash` is currently unconfirmed in public model listings — see `docs/routing-grid.md` and `docs/EVIDENCIAS_OPERACIONAIS.md` for details).
 3. **`decider: openai_compatible` (OpenCode Go / Generic)**:
    - Uses OpenAI-compatible chat completions (`https://opencode.ai/zen/go/v1/chat/completions`) with `OPENCODE_GO_API_KEY`.
    - Decider model: `decider_model` (e.g. `deepseek-v4.1-flash`).
