@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .config import (
+    DEFAULT_CONSOLE_BASE_URL,
+    DEFAULT_CONSOLE_JEV_FALLBACK_MODEL,
+    DEFAULT_CONSOLE_JEV_MODEL,
+    DEFAULT_CONSOLE_KEY_ENV,
     EFFORT_LEVELS,
     EffectiveSettings,
     Settings,
@@ -27,9 +31,10 @@ from .config import (
     _as_optional_float,
     api_key,
     redact,
+    route_allowlist,
 )
 from .effort import resolve_effort
-from .grid import Entry, resolve
+from .grid import Entry, criteria, resolve
 from .state import (
     EFFORT_CRITERIA,
     EFFORT_QUESTION_ID,
@@ -78,6 +83,7 @@ class Decision:
     latency_ms: int = 0
     fallback_reasons: Tuple[str, ...] = ()
     decider: str = "jev"
+    has_effort_confidence: bool = False
 
     @property
     def degraded(self) -> bool:
@@ -341,6 +347,7 @@ class JevDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=tuple(reasons),
                 decider="jev",
+                has_effort_confidence=answered,
             ),
             None,
         )
@@ -608,6 +615,308 @@ class OpenAICompatibleDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=(),
                 decider="openai_compatible",
+                has_effort_confidence=True,
+            ),
+            None,
+        )
+
+
+class JevConsoleDecider(BaseDecider):
+    """Decider backend for Jev on OpenCode Console SystemOne."""
+
+    def _post_one(
+        self, url: str, payload: Dict[str, Any], headers: Dict[str, str]
+    ) -> Tuple[Optional[Any], Optional[str]]:
+        if self._transport is not None:
+            response = self._transport.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self._settings.timeout_s,
+            )
+            return response, None
+
+        import httpx
+
+        with httpx.Client(timeout=self._settings.timeout_s) as client:
+            return (
+                client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self._settings.timeout_s,
+                ),
+                None,
+            )
+
+    def decide(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        effective: EffectiveSettings,
+        *,
+        platform: str = "",
+        provider: str = "",
+    ) -> Tuple[Optional[Decision], Optional[str]]:
+        key_env = self._settings.api_key_env_for("jev_console")
+        key = api_key(key_env)
+        if not key:
+            return None, REASON_NO_API_KEY
+
+        url = self._settings.base_url_for("jev_console")
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router",
+        }
+
+        # Models to try: primary (free) first, fallback (paid) second
+        primary_model = self._settings.decider_model_for("jev_console")
+        fallback_model = (self._settings.console_jev_fallback_model or "").strip()
+        models_to_try = [primary_model]
+        if fallback_model and fallback_model != primary_model:
+            models_to_try.append(fallback_model)
+
+        last_reason = REASON_UPSTREAM_ERROR
+        started = time.monotonic()
+
+        for model_name in models_to_try:
+            payload = build_payload(
+                messages,
+                effective.grid,
+                jev_model=model_name,
+                context_turns=self._settings.context_turns,
+                platform=platform,
+                provider=provider,
+            )
+            try:
+                response, _ = self._post_one(url, payload, headers)
+            except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.monotonic() - started) * 1000)
+                name = type(exc).__name__
+                timeout_types = ("Timeout", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "TimeoutException")
+                if any(token in name for token in timeout_types):
+                    logger.warning("jev-effort-router: Jev Console timed out on %s after %d ms (%s)", model_name, latency_ms, name)
+                    last_reason = REASON_TIMEOUT
+                else:
+                    logger.warning(
+                        "jev-effort-router: Jev Console call on %s failed: %s: %s",
+                        model_name,
+                        name,
+                        redact(exc, 300, env_name=key_env),
+                    )
+                    last_reason = REASON_UPSTREAM_ERROR
+                continue
+
+            latency_ms = int((time.monotonic() - started) * 1000)
+            if response is None:
+                continue
+            status = getattr(response, "status_code", None)
+            if status is None or not (200 <= int(status) < 300):
+                body = redact(getattr(response, "text", ""), 300, env_name=key_env)
+                logger.warning("jev-effort-router: Jev Console returned HTTP %s on %s: %s", status, model_name, body)
+                last_reason = REASON_UPSTREAM_ERROR
+                continue
+
+            try:
+                data = response.json()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "jev-effort-router: Jev Console returned a non-JSON body on %s: %s",
+                    model_name,
+                    redact(getattr(response, "text", ""), 300, env_name=key_env),
+                )
+                last_reason = REASON_MALFORMED
+                continue
+
+            dec, reason = self._interpret(data, effective, latency_ms=latency_ms, provider=provider)
+            if dec is not None:
+                return dec, None
+            if reason:
+                last_reason = reason
+                continue
+
+        return None, last_reason
+
+    def _interpret(
+        self, data: Any, effective: EffectiveSettings, *, latency_ms: int, provider: str = ""
+    ) -> Tuple[Optional[Decision], Optional[str]]:
+        if not isinstance(data, dict):
+            return None, REASON_MALFORMED
+        answers = data.get("answers")
+        if not isinstance(answers, dict):
+            return None, REASON_MALFORMED
+
+        if MODEL_QUESTION_ID not in answers:
+            return None, REASON_MALFORMED
+        model_answer = answers[MODEL_QUESTION_ID]
+        if not isinstance(model_answer, dict):
+            return None, REASON_MALFORMED
+
+        # Specific wire validation: type must be explicitly present, string, and 'choice'
+        if "type" not in model_answer or not isinstance(model_answer["type"], str):
+            return None, REASON_MALFORMED
+        if model_answer["type"].strip().lower() != "choice":
+            return None, REASON_MALFORMED
+
+        conf_raw = model_answer.get("confidence")
+        if conf_raw is None or isinstance(conf_raw, bool) or not isinstance(conf_raw, (int, float)):
+            return None, REASON_MALFORMED
+        try:
+            model_confidence = float(conf_raw)
+        except (TypeError, ValueError):
+            return None, REASON_MALFORMED
+        if not math.isfinite(model_confidence) or model_confidence < 0.0 or model_confidence > 1.0:
+            return None, REASON_MALFORMED
+
+        model_probabilities: Dict[str, float] = {}
+        if "probabilities" not in model_answer or model_answer["probabilities"] is None:
+            return None, REASON_MALFORMED
+        probs_raw = model_answer["probabilities"]
+        if not isinstance(probs_raw, dict) or not probs_raw:
+            return None, REASON_MALFORMED
+        grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
+        grid_model_ids = {entry.model_id for entry in effective.grid}
+        allowed_prob_keys = grid_positions | grid_model_ids
+        prob_sum = 0.0
+        for k, v in probs_raw.items():
+            k_str = str(k).strip()
+            if k_str not in allowed_prob_keys:
+                return None, REASON_MALFORMED
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return None, REASON_MALFORMED
+            vf = float(v)
+            if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
+                return None, REASON_MALFORMED
+            model_probabilities[k_str] = vf
+            prob_sum += vf
+        if abs(prob_sum - 1.0) > 0.02:
+            return None, REASON_MALFORMED
+
+        if "choice" not in model_answer or model_answer["choice"] is None:
+            return None, REASON_MALFORMED
+        model_choice_text = str(model_answer["choice"]).strip()
+        if not model_choice_text:
+            return None, REASON_MALFORMED
+
+        # Resolve choice strictly against sent criteria and options (rejecting invented/remapped criteria)
+        sent_criteria = criteria(effective.grid)
+        echoed_criteria = model_answer.get("criteria")
+        if echoed_criteria is not None:
+            if not isinstance(echoed_criteria, dict):
+                return None, REASON_MALFORMED
+            for k, v in echoed_criteria.items():
+                k_str = str(k).strip()
+                v_str = str(v).strip()
+                if k_str not in sent_criteria or v_str != sent_criteria[k_str]:
+                    return None, REASON_UNKNOWN_CHOICE
+
+        chosen = resolve(sent_criteria, model_choice_text, effective.grid)
+        if chosen is None:
+            return None, REASON_UNKNOWN_CHOICE
+        if model_confidence < effective.confidence_threshold:
+            return None, REASON_LOW_CONFIDENCE
+
+        model = chosen.model_id
+        allowlist = route_allowlist(provider, self._settings.decider)
+        if allowlist is not None and model not in allowlist:
+            return None, REASON_UNKNOWN_CHOICE
+
+        # -- effort ----------------------------------------------------------------
+        requested: Optional[str] = None
+        effort_confidence = 0.0
+        effort_choice_text = ""
+        effort_probabilities: Dict[str, float] = {}
+
+        if EFFORT_QUESTION_ID in answers:
+            effort_answer = answers[EFFORT_QUESTION_ID]
+            if not isinstance(effort_answer, dict):
+                return None, REASON_MALFORMED
+            if "type" not in effort_answer or not isinstance(effort_answer["type"], str):
+                return None, REASON_MALFORMED
+            if effort_answer["type"].strip().lower() != "choice":
+                return None, REASON_MALFORMED
+
+            e_conf_raw = effort_answer.get("confidence")
+            if e_conf_raw is None or isinstance(e_conf_raw, bool) or not isinstance(e_conf_raw, (int, float)):
+                return None, REASON_MALFORMED
+            try:
+                effort_confidence = float(e_conf_raw)
+            except (TypeError, ValueError):
+                return None, REASON_MALFORMED
+            if not math.isfinite(effort_confidence) or effort_confidence < 0.0 or effort_confidence > 1.0:
+                return None, REASON_MALFORMED
+
+            if "probabilities" not in effort_answer or effort_answer["probabilities"] is None:
+                return None, REASON_MALFORMED
+            e_probs_raw = effort_answer["probabilities"]
+            if not isinstance(e_probs_raw, dict) or not e_probs_raw:
+                return None, REASON_MALFORMED
+            allowed_effort_keys = set(EFFORT_LEVELS) | {"1", "2", "3"}
+            e_prob_sum = 0.0
+            for k, v in e_probs_raw.items():
+                k_str = str(k).strip().lower()
+                if k_str not in allowed_effort_keys:
+                    return None, REASON_MALFORMED
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    return None, REASON_MALFORMED
+                vf = float(v)
+                if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
+                    return None, REASON_MALFORMED
+                effort_probabilities[k_str] = vf
+                e_prob_sum += vf
+            if abs(e_prob_sum - 1.0) > 0.02:
+                return None, REASON_MALFORMED
+
+            e_criteria = effort_answer.get("criteria")
+            if e_criteria is not None:
+                if not isinstance(e_criteria, dict):
+                    return None, REASON_MALFORMED
+                sent_effort_criteria = dict(EFFORT_CRITERIA)
+                for k, v in e_criteria.items():
+                    k_str = str(k).strip().lower()
+                    if k_str not in sent_effort_criteria or str(v).strip() != sent_effort_criteria[k_str]:
+                        return None, REASON_UNKNOWN_CHOICE
+
+            if "choice" not in effort_answer or effort_answer["choice"] is None:
+                return None, REASON_MALFORMED
+            effort_choice_text = str(effort_answer["choice"]).strip()
+            candidate = normalise_effort_choice(effort_choice_text)
+            if candidate is None:
+                return None, REASON_UNKNOWN_CHOICE
+            if effort_confidence < effective.confidence_threshold:
+                return None, REASON_LOW_CONFIDENCE
+            requested = candidate
+
+        if requested is not None:
+            requested = _cap_effort(requested, effective.max_effort)
+
+        effort = resolve_effort(
+            model,
+            requested,
+            provider=provider,
+            effort_maps=self._settings.effort_maps,
+        )
+
+        alternatives = tuple(
+            entry.model_id for entry in effective.grid if entry.model_id != model
+        )
+        has_effort = EFFORT_QUESTION_ID in answers
+        return (
+            Decision(
+                model=model,
+                effort=effort,
+                effort_requested=requested,
+                model_confidence=model_confidence,
+                effort_confidence=effort_confidence,
+                model_choice=model_choice_text,
+                effort_choice=effort_choice_text,
+                model_probabilities=model_probabilities,
+                effort_probabilities=effort_probabilities,
+                alternatives=alternatives,
+                latency_ms=latency_ms,
+                fallback_reasons=(),
+                decider="jev_console",
+                has_effort_confidence=has_effort,
             ),
             None,
         )
@@ -617,4 +926,6 @@ def get_decider(settings: Settings, transport: Any = None) -> BaseDecider:
     """Factory for decider backends."""
     if settings.decider == "openai_compatible":
         return OpenAICompatibleDecider(settings, transport=transport)
+    if settings.decider == "jev_console":
+        return JevConsoleDecider(settings, transport=transport)
     return JevDecider(settings, transport=transport)

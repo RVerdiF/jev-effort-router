@@ -62,8 +62,11 @@ class ReadTimeout(Exception):
 def _distribution(winner: str, confidence: float, grid_size: int) -> Dict[str, float]:
     """A probability map over ``grid_size`` criteria with ``winner`` on top."""
     keys = [str(index) for index in range(1, max(1, grid_size) + 1)]
+    if len(keys) == 1:
+        # A one-option question has one certain answer: the distribution is trivially 1.0.
+        return {keys[0]: 1.0}
     if winner not in keys:
-        return {winner: confidence}
+        return {key: round(1.0 / len(keys), 4) for key in keys}
     others = [key for key in keys if key != winner]
     share = ((1.0 - confidence) / len(others)) if others else 0.0
     return {key: (confidence if key == winner else share) for key in keys}
@@ -98,10 +101,18 @@ def decision_payload(
         }
     }
     if include_effort:
+        if effort_probabilities is None:
+            effort_keys = ["low", "medium", "high"]
+            if effort_choice in effort_keys:
+                others = [k for k in effort_keys if k != effort_choice]
+                share = ((1.0 - effort_confidence) / len(others)) if others else 0.0
+                effort_probabilities = {k: (effort_confidence if k == effort_choice else share) for k in effort_keys}
+            else:
+                effort_probabilities = {effort_choice: effort_confidence}
         answers["reasoning_effort"] = {
             "type": effort_type,
             "choice": effort_choice,
-            "probabilities": effort_probabilities or {effort_choice: effort_confidence},
+            "probabilities": effort_probabilities,
             "confidence": effort_confidence,
         }
     return {"answers": answers}

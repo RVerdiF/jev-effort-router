@@ -78,6 +78,33 @@ DEFAULT_GRID: Tuple[Entry, ...] = (
     ),
 )
 
+#: The generation catalog of the opt-in ``opencode-console`` route.
+#:
+#: Console's public model list carries one normal (non-free) generation id. The owner's normal
+#: MiMo-V2.6-Flash is a **Go** model (see :data:`OPENCODE_GO_GRID`), so listing it here would
+#: send a model to the Console endpoint that the Console does not serve.
+OPENCODE_CONSOLE_GRID: Tuple[Entry, ...] = (
+    Entry(
+        "deepseek-v4.1-flash",
+        "the usual choice for general work: everyday writing, explanation, summarising, "
+        "ordinary coding and tool use; 1M context",
+    ),
+)
+
+#: The initial two-model generation catalog of the opt-in ``opencode-go`` route.
+#: Both ids are the normal (paid) variants — the owner refused ``mimo-v2.6-flash-free``.
+OPENCODE_GO_GRID: Tuple[Entry, ...] = (
+    Entry(
+        "deepseek-v4.1-flash",
+        "the usual choice for general work: everyday writing, explanation, summarising, "
+        "ordinary coding and tool use; 1M context",
+    ),
+    Entry(
+        "mimo-v2.6-flash",
+        "fast multimodal reasoning, coding, and efficient agentic tool calling",
+    ),
+)
+
 
 def parse_entry(raw: Any) -> Optional[Entry]:
     """Parse ``"model-id: description"`` (or a ``{model_id, description}`` mapping)."""

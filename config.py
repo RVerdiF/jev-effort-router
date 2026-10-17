@@ -13,7 +13,14 @@ from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
-from .grid import DEFAULT_GRID, Entry, parse_grid, parse_grid_strict
+from .grid import (
+    DEFAULT_GRID,
+    OPENCODE_CONSOLE_GRID,
+    OPENCODE_GO_GRID,
+    Entry,
+    parse_grid,
+    parse_grid_strict,
+)
 
 #: Provider profile this router is benchmarked for. Anything else is skipped untouched.
 ROUTED_PROVIDER = "ollama-cloud"
@@ -21,18 +28,48 @@ ROUTED_PROVIDER = "ollama-cloud"
 #: Provider profile name aliases that also count as routed.
 ROUTED_PROVIDER_ALIASES = ("ollama_cloud",)
 
+#: OpenCode Console provider and aliases.
+OPENCODE_CONSOLE_PROVIDER = "opencode-console"
+OPENCODE_CONSOLE_PROVIDER_ALIASES = ("opencode_console",)
+
+#: OpenCode Go provider and aliases: the generation route for the opt-in Console decider.
+OPENCODE_GO_PROVIDER = "opencode-go"
+OPENCODE_GO_PROVIDER_ALIASES = ("opencode_go",)
+
+#: Console serves generation for the one normal (non-free) id its public model list carries.
+#: Normal MiMo-V2.6-Flash is a Go model, so it is deliberately absent here; the free variant
+#: was refused by the owner and is absent from both catalogs.
+OPENCODE_CONSOLE_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash",)
+OPENCODE_CONSOLE_ALLOWLIST = frozenset(OPENCODE_CONSOLE_MODELS)
+
+#: The Go generation route's initial catalog: the two authorized normal models.
+OPENCODE_GO_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash", "mimo-v2.6-flash")
+OPENCODE_GO_ALLOWLIST = frozenset(OPENCODE_GO_MODELS)
+
+#: The provider/alias pairs an operator grid may be declared under.
+_GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (ROUTED_PROVIDER, ROUTED_PROVIDER_ALIASES),
+    (OPENCODE_CONSOLE_PROVIDER, OPENCODE_CONSOLE_PROVIDER_ALIASES),
+    (OPENCODE_GO_PROVIDER, OPENCODE_GO_PROVIDER_ALIASES),
+)
+
 #: API modes this router understands. The Ollama:cloud profile is chat_completions;
 #: a Responses or Anthropic-Messages route builds its payload elsewhere and is left alone.
 ROUTED_API_MODES = ("chat_completions",)
 
 EFFORT_LEVELS: Tuple[str, ...] = ("low", "medium", "high")
 
-DECIDERS: Tuple[str, ...] = ("jev", "openai_compatible")
+DECIDERS: Tuple[str, ...] = ("jev", "openai_compatible", "jev_console")
 DEFAULT_DECIDER = "jev"
 DEFAULT_ROUTABLE_PROVIDERS: Tuple[str, ...] = ("ollama-cloud",)
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEFAULT_OPENAI_COMPATIBLE_MODEL = "deepseek-v4.1-flash"
 DEFAULT_OPENAI_COMPATIBLE_KEY_ENV = "OPENCODE_GO_API_KEY"
+
+DEFAULT_CONSOLE_BASE_URL = "https://opencode.ai/inference/systemone/v1/systemone"
+DEFAULT_CONSOLE_JEV_MODEL = "jev-1.13-free"
+DEFAULT_CONSOLE_JEV_FALLBACK_MODEL = "jev-1.13"
+DEFAULT_CONSOLE_KEY_ENV = "OPENCODE_CONSOLE_API_KEY"
 
 DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
 DEFAULT_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
@@ -127,6 +164,46 @@ def _entry_for(grid: Sequence[Entry], model_id: str) -> Optional[Entry]:
     return None
 
 
+def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
+    """The allowlist that pins ``provider``'s catalog, or ``None`` when it has none.
+
+    ``opencode-console`` is pinned at all times: its models are the Console's own. The
+    ``opencode-go`` cap is **opt-in** — it is in force only while the ``jev_console`` decider
+    is active, so a legacy ``jev``/``openai_compatible`` setup keeps whatever Go grid the
+    operator configured, unchanged.
+    """
+    key = (provider or "").strip().lower()
+    if key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
+        return OPENCODE_CONSOLE_ALLOWLIST
+    if key in (OPENCODE_GO_PROVIDER, *OPENCODE_GO_PROVIDER_ALIASES):
+        return OPENCODE_GO_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
+    return None
+
+
+def route_catalog(provider: str) -> Optional[Tuple[Entry, ...]]:
+    """The built-in generation catalog of an opt-in route, or ``None`` for any other provider."""
+    key = (provider or "").strip().lower()
+    if key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
+        return OPENCODE_CONSOLE_GRID
+    if key in (OPENCODE_GO_PROVIDER, *OPENCODE_GO_PROVIDER_ALIASES):
+        return OPENCODE_GO_GRID
+    return None
+
+
+def _capped(
+    grid: Tuple[Entry, ...],
+    allowlist: Optional[frozenset],
+    fallback: Optional[Tuple[Entry, ...]],
+) -> Tuple[Entry, ...]:
+    """``grid`` restricted to ``allowlist``; ``fallback`` when that leaves nothing on it."""
+    if allowlist is None:
+        return grid
+    capped = tuple(entry for entry in grid if entry.model_id in allowlist)
+    if capped:
+        return capped
+    return fallback if fallback is not None else grid
+
+
 @dataclass(frozen=True)
 class PlatformPolicy:
     """One surface's routing policy, as declared under ``platform_overrides``.
@@ -202,6 +279,10 @@ class Settings:
     decider_base_url: str = ""
     decider_model: str = ""
     decider_api_key_env: str = ""
+    console_endpoint: str = ""
+    console_jev_model: str = ""
+    console_jev_fallback_model: str = DEFAULT_CONSOLE_JEV_FALLBACK_MODEL
+    console_api_key_env: str = ""
     routable_providers: Tuple[str, ...] = DEFAULT_ROUTABLE_PROVIDERS
     grids: Mapping[str, Tuple[Entry, ...]] = field(
         default_factory=lambda: MappingProxyType({})
@@ -240,13 +321,31 @@ class Settings:
         return self.platform_overrides.get(key)
 
     def grid_for(self, provider: str = "") -> Tuple[Entry, ...]:
-        """The grid for ``provider``, or the global grid when unlisted."""
+        """The grid for ``provider``, or the global grid when unlisted.
+
+        An opt-in OpenCode route is pinned by its catalog (see :func:`route_allowlist`): an
+        entry outside the catalog is dropped, and a grid the cap empties falls back to the
+        route's built-in catalog. Choice, fallback, alternatives and replay all read their
+        options from here, so none of them can name a model the route does not serve.
+        """
         key = (provider or "").strip().lower()
+        configured: Optional[Tuple[Entry, ...]] = None
         if key in self.grids:
-            return self.grids[key]
-        if key in ROUTED_PROVIDER_ALIASES and ROUTED_PROVIDER in self.grids:
-            return self.grids[ROUTED_PROVIDER]
-        return self.grid
+            configured = self.grids[key]
+        else:
+            for name, aliases in _GRID_ALIASES:
+                if key in aliases and name in self.grids:
+                    configured = self.grids[name]
+                    break
+        allowlist = route_allowlist(key, self.decider)
+        catalog = route_catalog(key)
+        if allowlist is None:
+            return configured if configured is not None else self.grid
+        return _capped(
+            configured if configured is not None else (catalog or self.grid),
+            allowlist,
+            catalog,
+        )
 
     def effort_map_for(self, provider: str = "") -> Optional[Any]:
         """The effort map for ``provider``, or None when unlisted."""
@@ -262,6 +361,8 @@ class Settings:
         target = (decider or self.decider).strip().lower()
         if target == "openai_compatible":
             return self.decider_api_key_env or DEFAULT_OPENAI_COMPATIBLE_KEY_ENV
+        if target == "jev_console":
+            return self.console_api_key_env or DEFAULT_CONSOLE_KEY_ENV
         return "OPENROUTER_API_KEY"
 
     def base_url_for(self, decider: Optional[str] = None) -> str:
@@ -269,6 +370,8 @@ class Settings:
         target = (decider or self.decider).strip().lower()
         if target == "openai_compatible":
             return self.decider_base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+        if target == "jev_console":
+            return self.console_endpoint or DEFAULT_CONSOLE_BASE_URL
         return self.endpoint
 
     @property
@@ -281,6 +384,8 @@ class Settings:
         target = (decider or self.decider).strip().lower()
         if target == "openai_compatible":
             return self.decider_model or DEFAULT_OPENAI_COMPATIBLE_MODEL
+        if target == "jev_console":
+            return self.console_jev_model or DEFAULT_CONSOLE_JEV_MODEL
         return self.jev_model
 
     def confidence_threshold_for(self, decider: Optional[str] = None) -> float:
@@ -306,6 +411,10 @@ class Settings:
                 return True
             if cand in ROUTED_PROVIDER_ALIASES and key == ROUTED_PROVIDER:
                 return True
+            if key in OPENCODE_CONSOLE_PROVIDER_ALIASES and cand == OPENCODE_CONSOLE_PROVIDER:
+                return True
+            if cand in OPENCODE_CONSOLE_PROVIDER_ALIASES and key == OPENCODE_CONSOLE_PROVIDER:
+                return True
         return False
 
     def effective(self, policy: Optional[PlatformPolicy], provider: str = "") -> EffectiveSettings:
@@ -315,17 +424,24 @@ class Settings:
         parse also inherits, so a bad policy grid never replaces the operator's global grid.
         """
         base_grid = self.grid_for(provider)
+        key = (provider or "").strip().lower()
+        allowlist = route_allowlist(key, self.decider)
         base_threshold = self.confidence_threshold_for(self.decider)
+        default_model = self.default_model
+        if allowlist is not None and default_model not in allowlist:
+            default_model = base_grid[0].model_id if base_grid else DEFAULT_MODEL
         if policy is None:
             return EffectiveSettings(
                 grid=base_grid,
                 confidence_threshold=base_threshold,
-                default_model=self.default_model,
+                default_model=default_model,
                 default_effort=self.default_effort,
                 max_effort=None,
                 grid_from_policy=False,
             )
         grid = policy.grid if policy.grid is not None else base_grid
+        if allowlist is not None and policy.grid is not None:
+            grid = _capped(policy.grid, allowlist, base_grid)
         threshold = (
             policy.confidence_threshold
             if policy.confidence_threshold is not None
@@ -334,7 +450,7 @@ class Settings:
         return EffectiveSettings(
             grid=grid,
             confidence_threshold=threshold,
-            default_model=self.default_model,
+            default_model=default_model,
             default_effort=self.default_effort,
             max_effort=policy.max_effort,
             grid_from_policy=policy.grid is not None,
@@ -472,6 +588,23 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
     else:
         routable_providers = DEFAULT_ROUTABLE_PROVIDERS
 
+    _marker = object()
+    raw_console_model = read("console_jev_model", _marker)
+    if raw_console_model is _marker or raw_console_model is None:
+        console_jev_model = ""
+    else:
+        console_jev_model = str(raw_console_model).strip()
+
+    raw_fallback = read("console_jev_fallback_model", _marker)
+    if raw_fallback is _marker or raw_fallback is None:
+        console_jev_fallback = DEFAULT_CONSOLE_JEV_FALLBACK_MODEL
+    else:
+        txt = str(raw_fallback).strip()
+        if txt.lower() in ("none", "false", "off", "disabled") or txt == "":
+            console_jev_fallback = ""
+        else:
+            console_jev_fallback = txt
+
     settings = Settings(
         enabled=_as_bool(read("enabled", True), True),
         jev_model=_as_text(read("jev_model", DEFAULT_JEV_MODEL), DEFAULT_JEV_MODEL),
@@ -497,6 +630,10 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         decider_base_url=_as_text(read("decider_base_url", ""), ""),
         decider_model=_as_text(read("decider_model", ""), ""),
         decider_api_key_env=_as_text(read("decider_api_key_env", ""), ""),
+        console_endpoint=_as_text(read("console_endpoint", ""), ""),
+        console_jev_model=console_jev_model,
+        console_jev_fallback_model=console_jev_fallback,
+        console_api_key_env=_as_text(read("console_api_key_env", ""), ""),
         routable_providers=routable_providers if routable_providers else DEFAULT_ROUTABLE_PROVIDERS,
         grids=parse_grids(read("grids", None)),
         effort_maps=parse_effort_maps(read("effort_maps", None)),
@@ -531,6 +668,9 @@ def redact(value: Any, limit: int = 200, env_name: Optional[str] = None) -> str:
     k_opencode = api_key("OPENCODE_GO_API_KEY")
     if k_opencode:
         keys_to_redact.add(k_opencode)
+    k_console = api_key("OPENCODE_CONSOLE_API_KEY")
+    if k_console:
+        keys_to_redact.add(k_console)
 
     for key in keys_to_redact:
         text = text.replace(key, "[REDACTED]")

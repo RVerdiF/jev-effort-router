@@ -29,6 +29,7 @@ from .decider import (
     REASON_UPSTREAM_ERROR,
     REASON_USER_DATA,
     Decision,
+    JevConsoleDecider,
     JevDecider,
     OpenAICompatibleDecider,
     _answer,

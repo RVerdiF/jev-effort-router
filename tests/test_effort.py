@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from effort import clamp, family_for, is_omitted, resolve_effort
+from effort import (
+    ModelReasoningPolicy,
+    OPENCODE_CONSOLE_REASONING_POLICIES,
+    clamp,
+    family_for,
+    is_omitted,
+    model_reasoning_policy,
+    resolve_effort,
+)
 
 
 def test_family_detection():
@@ -141,4 +149,77 @@ def test_per_provider_effort_maps_never_escalates_and_omits_when_unknown():
     # Non-escalating override is honored
     override_deescalate = {"accepted": ["low", "medium"], "overrides": {"high": "medium"}}
     assert resolve_effort("m", "high", provider="opencode-go", effort_maps={"opencode-go": {"m": override_deescalate}}) == "medium"
+
+
+def test_opencode_console_explicit_reasoning_policies():
+    # The one normal generation model of the Console catalog has an explicit omission policy.
+    for provider_name in ("opencode-console", "opencode_console"):
+        for model_id in ("deepseek-v4.1-flash",):
+            pol = model_reasoning_policy(model_id, provider=provider_name)
+            assert isinstance(pol, ModelReasoningPolicy)
+            assert pol.provider == "opencode-console"
+            assert pol.model_id == model_id
+            assert pol.wire_parameter is None
+            assert pol.accepted_levels == ()
+            assert pol.omitted is True
+            assert "Unconfirmed" in pol.evidence
+            assert "cannot be inferred" in pol.evidence or "no documented reasoning" in pol.evidence
+            assert "Explicit omission" in pol.decision
+            assert "effort_requested" in pol.decision
+
+            # Every effort level resolves to None (omitted on wire)
+            for lvl in ("low", "medium", "high"):
+                assert resolve_effort(model_id, lvl, provider=provider_name) is None
+                assert is_omitted(model_id, lvl, provider=provider_name) is True
+
+
+def test_opencode_go_explicit_reasoning_policies():
+    # Both Go generation models declare omission explicitly rather than inheriting a guess.
+    for provider_name in ("opencode-go", "opencode_go"):
+        for model_id in ("deepseek-v4.1-flash", "mimo-v2.6-flash"):
+            pol = model_reasoning_policy(model_id, provider=provider_name)
+            assert pol.provider == "opencode-go"
+            assert pol.model_id == model_id
+            assert pol.wire_parameter is None
+            assert pol.accepted_levels == ()
+            assert pol.omitted is True
+            assert "cannot be inferred" in pol.evidence
+            assert "Explicit omission" in pol.decision
+            assert "effort_requested" in pol.decision
+            for lvl in ("low", "medium", "high"):
+                assert resolve_effort(model_id, lvl, provider=provider_name) is None
+                assert is_omitted(model_id, lvl, provider=provider_name) is True
+
+    # A model outside the Go catalog is omitted too, never guessed from its Ollama family.
+    outsider = model_reasoning_policy("kimi-k3", provider="opencode-go")
+    assert outsider.omitted is True
+    assert resolve_effort("kimi-k3", "high", provider="opencode-go") is None
+
+
+def test_opencode_go_effort_cannot_be_inferred_from_other_providers():
+    # Same model, different wire: ollama-cloud honours the level, the Go route does not.
+    assert resolve_effort("mimo-v2.6-flash", "high", provider="ollama-cloud") == "high"
+    assert resolve_effort("mimo-v2.6-flash", "high", provider="opencode-go") is None
+    assert is_omitted("mimo-v2.6-flash", "high", provider="opencode-go") is True
+
+
+def test_opencode_console_effort_cannot_be_inferred_from_other_providers():
+    # deepseek-v4.1-flash on ollama-cloud resolves reasoning_effort
+    assert resolve_effort("deepseek-v4.1-flash", "high", provider="ollama-cloud") == "high"
+    assert not is_omitted("deepseek-v4.1-flash", "high", provider="ollama-cloud")
+
+    # But on opencode-console, support is NOT inferred and remains strictly omitted
+    assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-console") is None
+    assert is_omitted("deepseek-v4.1-flash", "high", provider="opencode-console") is True
+
+
+def test_opencode_console_custom_effort_map_overrides_omission():
+    # If operator explicitly configures effort_maps for opencode-console, it is honored
+    maps = {"opencode-console": {"deepseek-v4.1-flash": ["low", "medium"]}}
+    pol = model_reasoning_policy("deepseek-v4.1-flash", provider="opencode-console", effort_maps=maps)
+    assert pol.omitted is False
+    assert pol.wire_parameter == "reasoning_effort"
+    assert pol.accepted_levels == ("low", "medium")
+    assert resolve_effort("deepseek-v4.1-flash", "low", provider="opencode-console", effort_maps=maps) == "low"
+    assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-console", effort_maps=maps) == "medium"
 

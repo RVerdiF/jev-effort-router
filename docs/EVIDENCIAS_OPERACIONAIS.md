@@ -210,4 +210,108 @@ level='max'           -> HTTP 200 (ACCEPTED)
 level='invalid_level' -> HTTP 422 (REJECTED): {"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}
 ```
 
-Isso sustenta rigorosamente a declaração de `docs/routing-grid.md:102-104` e a política de mapeamento seguro (`accepted: [low, medium, high]`).
+Isso sustenta rigorosamente a declaração da seção "Effort-to-wire mapping (Ollama:Cloud built-in)" de `docs/routing-grid.md` e a política de mapeamento seguro (`accepted: [low, medium, high]`).
+
+---
+
+## 6. Implementação OpenCode Console Jev & Catálogo de 2 Modelos (`t_6ec7a94d`)
+
+### 6.1 Resumo Normativo e Decisões de Escopo
+- **Diretiva do Dono & Separação de Rotas (Console Decider / Go Geração)**: O dono do produto definiu formalmente a escolha do ID padrão `mimo-v2.6-flash` (não-free) na geração, rejeitando estritamente a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. Conforme orientado pelo dono (Comentário 108), as fontes oficiais distinguem claramente os produtos:
+  - **Decider Jev Console**: Opera via SystemOne (`https://opencode.ai/inference/systemone/v1/systemone`) com modelo primário gratuito `jev-1.13-free` e fallback automático para o Jev pago (`jev-1.13`).
+  - **Geração OpenCode Go**: A geração dos modelos `deepseek-v4.1-flash` e `mimo-v2.6-flash` é atendida pelo provider `opencode-go`, onde a documentação oficial do OpenCode Go confirma explicitamente MiMo-V2.6-Flash normal e DeepSeek V4.1 Flash com tarifação por token.
+  - **Isolamento e Segurança**: O MiMo normal não é enviado ao endpoint Console, e a variante `mimo-v2.6-flash-free` nunca é substituída. Ambas as rotas permanecem estritamente isoladas e verificadas offline sem chamadas pagas nem inferência live.
+- **Fontes Oficiais e Mapping dos IDs Go**: Os IDs de geração (`deepseek-v4.1-flash`, `mimo-v2.6-flash`) vêm da lista oficial de modelos do OpenCode Go (`https://opencode.ai/v2/docs/console/go`, que nomeia MiMo-V2.6-Flash normal e DeepSeek V4.1 Flash com preço por token) e são distintos do id do decider SystemOne (`jev-1.13-free` / `jev-1.13`). A listagem pública `https://opencode.ai/inference/v1/models` é a do Console e não serve para confirmar os modelos Go. Nenhuma credencial foi lida para estabelecer esse mapping e nenhuma inferência paga foi executada; a verificação da documentação oficial foi registrada na revisão independente que pediu esta separação.
+- **Catálogo Console (um modelo)**: `opencode-console` (e alias `opencode_console`) é regido por `OPENCODE_CONSOLE_MODELS = ("deepseek-v4.1-flash",)`. O MiMo normal **não** pertence a esse catálogo: o Console não o serve, e uma decisão que o nomeie nessa rota falha aberto, mantendo o modelo configurado pelo operador.
+- **Catálogo Go de dois modelos (opt-in)**: `OPENCODE_GO_MODELS = ("deepseek-v4.1-flash", "mimo-v2.6-flash")` é aplicado a `opencode-go`/`opencode_go` **somente enquanto `decider: jev_console` está ativo**. O limite é um teto: entradas de `grids.opencode-go` fora do catálogo são descartadas, grade que fica vazia cai no catálogo embutido de dois modelos, e grade de política de superfície (`platform_overrides.<surface>.grid`) passa pelo mesmo corte. Deciders legados (`jev`, `openai_compatible`) preservam a grade Go que o operador declarou, sem alteração.
+- **Onde o teto é aplicado**: `config.route_allowlist(provider, decider)` é a única fonte de verdade; `Settings.grid_for` / `EffectiveSettings` cortam a grade (choice, alternativas, fallback e replay leem dessa grade), `ModelCatalog.is_known(..., decider=...)` responde `False` para modelo fora do catálogo da rota, e `JevConsoleDecider._interpret` rejeita a escolha fora da allowlist antes de qualquer aplicação.
+- **Política Explícita de Reasoning por Modelo**: Distingue explicitamente (1) o nível de esforço lógico que o Jev decide/devolve (`effort_requested`) e (2) o parâmetro de reasoning no endpoint de geração (`effort`). Sem contrato confirmado por modelo no endpoint de geração de cada rota, o parâmetro é estritamente omitido do wire nas duas rotas opt-in (`deepseek-v4.1-flash` no Console; `deepseek-v4.1-flash` e `mimo-v2.6-flash` no Go), sem inferir suporte de Ollama ou de outra rota e sem alegar que o modelo downstream recebeu o reasoning escolhido.
+- **Operação Estritamente Offline**: Nenhuma chamada paga ou de rede foi realizada; nenhum perfil real foi modificado (conforme o gate do card, instalação e chamadas de rede exigem autorização operacional separada).
+
+### 6.2 Execução da Suíte de Testes Offline
+
+Comando executado no worktree isolado (`.worktrees/t_6ec7a94d`):
+```bash
+uv run --extra dev pytest
+```
+
+Saída obtida (execução atual, 2026-10-17):
+```text
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/rafael/hermes/workspaces/jev-effort-router/.worktrees/t_6ec7a94d
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collected 263 items
+
+tests/test_audit.py ...........                                          [  4%]
+tests/test_catalog.py ...................                                [ 11%]
+tests/test_catalog_status.py ....                                        [ 12%]
+tests/test_client.py ................................................... [ 32%]
+.                                                                        [ 32%]
+tests/test_config_policy.py ................................             [ 44%]
+tests/test_effort.py ...................                                 [ 52%]
+tests/test_grid.py ............                                          [ 56%]
+tests/test_grid_coverage.py ....                                         [ 58%]
+tests/test_live_probe.py .sssss                                          [ 60%]
+tests/test_registration.py .ss..s.............                           [ 67%]
+tests/test_router.py ................................................... [ 87%]
+..................................                                       [100%]
+
+======================== 255 passed, 8 skipped in 0.61s ========================
+```
+
+Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterior: 9 testes novos, nenhum removido sem substituto). Os 8 skips são exatamente: 5 testes de live probe (`test_live_probe.py`) que exigem `JEV_LIVE_PROBE=1` e chave real, e 3 testes em `test_registration.py` condicionados à biblioteca opcional PyYAML (`yaml = pytest.importorskip("yaml")`). Nenhum skip é justificado por socket bloqueado; a suíte inteira também roda com `socket.socket.connect` e `socket.create_connection` bloqueados.
+
+### 6.3 Verificação de Cobertura nos Testes Adicionados
+1. **`tests/test_client.py`**:
+   - `test_jev_console_decider_happy_path`: valida wire SystemOne (`POST`, URL, Authorization header com `OPENCODE_CONSOLE_API_KEY`, payload com `state`/`questions`, decodificação de `answers`).
+   - `test_jev_console_decider_fallback_to_paid_jev` / `test_jev_console_decider_fallback_model`: valida iteração do modelo primário (`jev-1.13-free`) para o secundário (`jev-1.13`) em caso de falha no primário.
+   - `test_jev_console_decider_both_models_fail` / `test_jev_console_decider_network_failure_fail_open`: valida tratamento de erro 500/502 com fail-open sem exceção.
+   - `test_jev_console_decider_timeout`: valida timeout de rede com marcação `REASON_TIMEOUT` e fail-open.
+   - `test_jev_console_decider_http_error_matrix`: matriz com status 401, 403, 429, 500, 503 e verificação estrita de que segredos da API (`OPENCODE_CONSOLE_API_KEY`) nunca são expostos em logs/auditoria.
+   - `test_jev_console_decider_real_non_json_body`: valida corpo HTML/texto não-JSON com `REASON_MALFORMED` e redaction de credenciais.
+   - `test_jev_console_decider_response_defined_probability_domain`: valida que o domínio de probabilidades é estritamente restrito às opções enviadas na grade e rejeita chaves externas inventadas pela resposta com `REASON_MALFORMED`.
+   - `test_jev_console_decider_invalid_types_and_float_choice`: valida rejeição de escolhas float, tipos inválidos e escolhas de esforço numéricas.
+   - `test_jev_console_decider_low_confidence_degrades`: valida degradação graciosa (fail-open) em confiança abaixo do limiar.
+2. **`tests/test_catalog.py`**:
+   - `test_opencode_console_catalog_allowlist`: valida `is_known` True para `deepseek-v4.1-flash`, False para `mimo-v2.6-flash`, `mimo-v2.6-flash-free` e `kimi-k3` sob `opencode-console` e `opencode_console`.
+   - `test_opencode_go_catalog_is_capped_only_for_the_console_decider`: valida que `is_known` para `opencode-go`/`opencode_go` responde True aos dois modelos autorizados, False ao MiMo free e a `kimi-k3` quando `decider="jev_console"`, e `None` (sem veto) sob deciders legados.
+3. **`tests/test_config_policy.py`**:
+   - `test_console_config_options_parsed_and_queried`: valida parsing das configurações `console_endpoint`, `console_jev_model`, `console_jev_fallback_model`, `console_api_key_env`, e métodos `base_url_for`, `decider_model_for`, `api_key_env_for`.
+   - `test_opencode_console_grid_resolution`: grade efetiva do Console contém apenas `deepseek-v4.1-flash`.
+   - `test_opencode_go_grid_is_the_two_model_catalog_under_the_console_decider`: grade efetiva de `opencode-go`/`opencode_go` é exatamente os dois modelos autorizados, sem herdar nenhum modelo Ollama.
+   - `test_opencode_go_grid_cap_applies_to_operator_grids_without_widening_them`: `grids.opencode-go` com `unauthorized-model` é cortada; grade só com modelos fora do catálogo cai no catálogo embutido; grade de política de superfície também é cortada.
+   - `test_opencode_go_grid_untouched_for_legacy_deciders`: decider legado mantém a grade Go configurada (e a grade global quando não há grade).
+   - `test_materialized_schema_defaults`: valida os defaults materializados diretamente de `plugin.yaml` (`console_jev_model` = `jev-1.13-free`, `console_jev_fallback_model` = `jev-1.13`, decider default `jev`, routable_providers default `[ollama-cloud]`).
+4. **`tests/test_router.py`**:
+   - `test_jev_console_decider_routing_end_to_end`: valida roteamento completo ponta a ponta com `decider: jev_console` e `provider: opencode-console`.
+   - `test_jev_console_decider_generation_route_go_uses_the_two_model_catalog`: usa a configuração efetiva (sem grade injetada) — `{decider: jev_console, routable_providers: [opencode-go]}` — e comprova: grade = dois modelos autorizados, `default_model = deepseek-v4.1-flash`, escolha 2 aplica `mimo-v2.6-flash`, chamada do decider vai para o SystemOne (nunca para o `base_url` Go), `reasoning_effort` ausente do wire, `effort_requested='high'` + `effort=None` na auditoria, alternativas restritas a `deepseek-v4.1-flash`, snapshots serializados de `request` e `original_request` idênticos (objetos independentes, um deles com `reasoning_config`), e replay no mesmo turno sem segunda chamada.
+   - `test_opencode_go_route_cap_rejects_models_outside_the_two_model_catalog`: grade customizada com `unauthorized-model` é cortada antes da pergunta; resposta nomeando o modelo inventado é rejeitada nos dois Jev (free e pago) e o payload original permanece byte-idêntico (skip registrado).
+   - `test_console_route_no_longer_applies_normal_mimo`: no Console, resposta apontando a posição 2 (MiMo normal) falha aberto, com a grade efetiva contendo só `deepseek-v4.1-flash`.
+   - `test_opencode_go_legacy_decider_keeps_its_configured_grid`: com decider legado, a grade Go configurada é preservada.
+   - `test_cross_provider_memo_replay_isolation`: valida que transições de provider não reutilizam memo incompatível.
+   - `test_cross_decider_memo_replay_isolation`: valida que transições de decider não reutilizam memo incompatível.
+   - `test_memo_replay_invalidated_by_confidence_threshold_elevation`: valida que elevação de limiar de confiança no mesmo turno invalida o memo anterior e falha aberto sem chamada duplicada.
+   - `test_memo_replay_invalidated_by_fallback_backend_or_key_env_change`: valida que alteração de backend de fallback ou de variável de chave invalida o replay de memo.
+   - `test_middleware_rejects_invented_criteria_or_outsider_choice`: valida rejeição de choice com critérios inventados ou opção fora da grade enviada, mantendo request byte-idêntico.
+   - `test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response`: valida que effort_confidence 0.0 é distinguida de ausência de resposta no replay (invalidada quando limiar sobe), enquanto resposta sem esforço não sofre regressão.
+   - `test_middleware_fail_open_console_negative_matrix`: matriz completa offline (HTTP 401/403/429/500/503, timeout, non-JSON real, envelope, confidence bool/str/NaN/Inf/range/threshold, probabilidades nulas/tipos/domínio/soma, choice fora da grade/critérios inventados, effort malformado/critérios remapeados) invocando `on_llm_request` diretamente com dois objetos de request independentes e distinguíveis (top-level e aninhados), comprovando retorno None (fail-open), preservação exata dos snapshots serializados de ambos os payloads (`working_req` e `original_req`), geração do registro de skip na trilha de auditoria real (`routes.jsonl`), e ausência da chave secreta tanto nos logs (`caplog.text`) quanto na auditoria, com exerção real de redaction (`[REDACTED]`) em corpos de erro e payloads não-JSON com segredo embutido.
+   - `test_middleware_fail_open_both_models_fail`: valida fail-open quando ambos os modelos (primário e fallback) falham, invocando `on_llm_request` com objetos independentes e distinguíveis, comprovando preservação dos snapshots serializados de ambos, escrita de skip na auditoria, redaction efetiva do segredo no log (`[REDACTED]`) e ausência da chave secreta na auditoria e nos logs.
+   - `test_opencode_console_distinguishes_logical_effort_from_wire`: valida que o Jev decide esforço lógico (`effort_requested='high'`), enquanto o wire payload omite `reasoning_effort` e o log de auditoria registra `effort=null`, sem alegar execução downstream.
+5. **`tests/test_effort.py`**:
+   - `test_opencode_console_explicit_reasoning_policies`: valida a política explícita (`ModelReasoningPolicy`) do `deepseek-v4.1-flash` no Console, com `omitted=True`, `wire_parameter=None` e decisão registrada.
+   - `test_opencode_go_explicit_reasoning_policies`: valida a política explícita dos dois modelos Go (`omitted=True`, `wire_parameter=None`) e a omissão de um modelo fora do catálogo Go.
+   - `test_opencode_go_effort_cannot_be_inferred_from_other_providers`: comprova que o mesmo modelo honra o nível em `ollama-cloud` e continua omitido em `opencode-go`.
+   - `test_opencode_console_effort_cannot_be_inferred_from_other_providers`: comprova que suporte em `ollama-cloud` ou `opencode-go` não é inferido para `opencode-console`.
+   - `test_opencode_console_custom_effort_map_overrides_omission`: valida que mapeamentos explícitos em `effort_maps` pelo operador têm precedência e são honrados sem escalada.
+
+### 6.4 Matriz da Política de Reasoning por Modelo
+
+| Provedor | Modelo | Esforço Lógico (Jev) | Parâmetro no Wire | Níveis Aceitos | Evidência / Decisão |
+|---|---|---|---|---|---|
+| `opencode-console` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: sem evidência empírica ou contrato no endpoint de geração do console. Não se infere de `opencode-go` ou `ollama-cloud`. Omitido para prevenir HTTP 400. |
+| `opencode-go` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado por modelo**: nenhum contrato documentado no endpoint de geração Go; o probe opt-in histórico (`tests/test_live_probe.py`) não é reutilizado como prova nesta entrega. Omitido, sem escalada. |
+| `opencode-go` | `mimo-v2.6-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: modelo multimodal/agentic normal, sem knob de reasoning documentado. Omitido no wire. |
+| `ollama-cloud` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `reasoning_effort` | low, medium, high, max | **Verificado**: Contrato formal Ollama:cloud (`DEEPSEEK_V4_EFFORTS`). |
+| `ollama-cloud` | Outros (Kimi, GLM, etc.) | Sim (`low`/`medium`/`high`) | `reasoning_effort` | Por família | **Verificado**: Mapeamento e clamping estrito sem escalada. |

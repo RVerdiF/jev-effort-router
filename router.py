@@ -19,6 +19,7 @@ from .catalog import ModelCatalog
 from .client import (
     REASON_DISABLED,
     REASON_EXCEPTION,
+    REASON_LOW_CONFIDENCE,
     REASON_NO_API_KEY,
     REASON_SKIPPED_API_MODE,
     REASON_SKIPPED_MODEL,
@@ -29,6 +30,7 @@ from .client import (
     REASON_USER_DATA,
     Decision,
     JevClient,
+    _cap_effort,
 )
 from .config import (
     ROUTED_API_MODES,
@@ -36,6 +38,7 @@ from .config import (
     ROUTED_PROVIDER_ALIASES,
     EffectiveSettings,
     Settings,
+    api_key,
 )
 from .effort import resolve_effort
 from .memo import Memo, TurnMemo
@@ -179,6 +182,100 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
                     return None
 
+                # Session guard: a decision made for another session must not be replayed to this one
+                memo_session = getattr(memo, "session_id", "")
+                if memo_session and session_id and memo_session != session_id:
+                    logger.info(
+                        "jev-effort-router: memo decided for session %r is incompatible with active session %r; failing open",
+                        memo_session,
+                        session_id,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                # Decider guard: memo decided with a different decider must not be reused
+                memo_dec = getattr(memo, "decider", "")
+                if memo_dec and memo_dec != settings.decider:
+                    logger.info(
+                        "jev-effort-router: memo decided with decider %r is incompatible with active decider %r; failing open",
+                        memo_dec,
+                        settings.decider,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                # Decider configuration guard: endpoint, decider model, fallback model, and key env
+                memo_endpoint = getattr(memo, "decider_endpoint", "")
+                curr_endpoint = settings.base_url_for(settings.decider)
+                if memo_endpoint and curr_endpoint and memo_endpoint != curr_endpoint:
+                    logger.info(
+                        "jev-effort-router: memo decider endpoint %r != active %r; failing open",
+                        memo_endpoint,
+                        curr_endpoint,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                memo_model = getattr(memo, "decider_model", "")
+                curr_model = settings.decider_model_for(settings.decider)
+                if memo_model and curr_model and memo_model != curr_model:
+                    logger.info(
+                        "jev-effort-router: memo decider model %r != active %r; failing open",
+                        memo_model,
+                        curr_model,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                memo_fallback = getattr(memo, "decider_fallback_model", "")
+                curr_fallback = (settings.console_jev_fallback_model or "").strip() if settings.decider == "jev_console" else ""
+                if memo_fallback != curr_fallback:
+                    logger.info(
+                        "jev-effort-router: memo fallback model %r != active %r; failing open",
+                        memo_fallback,
+                        curr_fallback,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                memo_key_env = getattr(memo, "decider_key_env", "")
+                curr_key_env = settings.api_key_env_for(settings.decider)
+                if memo_key_env and curr_key_env and memo_key_env != curr_key_env:
+                    logger.info(
+                        "jev-effort-router: memo key env %r != active %r; failing open",
+                        memo_key_env,
+                        curr_key_env,
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                if not api_key(curr_key_env):
+                    logger.info(
+                        "jev-effort-router: active decider key env %r has no key; failing open",
+                        curr_key_env,
+                    )
+                    self._record_skip(settings, REASON_NO_API_KEY, where)
+                    return None
+
+                # Policy confidence threshold guard: replayed confidence must meet active threshold
+                has_effort_conf = getattr(memo, "has_effort_confidence", None)
+                if has_effort_conf is None:
+                    has_effort_conf = bool(memo.effort_confidence > 0.0 or memo.effort_requested is not None)
+
+                effort_failed = has_effort_conf and (memo.effort_confidence < effective.confidence_threshold)
+                if (
+                    memo.model_confidence < effective.confidence_threshold
+                    or effort_failed
+                ) and REASON_LOW_CONFIDENCE not in memo.fallback_reasons:
+                    logger.info(
+                        "jev-effort-router: memo confidence (model=%.2f, effort=%.2f) is below active threshold %.2f; failing open",
+                        memo.model_confidence,
+                        memo.effort_confidence,
+                        effective.confidence_threshold,
+                    )
+                    self._record_skip(settings, REASON_LOW_CONFIDENCE, where)
+                    return None
+
                 # Grid guard: the replayed model must exist in the active provider's grid
                 if effective.entry_for(memo.model) is None:
                     logger.info(
@@ -189,14 +286,44 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                     return None
 
-                # Effort map guard: re-resolve effort against the active provider's map (never leaks unmapped effort)
+                # Grid signature guard: criteria and options must match active grid
+                curr_grid_sig = tuple((e.model_id, e.description) for e in effective.grid)
+                memo_grid_sig = getattr(memo, "grid_signature", ())
+                if memo_grid_sig and memo_grid_sig != curr_grid_sig:
+                    logger.info(
+                        "jev-effort-router: memo grid criteria signature does not match active grid; failing open",
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
+                    return None
+
+                # Effort map guard: re-resolve effort against the active provider's map and respect active max_effort cap
+                req_effort = memo.effort_requested or memo.effort
+                if req_effort is not None and effective.max_effort:
+                    req_effort = _cap_effort(req_effort, effective.max_effort)
+
                 re_effort = resolve_effort(
                     memo.model,
-                    memo.effort_requested or memo.effort,
+                    req_effort,
                     provider=provider,
                     effort_maps=settings.effort_maps,
                 )
                 decision = _decision_from_memo(memo, effort=re_effort)
+                if req_effort != memo.effort_requested:
+                    decision = Decision(
+                        model=decision.model,
+                        effort=decision.effort,
+                        effort_requested=req_effort,
+                        model_confidence=decision.model_confidence,
+                        effort_confidence=decision.effort_confidence,
+                        model_choice=decision.model_choice,
+                        effort_choice=decision.effort_choice,
+                        model_probabilities=decision.model_probabilities,
+                        effort_probabilities=decision.effort_probabilities,
+                        alternatives=decision.alternatives,
+                        latency_ms=decision.latency_ms,
+                        fallback_reasons=decision.fallback_reasons,
+                        decider=decision.decider,
+                    )
             else:
                 fetched = self._decide(settings, effective, request, where)
                 if fetched is None:
@@ -205,7 +332,7 @@ class Router:
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
                 # Leave the request exactly as the operator configured it.
-                if not self._provider_has(decision.model, provider=provider):
+                if not self._provider_has(decision.model, provider=provider, decider=settings.decider):
                     logger.warning(
                         "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
                         "leaving the turn on the configured model",
@@ -224,6 +351,15 @@ class Router:
                     fallback_reasons=decision.fallback_reasons,
                     decider=decision.decider,
                     provider=provider,
+                    session_id=session_id,
+                    decider_endpoint=settings.base_url_for(decision.decider),
+                    decider_model=settings.decider_model_for(decision.decider),
+                    confidence_threshold=effective.confidence_threshold,
+                    max_effort=effective.max_effort,
+                    decider_fallback_model=(settings.console_jev_fallback_model or "").strip() if decision.decider == "jev_console" else "",
+                    decider_key_env=settings.api_key_env_for(decision.decider),
+                    grid_signature=tuple((e.model_id, e.description) for e in effective.grid),
+                    has_effort_confidence=getattr(decision, "has_effort_confidence", False),
                 )
                 # Storing on "no memo found" rather than on an api_call_count test is deliberate:
                 # Hermes passes the *incremented* counter, so the first provider call of a turn
@@ -251,16 +387,17 @@ class Router:
 
     # -- decision plumbing -------------------------------------------------------
 
-    def _provider_has(self, model_id: str, provider: str = "") -> bool:
+    def _provider_has(self, model_id: str, provider: str = "", decider: str = "") -> bool:
         """Whether the chosen model is safe to put on the wire, according to the provider catalog.
 
         Answers ``True`` whenever the catalog has nothing to say — an absent cache, an unreadable
         file, a non-Ollama provider, or a host that exposes none of it all mean "no evidence",
         and the router must not start refusing decisions on missing evidence. Only a catalog that
-        lists models and does not contain this one is a No.
+        lists models and does not contain this one is a No. An opt-in OpenCode route pins its
+        own catalog, so ``decider`` is what makes the Go cap apply.
         """
         try:
-            known = self._catalog.is_known(model_id, provider=provider)
+            known = self._catalog.is_known(model_id, provider=provider, decider=decider)
         except Exception as exc:  # noqa: BLE001 - a catalog probe never blocks a turn
             logger.debug("jev-effort-router: catalog check failed (%s: %s)", type(exc).__name__, exc)
             return True
@@ -276,14 +413,14 @@ class Router:
         session instead, which routes once per conversation.
         """
         if settings.route_per_turn:
-            memo = self._memo.get_turn(turn_id)
+            memo = self._memo.get_turn(turn_id, session_id=session_id)
             return memo, memo is not None
         memo = self._memo.get_session(session_id)
         if memo is not None:
             return memo, True
         # No session decision yet, but this turn may already have decided one: don't re-decide
         # inside the same turn's tool loop.
-        memo = self._memo.get_turn(turn_id)
+        memo = self._memo.get_turn(turn_id, session_id=session_id)
         return memo, memo is not None
 
     def _decide(
@@ -426,7 +563,9 @@ class Router:
         report: List[Dict[str, Any]] = []
         for entry in settings.grid_for(target_provider):
             try:
-                known = self._catalog.is_known(entry.model_id, provider=target_provider)
+                known = self._catalog.is_known(
+                    entry.model_id, provider=target_provider, decider=settings.decider
+                )
             except Exception:  # noqa: BLE001 - a status view never raises
                 known = None
             if known is None:
@@ -490,4 +629,5 @@ def _decision_from_memo(memo: Memo, effort: Any = _UNSET) -> Decision:
         latency_ms=0,
         fallback_reasons=memo.fallback_reasons,
         decider=getattr(memo, "decider", "jev") or "jev",
+        has_effort_confidence=bool(getattr(memo, "has_effort_confidence", False)),
     )

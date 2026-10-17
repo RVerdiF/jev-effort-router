@@ -12,6 +12,10 @@ import pytest
 
 from config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_CONSOLE_BASE_URL,
+    DEFAULT_CONSOLE_JEV_FALLBACK_MODEL,
+    DEFAULT_CONSOLE_JEV_MODEL,
+    DEFAULT_CONSOLE_KEY_ENV,
     DEFAULT_MODEL,
     EFFORT_LEVELS,
     PlatformPolicy,
@@ -243,6 +247,13 @@ def test_defaults_are_unchanged_when_the_key_is_absent():
     assert settings.decider_base_url == ""
     assert settings.decider_model == ""
     assert settings.decider_api_key_env == ""
+    assert settings.console_endpoint == ""
+    assert settings.console_jev_model == ""
+    assert settings.console_jev_fallback_model == DEFAULT_CONSOLE_JEV_FALLBACK_MODEL
+    assert settings.console_api_key_env == ""
+    assert settings.base_url_for("jev_console") == DEFAULT_CONSOLE_BASE_URL
+    assert settings.decider_model_for("jev_console") == DEFAULT_CONSOLE_JEV_MODEL
+    assert settings.api_key_env_for("jev_console") == DEFAULT_CONSOLE_KEY_ENV
     assert settings.routable_providers == ("ollama-cloud",)
     assert len(settings.grids) == 0
     assert len(settings.effort_maps) == 0
@@ -274,4 +285,159 @@ def test_new_config_options_parsed_and_queried():
     assert settings.api_key_env_for("jev") == "OPENROUTER_API_KEY"
     assert settings.confidence_threshold_for("openai_compatible") == 0.8
     assert settings.confidence_threshold_for("jev") == 0.5
+
+
+def test_console_config_options_parsed_and_queried():
+    config = {
+        "decider": "jev_console",
+        "console_endpoint": "https://custom.opencode.ai/v1",
+        "console_jev_model": "custom-jev-free",
+        "console_jev_fallback_model": "custom-jev-paid",
+        "console_api_key_env": "CUSTOM_CONSOLE_KEY",
+        "routable_providers": ["ollama-cloud", "opencode-console"],
+    }
+    settings = settings_for(config)
+
+    assert settings.decider == "jev_console"
+    assert settings.console_endpoint == "https://custom.opencode.ai/v1"
+    assert settings.console_jev_model == "custom-jev-free"
+    assert settings.console_jev_fallback_model == "custom-jev-paid"
+    assert settings.console_api_key_env == "CUSTOM_CONSOLE_KEY"
+    assert settings.base_url_for("jev_console") == "https://custom.opencode.ai/v1"
+    assert settings.decider_model_for("jev_console") == "custom-jev-free"
+    assert settings.api_key_env_for("jev_console") == "CUSTOM_CONSOLE_KEY"
+    assert settings.is_provider_routable("opencode-console") is True
+    assert settings.is_provider_routable("opencode_console") is True
+
+
+def test_opencode_console_grid_resolution():
+    settings = settings_for({})
+    grid = settings.grid_for("opencode-console")
+    # Console serves only the normal generation id its own catalog lists; normal MiMo is Go-only.
+    assert [e.model_id for e in grid] == ["deepseek-v4.1-flash"]
+    assert settings.grid_for("opencode_console") == grid
+
+
+def test_opencode_go_grid_is_the_two_model_catalog_under_the_console_decider():
+    settings = settings_for({"decider": "jev_console"})
+    for provider in ("opencode-go", "opencode_go"):
+        assert [e.model_id for e in settings.grid_for(provider)] == [
+            "deepseek-v4.1-flash",
+            "mimo-v2.6-flash",
+        ]
+        effective = settings.effective(None, provider=provider)
+        assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+        # No legacy Ollama model can leak into the opt-in Go route.
+        assert "kimi-k3" not in [e.model_id for e in effective.grid]
+
+
+def test_opencode_go_grid_cap_applies_to_operator_grids_without_widening_them():
+    settings = settings_for(
+        {
+            "decider": "jev_console",
+            "grids": {
+                "opencode-go": [
+                    "deepseek-v4.1-flash: routine",
+                    "unauthorized-model: invented",
+                ],
+            },
+        }
+    )
+    assert [e.model_id for e in settings.grid_for("opencode-go")] == ["deepseek-v4.1-flash"]
+
+    # A Go grid with nothing authorized at all falls back to the built-in two-model catalog.
+    only_outsiders = settings_for(
+        {"decider": "jev_console", "grids": {"opencode-go": ["glm-5-free: invented"]}}
+    )
+    assert [e.model_id for e in only_outsiders.grid_for("opencode-go")] == [
+        "deepseek-v4.1-flash",
+        "mimo-v2.6-flash",
+    ]
+
+    # A surface policy grid cannot widen the catalog either.
+    policy_settings = settings_for(
+        {
+            "decider": "jev_console",
+            "platform_overrides": {
+                "cli": {"grid": ["deepseek-v4.1-flash: a", "glm-5-free: b"]},
+            },
+        }
+    )
+    policy = policy_settings.effective(policy_settings.policy_for("cli"), provider="opencode-go")
+    assert [e.model_id for e in policy.grid] == ["deepseek-v4.1-flash"]
+
+
+def test_opencode_go_grid_untouched_for_legacy_deciders():
+    settings = settings_for(
+        {"grids": {"opencode-go": ["deepseek-v4.1-flash: fast", "kimi-k3: code"]}}
+    )
+    assert [e.model_id for e in settings.grid_for("opencode-go")] == [
+        "deepseek-v4.1-flash",
+        "kimi-k3",
+    ]
+    # ... and with no configured grid at all, a legacy decider keeps the global grid.
+    bare = settings_for({})
+    assert [e.model_id for e in bare.grid_for("opencode-go")] == [
+        e.model_id for e in bare.grid
+    ]
+
+
+def _load_schema_defaults():
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    manifest_path = root / "plugin.yaml"
+    text = manifest_path.read_text(encoding="utf-8")
+    defaults = {}
+    in_schema = False
+    current_key = None
+    for line in text.splitlines():
+        if line.startswith("config_schema:"):
+            in_schema = True
+            continue
+        if in_schema:
+            if line and not line.startswith(" "):
+                break
+            if line.startswith("  ") and not line.startswith("    "):
+                key = line.strip().rstrip(":")
+                if key:
+                    current_key = key
+            elif current_key and line.startswith("    default:"):
+                val_str = line.split(":", 1)[1].strip()
+                if val_str.startswith('"') and val_str.endswith('"'):
+                    defaults[current_key] = val_str[1:-1]
+                elif val_str == "true":
+                    defaults[current_key] = True
+                elif val_str == "false":
+                    defaults[current_key] = False
+                elif val_str == "null":
+                    defaults[current_key] = None
+                elif val_str.startswith("[") and val_str.endswith("]"):
+                    items = [x.strip().strip("'\"") for x in val_str[1:-1].split(",") if x.strip()]
+                    defaults[current_key] = items
+                else:
+                    try:
+                        defaults[current_key] = int(val_str)
+                    except ValueError:
+                        try:
+                            defaults[current_key] = float(val_str)
+                        except ValueError:
+                            defaults[current_key] = val_str
+    return defaults
+
+
+def test_materialized_schema_defaults():
+    defaults = _load_schema_defaults()
+    assert defaults["console_jev_model"] == "jev-1.13-free"
+    assert defaults["console_jev_fallback_model"] == "jev-1.13"
+    assert defaults["decider"] == "jev"
+
+    settings = settings_for(defaults)
+    assert settings.decider == "jev"
+    assert settings.console_jev_model == "jev-1.13-free"
+    assert settings.console_jev_fallback_model == "jev-1.13"
+    assert settings.decider_model_for("jev_console") == "jev-1.13-free"
+    assert settings.base_url_for("jev_console") == "https://opencode.ai/inference/systemone/v1/systemone"
+    assert settings.api_key_env_for("jev_console") == "OPENCODE_CONSOLE_API_KEY"
+    assert settings.is_provider_routable("opencode-console") is False
+    assert settings.is_provider_routable("ollama-cloud") is True
 
