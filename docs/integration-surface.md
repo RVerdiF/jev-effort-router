@@ -119,13 +119,14 @@ logged and never included in an audit record. `OPENROUTER_API_KEY` is treated as
 2. **Pluggable Decider backends (`BaseDecider`):**
    - Factory `build_decider(settings)` instantiates `JevDecider` (Wire 1: OpenRouter Decisions API), `OpenAICompatibleDecider` (Wire 2: OpenCode / OpenAI chat completions API), or `JevConsoleDecider` (Wire 3: OpenCode Console SystemOne API).
    - All implement `decide(messages, effective, *, platform, provider) -> Tuple[Optional[Decision], Optional[str]]`.
-3. **Provider Allowlist (`routable_providers`) & Console Provider (`opencode-console`):**
+3. **Provider Allowlist (`routable_providers`) & OpenCode routes:**
    - Replaces hardcoded `ollama-cloud` check with an allowlist gate (`settings.routable_providers`).
-   - Built-in support for `opencode-console` (and alias `opencode_console`) with dedicated two-model allowlist (`deepseek-v4.1-flash`, `mimo-v2.6-flash`).
+   - Built-in support for `opencode-console` (and alias `opencode_console`), pinned to its own catalog (`deepseek-v4.1-flash` — the Console does not serve normal MiMo).
+   - While `decider: jev_console` is active, `opencode-go` (alias `opencode_go`) is capped to the two authorized generation models (`deepseek-v4.1-flash`, `mimo-v2.6-flash`); the cap covers the effective grid, surface-policy grids, catalog veto, alternatives and memo replay. A legacy decider keeps whatever Go grid the operator configured.
    - Providers not on the list pass through 100% untouched.
 4. **Isolated Provider Catalog Checks:**
    - The host's `ollama_cloud_models_cache.json` check is strictly scoped to `provider == "ollama-cloud"`. Non-Ollama providers (like `opencode-console` or `opencode-go`) are not falsely rejected by an Ollama catalog.
-   - OpenCode Console validates models against `OPENCODE_CONSOLE_ALLOWLIST`.
+   - Both opt-in OpenCode routes answer `is_known` from `config.route_allowlist(provider, decider)`, so a model outside the route's catalog is a definite No rather than "no evidence".
 5. **Decider Provenance & Replay Isolation:**
    - Each `Decision` / `Memo` tags its originating provider and decider (`jev`, `openai_compatible`, or `jev_console`).
    - Replay guards strictly verify that a cached turn memo matches both the active request's `provider` and the configured `decider`; mismatches fail open immediately without cross-contaminating turns.

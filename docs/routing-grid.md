@@ -59,29 +59,43 @@ below threshold: `medium`.
 In v0.4.0+, the router supports multiple providers declared under `routable_providers`.
 
 - **Default (`ollama-cloud`)**: Uses the built-in six-model grid and the built-in effort table below.
-- **OpenCode Console (`opencode-console`)**: Uses the built-in two-model grid (`OPENCODE_CONSOLE_GRID`) and strict allowlist (`deepseek-v4.1-flash`, `mimo-v2.6-flash`).
-- **Custom providers (e.g. `opencode-go`)**: Configured via `grids.<provider>` and `effort_maps.<provider>`.
+- **OpenCode Console (`opencode-console`)**: Pinned to its own catalog (`OPENCODE_CONSOLE_GRID`): the one normal generation id the Console list carries, `deepseek-v4.1-flash`.
+- **OpenCode Go generation (`opencode-go`)**: While `decider: jev_console` is active, the route is capped to the initial two-model catalog (`OPENCODE_GO_GRID`: `deepseek-v4.1-flash`, `mimo-v2.6-flash`). With a legacy decider (`jev`, `openai_compatible`) the route keeps whatever `grids.<provider>` the operator declared, exactly as before.
 
-### OpenCode Console Grid (`opencode-console`)
-
-The OpenCode Console catalog is strictly gated to an initial allowlist of two models:
+### OpenCode Console catalog (`opencode-console`)
 
 | # | Model id | Profile line sent to Jev | Scope / Notes |
 |---|---|---|---|
-| 1 | `deepseek-v4.1-flash` | the usual choice for general work: everyday writing, explanation, summarising, ordinary coding and tool use; 1M context; cheap for its size | General work, code and reasoning |
-| 2 | `mimo-v2.6-flash` | multi-modal, agentic coding and fast reasoning; high throughput | Standard non-free variant |
+| 1 | `deepseek-v4.1-flash` | the usual choice for general work: everyday writing, explanation, summarising, ordinary coding and tool use; 1M context | The Console's own generation id |
+
+`mimo-v2.6-flash` is **not** in this catalog: the owner's normal (non-free) MiMo is a Go model, so
+attaching it to the Console route would send a model the Console list does not carry. A decision
+naming it on `opencode-console` fails open — the request keeps the model the operator configured.
+
+### OpenCode Go generation catalog (`opencode-go`, opt-in)
+
+| # | Model id | Profile line sent to Jev | Scope / Notes |
+|---|---|---|---|
+| 1 | `deepseek-v4.1-flash` | the usual choice for general work: everyday writing, explanation, summarising, ordinary coding and tool use; 1M context | Normal, per-token |
+| 2 | `mimo-v2.6-flash` | fast multimodal reasoning, coding, and efficient agentic tool calling | Normal (paid) variant — `mimo-v2.6-flash-free` is never used |
+
+The cap is a *cap*: a configured `grids.opencode-go` entry outside the catalog is dropped, and a grid
+the cap empties falls back to the two-model catalog. Choice, fallback, alternatives and memo replay all
+read their options from the capped grid, so no path can select a third model.
 
 #### Gate & Privacy Decision (Owner Directive)
 - **Owner Directive & Separation of Routes**: The owner explicitly mandated the standard non-free ID `mimo-v2.6-flash` for generation, strictly rejecting `mimo-v2.6-flash-free` and its data retention/model training terms (free tier is reserved only for Jev as decider, with fallback to paid Jev). As clarified by official documentation and the owner orientation (Comment 108), the products and endpoints are cleanly separated:
   - **Decider Route**: Jev Console operates via SystemOne (`https://opencode.ai/inference/systemone/v1/systemone`) using primary `jev-1.13-free` with automatic fallback to paid `jev-1.13`.
-  - **Generation Route**: Generation of `deepseek-v4.1-flash` and `mimo-v2.6-flash` is routed to the `opencode-go` provider, where official OpenCode Go documentation confirms standard non-free **MiMo-V2.6-Flash** alongside DeepSeek V4.1 Flash with per-token pricing.
-  - **Isolation**: Standard MiMo is not sent to the Console inference endpoint, and `mimo-v2.6-flash-free` is never substituted. Structurally, both `opencode-console` allowlist and `opencode-go` support `deepseek-v4.1-flash` and `mimo-v2.6-flash` offline without live/paid inference.
-- **Explicit Reasoning Policy per Model**: The router distinguishes (1) the logical effort level chosen and returned by Jev (`effort_requested`), and (2) the reasoning parameter/mode accepted by the generation endpoint (`effort`). For `opencode-console`:
-  - `deepseek-v4.1-flash`: Unconfirmed on OpenCode Console generation endpoint. Support on OpenCode Go (`/zen/go/v1`) or Ollama:cloud CANNOT be inferred. The wire parameter is explicitly omitted (`effort: null`) to prevent HTTP 400 rejection.
-  - `mimo-v2.6-flash`: Standard non-free multimodal/agentic model with no documented reasoning effort contract. Wire parameter is explicitly omitted.
+  - **Generation Route**: Generation of `deepseek-v4.1-flash` and `mimo-v2.6-flash` is routed to the `opencode-go` provider. The ids come from the official OpenCode Go model list (`https://opencode.ai/v2/docs/console/go`), which names **MiMo-V2.6-Flash** (normal) alongside DeepSeek V4.1 Flash with per-token pricing; the Console decider model is a separate SystemOne id (`jev-1.13-free` / `jev-1.13`). No credential was read to establish this mapping and no paid inference was performed.
+  - **Isolation**: Normal MiMo is never sent to the Console inference endpoint, and `mimo-v2.6-flash-free` is never substituted. Both catalogs are enforced offline.
+- **Explicit Reasoning Policy per Model**: The router distinguishes (1) the logical effort level chosen and returned by Jev (`effort_requested`), and (2) the reasoning parameter/mode accepted by the generation endpoint (`effort`). For both opt-in OpenCode routes the wire parameter is **explicitly omitted**:
+  - `opencode-console` / `deepseek-v4.1-flash`: unconfirmed on the Console generation endpoint. Support on OpenCode Go (`/zen/go/v1`) or Ollama:cloud cannot be inferred.
+  - `opencode-go` / `deepseek-v4.1-flash`: no per-model contract is confirmed by the current documentation, and nothing is inferred from Ollama:cloud or the Console. The historic opt-in probe in `tests/test_live_probe.py` is not re-run here and is not relied on.
+  - `opencode-go` / `mimo-v2.6-flash`: no documented or probe-confirmed reasoning knob at all.
   - **Audit Semantics**: Logical effort evaluated by Jev is recorded in audit logs under `effort_requested` and `effort_choice`, but wire `effort` is recorded as `null`, without claiming that the downstream generation model received or executed the chosen reasoning.
   - **Custom Override**: Operators can supply custom `effort_maps` if an endpoint is verified, which is applied strictly without escalation.
-- **Isolation**: OpenCode Console and Ollama:cloud remain fully isolated; the Ollama cache never inspects or filters Console models.
+- **Isolation from the Ollama cache**: The Ollama catalog never inspects or filters models of either OpenCode route; and neither route can inherit an Ollama grid entry.
+
 
 ### Effort-to-wire mapping (Ollama:Cloud built-in)
 

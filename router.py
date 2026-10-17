@@ -332,7 +332,7 @@ class Router:
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
                 # Leave the request exactly as the operator configured it.
-                if not self._provider_has(decision.model, provider=provider):
+                if not self._provider_has(decision.model, provider=provider, decider=settings.decider):
                     logger.warning(
                         "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
                         "leaving the turn on the configured model",
@@ -387,16 +387,17 @@ class Router:
 
     # -- decision plumbing -------------------------------------------------------
 
-    def _provider_has(self, model_id: str, provider: str = "") -> bool:
+    def _provider_has(self, model_id: str, provider: str = "", decider: str = "") -> bool:
         """Whether the chosen model is safe to put on the wire, according to the provider catalog.
 
         Answers ``True`` whenever the catalog has nothing to say — an absent cache, an unreadable
         file, a non-Ollama provider, or a host that exposes none of it all mean "no evidence",
         and the router must not start refusing decisions on missing evidence. Only a catalog that
-        lists models and does not contain this one is a No.
+        lists models and does not contain this one is a No. An opt-in OpenCode route pins its
+        own catalog, so ``decider`` is what makes the Go cap apply.
         """
         try:
-            known = self._catalog.is_known(model_id, provider=provider)
+            known = self._catalog.is_known(model_id, provider=provider, decider=decider)
         except Exception as exc:  # noqa: BLE001 - a catalog probe never blocks a turn
             logger.debug("jev-effort-router: catalog check failed (%s: %s)", type(exc).__name__, exc)
             return True
@@ -562,7 +563,9 @@ class Router:
         report: List[Dict[str, Any]] = []
         for entry in settings.grid_for(target_provider):
             try:
-                known = self._catalog.is_known(entry.model_id, provider=target_provider)
+                known = self._catalog.is_known(
+                    entry.model_id, provider=target_provider, decider=settings.decider
+                )
             except Exception:  # noqa: BLE001 - a status view never raises
                 known = None
             if known is None:

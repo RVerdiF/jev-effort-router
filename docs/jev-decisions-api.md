@@ -169,7 +169,7 @@ Unlike unstructured chat responses, the decider's output is subjected to strict 
 | **Protocol** | SystemOne typed decisions (`model`, `state`, `questions` -> `answers`) | OpenAI Chat Completions JSON mode | OpenRouter Decisions API |
 | **Credential Env** | `OPENCODE_CONSOLE_API_KEY` (or `console_api_key_env`) | `OPENCODE_GO_API_KEY` (or `decider_api_key_env`) | `OPENROUTER_API_KEY` |
 | **Decider Model** | `jev-1.13-free` (primary) with fallback to `jev-1.13` (paid) | `deepseek-v4.1-flash` (or custom chat model) | `typesafe/jev-1.13` |
-| **Target Generation Provider** | `opencode-console` (generation models: `deepseek-v4.1-flash`, `mimo-v2.6-flash`) | `opencode-go` | `ollama-cloud` (by default) |
+| **Target Generation Provider** | `opencode-console` (generation model: `deepseek-v4.1-flash` only — normal MiMo is a Go model) | `opencode-go` (catalog: `deepseek-v4.1-flash`, `mimo-v2.6-flash`) | `ollama-cloud` (by default) |
 | **Decider Role** | Steering decider only, not generation model | Steering decider only | Steering decider only |
 
 ### Endpoint

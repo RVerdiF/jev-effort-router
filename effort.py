@@ -194,9 +194,10 @@ class ModelReasoningPolicy:
     decision: str
 
 
-#: Explicit reasoning policies for OpenCode Console models.
-#: Neither model has empirical evidence or documentation confirming reasoning parameter support
-#: on the opencode-console generation endpoint. Support CANNOT be inferred from OpenCode Go or Ollama:cloud.
+#: Explicit reasoning policies for the opt-in OpenCode routes. No model in either catalog has a
+#: documented or probe-confirmed reasoning parameter on its generation endpoint, so the field is
+#: omitted rather than guessed. Support on one provider is never inferred from another: the
+#: Console, Go and Ollama:cloud wires are different contracts.
 OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     "deepseek-v4.1-flash": ModelReasoningPolicy(
         provider="opencode-console",
@@ -215,22 +216,27 @@ OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
             "audit trails, but wire effort remains None without claiming downstream model execution."
         ),
     ),
-    "mimo-v2.6-flash": ModelReasoningPolicy(
-        provider="opencode-console",
-        model_id="mimo-v2.6-flash",
+}
+
+#: Explicit reasoning policies for the ``opencode-go`` generation models.
+OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
+    model_id: ModelReasoningPolicy(
+        provider="opencode-go",
+        model_id=model_id,
         wire_parameter=None,
         accepted_levels=(),
         evidence=(
-            "Unconfirmed on opencode-console generation endpoint. Standard non-free multimodal/agentic "
-            "model with no documented reasoning effort knob."
+            "No documented or probe-confirmed reasoning parameter on the opencode-go generation "
+            "endpoint. Support on ollama-cloud or opencode-console cannot be inferred."
         ),
         omitted=True,
         decision=(
-            "Explicit omission: Neither provider documentation nor live probe evidence confirms a reasoning knob for "
-            "mimo-v2.6-flash on opencode-console. Wire parameter is omitted; Jev logical effort choice is preserved in "
-            "effort_requested without asserting that the downstream model executed at that effort level."
+            f"Explicit omission: neither documentation nor offline probe evidence confirms a reasoning knob for "
+            f"{model_id} on opencode-go. The Jev logical effort stays in effort_requested; the wire field is omitted "
+            f"rather than guessed, and no claim is made that the model executed at that effort."
         ),
-    ),
+    )
+    for model_id in ("deepseek-v4.1-flash", "mimo-v2.6-flash")
 }
 
 
@@ -296,6 +302,21 @@ def model_reasoning_policy(
             wire_parameter=None,
             accepted_levels=(),
             evidence="Model not in opencode-console allowlist; unconfirmed reasoning support.",
+            omitted=True,
+            decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
+        )
+
+    # opencode-go built-in policy: the generation route of the opt-in Console decider.
+    if provider_key in ("opencode-go", "opencode_go"):
+        for k, pol in OPENCODE_GO_REASONING_POLICIES.items():
+            if k == mid or k in mid:
+                return pol
+        return ModelReasoningPolicy(
+            provider=provider_key,
+            model_id=model_id or "",
+            wire_parameter=None,
+            accepted_levels=(),
+            evidence="Model not in the opencode-go catalog; unconfirmed reasoning support.",
             omitted=True,
             decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
         )

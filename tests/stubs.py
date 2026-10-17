@@ -62,6 +62,9 @@ class ReadTimeout(Exception):
 def _distribution(winner: str, confidence: float, grid_size: int) -> Dict[str, float]:
     """A probability map over ``grid_size`` criteria with ``winner`` on top."""
     keys = [str(index) for index in range(1, max(1, grid_size) + 1)]
+    if len(keys) == 1:
+        # A one-option question has one certain answer: the distribution is trivially 1.0.
+        return {keys[0]: 1.0}
     if winner not in keys:
         return {key: round(1.0 / len(keys), 4) for key in keys}
     others = [key for key in keys if key != winner]

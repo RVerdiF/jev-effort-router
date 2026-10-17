@@ -222,10 +222,24 @@ def test_ollama_catalog_does_not_veto_models_for_other_providers(tmp_path):
 def test_opencode_console_catalog_allowlist(tmp_path):
     catalog = catalog_for(tmp_path, None)
     assert catalog.is_known("deepseek-v4.1-flash", provider="opencode-console") is True
-    assert catalog.is_known("mimo-v2.6-flash", provider="opencode-console") is True
-    assert catalog.is_known("mimo-v2.6-flash", provider="opencode_console") is True
+    assert catalog.is_known("deepseek-v4.1-flash", provider="opencode_console") is True
+    # The owner's normal MiMo is a Go model: it must never be applied on the Console route.
+    assert catalog.is_known("mimo-v2.6-flash", provider="opencode-console") is False
+    assert catalog.is_known("mimo-v2.6-flash-free", provider="opencode-console") is False
     assert catalog.is_known("kimi-k3", provider="opencode-console") is False
     assert catalog.is_known("", provider="opencode-console") is False
+
+
+def test_opencode_go_catalog_is_capped_only_for_the_console_decider(tmp_path):
+    catalog = catalog_for(tmp_path, ["ollama-only-model"])
+    for provider in ("opencode-go", "opencode_go"):
+        assert catalog.is_known("deepseek-v4.1-flash", provider=provider, decider="jev_console") is True
+        assert catalog.is_known("mimo-v2.6-flash", provider=provider, decider="jev_console") is True
+        assert catalog.is_known("mimo-v2.6-flash-free", provider=provider, decider="jev_console") is False
+        assert catalog.is_known("kimi-k3", provider=provider, decider="jev_console") is False
+        # Legacy deciders keep "no evidence" for the Go route: their configured grid still rules.
+        assert catalog.is_known("kimi-k3", provider=provider) is None
+        assert catalog.is_known("kimi-k3", provider=provider, decider="jev") is None
 
 
 class _State:

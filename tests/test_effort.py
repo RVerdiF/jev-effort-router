@@ -152,9 +152,9 @@ def test_per_provider_effort_maps_never_escalates_and_omits_when_unknown():
 
 
 def test_opencode_console_explicit_reasoning_policies():
-    # Both models in opencode-console allowlist have explicit policies defining omission
+    # The one normal generation model of the Console catalog has an explicit omission policy.
     for provider_name in ("opencode-console", "opencode_console"):
-        for model_id in ("deepseek-v4.1-flash", "mimo-v2.6-flash"):
+        for model_id in ("deepseek-v4.1-flash",):
             pol = model_reasoning_policy(model_id, provider=provider_name)
             assert isinstance(pol, ModelReasoningPolicy)
             assert pol.provider == "opencode-console"
@@ -171,6 +171,36 @@ def test_opencode_console_explicit_reasoning_policies():
             for lvl in ("low", "medium", "high"):
                 assert resolve_effort(model_id, lvl, provider=provider_name) is None
                 assert is_omitted(model_id, lvl, provider=provider_name) is True
+
+
+def test_opencode_go_explicit_reasoning_policies():
+    # Both Go generation models declare omission explicitly rather than inheriting a guess.
+    for provider_name in ("opencode-go", "opencode_go"):
+        for model_id in ("deepseek-v4.1-flash", "mimo-v2.6-flash"):
+            pol = model_reasoning_policy(model_id, provider=provider_name)
+            assert pol.provider == "opencode-go"
+            assert pol.model_id == model_id
+            assert pol.wire_parameter is None
+            assert pol.accepted_levels == ()
+            assert pol.omitted is True
+            assert "cannot be inferred" in pol.evidence
+            assert "Explicit omission" in pol.decision
+            assert "effort_requested" in pol.decision
+            for lvl in ("low", "medium", "high"):
+                assert resolve_effort(model_id, lvl, provider=provider_name) is None
+                assert is_omitted(model_id, lvl, provider=provider_name) is True
+
+    # A model outside the Go catalog is omitted too, never guessed from its Ollama family.
+    outsider = model_reasoning_policy("kimi-k3", provider="opencode-go")
+    assert outsider.omitted is True
+    assert resolve_effort("kimi-k3", "high", provider="opencode-go") is None
+
+
+def test_opencode_go_effort_cannot_be_inferred_from_other_providers():
+    # Same model, different wire: ollama-cloud honours the level, the Go route does not.
+    assert resolve_effort("mimo-v2.6-flash", "high", provider="ollama-cloud") == "high"
+    assert resolve_effort("mimo-v2.6-flash", "high", provider="opencode-go") is None
+    assert is_omitted("mimo-v2.6-flash", "high", provider="opencode-go") is True
 
 
 def test_opencode_console_effort_cannot_be_inferred_from_other_providers():

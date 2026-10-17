@@ -1121,7 +1121,7 @@ def test_cross_provider_session_replay_isolation(tmp_path, monkeypatch):
 
 def test_jev_console_decider_routing_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
-    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.95, grid_size=1)
     transport = StubTransport([StubResponse(resp_payload)])
     audit_dir = tmp_path / "audit"
     router, settings = build(
@@ -1141,17 +1141,101 @@ def test_jev_console_decider_routing_end_to_end(tmp_path, monkeypatch):
         model="deepseek-v4.1-flash",
     )
     assert result is not None
-    assert result["request"]["model"] == "mimo-v2.6-flash"
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
     assert len(transport.calls) == 1
     assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
 
 
-def test_jev_console_decider_with_opencode_go_generation(tmp_path, monkeypatch):
-    """Verify Jev Console decider (SystemOne) routing generation models for provider: opencode-go."""
-    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "«redacted:sk-…»")
-    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+def test_jev_console_decider_generation_route_go_uses_the_two_model_catalog(tmp_path, monkeypatch):
+    """Jev Console decides; generation lands on ``opencode-go`` with its two-model catalog.
+
+    The grid is the *effective* one — no per-provider grid is injected here — so this exercises
+    what an operator actually gets: the opt-in Go route caps itself to ``deepseek-v4.1-flash``
+    and ``mimo-v2.6-flash``, and no Ollama model can be selected or offered as an alternative.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    resp_payload = decision_payload(
+        model_choice="2",
+        model_confidence=0.95,
+        effort_choice="high",
+        effort_confidence=0.9,
+        grid_size=2,
+    )
     transport = StubTransport([StubResponse(resp_payload)])
-    audit_dir = tmp_path / "audit"
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={"decider": "jev_console", "routable_providers": ["opencode-go"]},
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    effective = settings.effective(None, provider="opencode-go")
+    assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+    assert effective.default_model == "deepseek-v4.1-flash"
+
+    # Two independent, distinguishable payloads: the router must rewrite neither in place.
+    request = ollama_request(model="deepseek-v4.1-flash")
+    request["injected_by_an_earlier_middleware"] = True
+    original = ollama_request(model="deepseek-v4.1-flash", reasoning_config={"mode": "on"})
+    request_before = json.dumps(request, sort_keys=True)
+    original_before = json.dumps(original, sort_keys=True)
+    original_snapshot = copy.deepcopy(original)
+
+    result = router.on_llm_request(
+        request,
+        original,
+        turn_id="gowire-1",
+        session_id="gowire",
+        platform="cli",
+        model="deepseek-v4.1-flash",
+        provider="opencode-go",
+        base_url="https://opencode.ai/zen/go/v1",
+        api_mode="chat_completions",
+        api_call_count=0,
+        api_request_id="gowire-1:api:0",
+    )
+
+    assert result is not None
+    # The generation model comes from the two-model Go catalog, never from the Ollama six.
+    assert result["request"]["model"] == "mimo-v2.6-flash"
+    # The decider call goes to Console SystemOne — never to the Go generation base URL.
+    assert transport.call_count == 1
+    assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
+    assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
+    # No reasoning field on the Go wire (contract unconfirmed); the logical choice is audited.
+    assert "reasoning_effort" not in result["request"]
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["model"] == "mimo-v2.6-flash"
+    assert record["effort_requested"] == "high"
+    assert record["effort"] is None
+    assert record["alternatives"] == ["deepseek-v4.1-flash"]
+    # Neither payload was mutated in place, and the pre-middleware payload is intact.
+    assert json.dumps(request, sort_keys=True) == request_before
+    assert json.dumps(original, sort_keys=True) == original_before
+    assert original == original_snapshot
+
+    # Replay in the same turn reuses the decision instead of calling the decider again.
+    replayed = route(
+        router,
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+        session_id="gowire",
+        turn_id="gowire-1",
+        api_call_count=1,
+    )
+    assert replayed is not None
+    assert replayed["request"]["model"] == "mimo-v2.6-flash"
+    assert transport.call_count == 1
+
+
+def test_opencode_go_route_cap_rejects_models_outside_the_two_model_catalog(tmp_path, monkeypatch):
+    """A widened operator grid or an invented choice cannot escape the Go catalog."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    # Valid one-option distribution, but the chosen id is not in the (capped) grid.
+    resp_payload = decision_payload(model_choice="unauthorized-model", model_confidence=0.95, grid_size=1)
+    # Both Jev variants answer the same way: the free model, then the paid fallback.
+    transport = StubTransport([StubResponse(resp_payload), StubResponse(resp_payload)])
     router, settings = build(
         tmp_path,
         transport,
@@ -1160,32 +1244,79 @@ def test_jev_console_decider_with_opencode_go_generation(tmp_path, monkeypatch):
             "routable_providers": ["opencode-go"],
             "grids": {
                 "opencode-go": [
-                    "deepseek-v4.1-flash: fast, efficient baseline model for routine coding and reasoning",
-                    "mimo-v2.6-flash: advanced multimodal reasoning model with deep analysis capabilities",
+                    "deepseek-v4.1-flash: routine",
+                    "unauthorized-model: invented",
                 ],
             },
         },
     )
-    monkeypatch.setattr(router, "_data_dir", lambda: str(audit_dir))
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
 
-    req = ollama_request()
-    result = route(
-        router,
-        req,
-        provider="opencode-go",
-        model="deepseek-v4.1-flash",
+    # The operator's grid is capped to the catalog before it ever becomes the question.
+    assert [
+        e.model_id for e in settings.effective(None, provider="opencode-go").grid
+    ] == ["deepseek-v4.1-flash"]
+
+    original = ollama_request(model="deepseek-v4.1-flash")
+    original_before = json.dumps(original, sort_keys=True)
+    result = route(router, dict(original), provider="opencode-go", model="deepseek-v4.1-flash")
+
+    assert result is None
+    assert json.dumps(original, sort_keys=True) == original_before
+    # Both Jev variants were asked, both answers were rejected, and the turn stayed untouched.
+    assert transport.call_count == 2
+    assert [call["json"]["model"] for call in transport.calls] == ["jev-1.13-free", "jev-1.13"]
+    assert router.tail(settings, limit=1)[0]["event"] == "skip"
+
+
+def test_console_route_no_longer_applies_normal_mimo(tmp_path, monkeypatch):
+    """Normal MiMo-V2.6-Flash is a Go model: the Console route must fail open on it."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.99, grid_size=1)
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={"decider": "jev_console", "routable_providers": ["opencode-console"]},
     )
-    assert result is not None
-    assert result["request"]["model"] == "mimo-v2.6-flash"
-    assert len(transport.calls) == 1
-    assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
-    assert "Bearer «redacted:sk-…»" in transport.calls[0]["headers"]["Authorization"]
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    assert [e.model_id for e in settings.effective(None, provider="opencode-console").grid] == [
+        "deepseek-v4.1-flash"
+    ]
+
+    original = ollama_request(model="deepseek-v4.1-flash")
+    original_before = json.dumps(original, sort_keys=True)
+    result = route(router, dict(original), provider="opencode-console", model="deepseek-v4.1-flash")
+
+    assert result is None
+    assert json.dumps(original, sort_keys=True) == original_before
+
+
+def test_opencode_go_legacy_decider_keeps_its_configured_grid(tmp_path, monkeypatch):
+    """The Go catalog cap is opt-in: a legacy decider keeps what the operator configured."""
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "routable_providers": ["opencode-go"],
+            "grids": {"opencode-go": ["deepseek-v4.1-flash: fast", "kimi-k3: code"]},
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    assert [e.model_id for e in settings.effective(None, provider="opencode-go").grid] == [
+        "deepseek-v4.1-flash",
+        "kimi-k3",
+    ]
 
 
 def test_cross_decider_memo_replay_isolation(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    resp_payload = decision_payload(model_choice="1", model_confidence=0.95, grid_size=2)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.95, grid_size=1)
     transport = StubTransport([StubResponse(resp_payload)])
     audit_dir = tmp_path / "audit"
     current_config = {
@@ -1231,13 +1362,13 @@ def test_cross_decider_memo_replay_isolation(tmp_path, monkeypatch):
 
 def test_opencode_console_distinguishes_logical_effort_from_wire(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
-    # Jev returns model choice "2" (mimo-v2.6-flash) and effort choice "high" with confidence 0.95
+    # Jev returns model choice "1" (deepseek-v4.1-flash) and effort choice "high" with confidence 0.95
     resp_payload = decision_payload(
-        model_choice="2",
+        model_choice="1",
         model_confidence=0.95,
         effort_choice="high",
         effort_confidence=0.95,
-        grid_size=2,
+        grid_size=1,
     )
     transport = StubTransport([StubResponse(resp_payload)])
     audit_dir = tmp_path / "audit"
@@ -1258,7 +1389,7 @@ def test_opencode_console_distinguishes_logical_effort_from_wire(tmp_path, monke
         model="deepseek-v4.1-flash",
     )
     assert result is not None
-    assert result["request"]["model"] == "mimo-v2.6-flash"
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
     # Wire payload MUST omit reasoning_effort because opencode-console support is unconfirmed
     assert "reasoning_effort" not in result["request"]
 
@@ -1267,7 +1398,7 @@ def test_opencode_console_distinguishes_logical_effort_from_wire(tmp_path, monke
     assert len(records) == 1
     record = records[0]
     assert record["event"] == "route"
-    assert record["model"] == "mimo-v2.6-flash"
+    assert record["model"] == "deepseek-v4.1-flash"
     assert record["effort_requested"] == "high"
     assert record["effort_choice"] == "high"
     assert record["effort"] is None  # Never claimed as sent on wire
@@ -1277,11 +1408,11 @@ def test_memo_replay_invalidated_by_confidence_threshold_elevation(tmp_path, mon
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     # Model confidence 0.95, effort confidence 0.70
     resp_payload = decision_payload(
-        model_choice="2",
+        model_choice="1",
         model_confidence=0.95,
         effort_choice="medium",
         effort_confidence=0.70,
-        grid_size=2,
+        grid_size=1,
     )
     transport = StubTransport([StubResponse(resp_payload)])
     current_config = {
@@ -1301,7 +1432,7 @@ def test_memo_replay_invalidated_by_confidence_threshold_elevation(tmp_path, mon
     # First call: applies memo
     res1 = route(router, ollama_request(), provider="opencode-console", session_id="s1", turn_id="t1")
     assert res1 is not None
-    assert res1["request"]["model"] == "mimo-v2.6-flash"
+    assert res1["request"]["model"] == "deepseek-v4.1-flash"
     assert transport.call_count == 1
 
     # Elevate threshold above effort confidence (0.80 > 0.70)
@@ -1316,7 +1447,7 @@ def test_memo_replay_invalidated_by_confidence_threshold_elevation(tmp_path, mon
 def test_memo_replay_invalidated_by_fallback_backend_or_key_env_change(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     monkeypatch.setenv("CUSTOM_CONSOLE_KEY", "custom-console-key")
-    resp_payload = decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.95, grid_size=1)
     transport = StubTransport([StubResponse(resp_payload)])
     current_config = {
         "decider": "jev_console",
@@ -1393,7 +1524,7 @@ def test_middleware_rejects_invented_criteria_or_outsider_choice(tmp_path, monke
 def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-probe2")
     # Case A: Probe 2 - zero effort confidence distinguishes presence from value
-    p_zero_effort = decision_payload(model_choice="2", model_confidence=0.99, effort_choice="high", effort_confidence=0.0, grid_size=2)
+    p_zero_effort = decision_payload(model_choice="1", model_confidence=0.99, effort_choice="high", effort_confidence=0.0, grid_size=1)
     transport = StubTransport([StubResponse(p_zero_effort)])
     current_config = {
         "decider": "jev_console",
@@ -1413,7 +1544,7 @@ def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(
     req1 = ollama_request(model="deepseek-v4.1-flash")
     res1 = route(router, req1, provider="opencode-console", session_id="s_zero", turn_id="t1")
     assert res1 is not None
-    assert res1["request"]["model"] == "mimo-v2.6-flash"
+    assert res1["request"]["model"] == "deepseek-v4.1-flash"
     assert transport.call_count == 1
 
     # Elevate threshold to 0.5 in same turn: replay must FAIL because effort_confidence 0.0 < 0.5
@@ -1431,7 +1562,7 @@ def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(
     assert fresh_reason == REASON_LOW_CONFIDENCE
 
     # Case B: Response without effort question (include_effort=False)
-    p_no_effort = decision_payload(model_choice="2", model_confidence=0.99, grid_size=2, include_effort=False)
+    p_no_effort = decision_payload(model_choice="1", model_confidence=0.99, grid_size=1, include_effort=False)
     transport_no_eff = StubTransport([StubResponse(p_no_effort)])
     current_config["confidence_threshold"] = 0.5
     router_no_eff = Router(
@@ -1445,11 +1576,11 @@ def test_middleware_zero_effort_confidence_replay_policy_and_no_effort_response(
     req2 = ollama_request(model="deepseek-v4.1-flash")
     res3 = route(router_no_eff, req2, provider="opencode-console", session_id="s_no_eff", turn_id="t1")
     assert res3 is not None
-    assert res3["request"]["model"] == "mimo-v2.6-flash"
+    assert res3["request"]["model"] == "deepseek-v4.1-flash"
     # Second call in same turn: replay should succeed because response has no effort confidence
     res4 = route(router_no_eff, req2, provider="opencode-console", session_id="s_no_eff", turn_id="t1", api_call_count=1)
     assert res4 is not None
-    assert res4["request"]["model"] == "mimo-v2.6-flash"
+    assert res4["request"]["model"] == "deepseek-v4.1-flash"
     assert transport_no_eff.call_count == 1
 
 

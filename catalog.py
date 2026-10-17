@@ -22,11 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple
 
-from .config import (
-    OPENCODE_CONSOLE_ALLOWLIST,
-    OPENCODE_CONSOLE_PROVIDER,
-    OPENCODE_CONSOLE_PROVIDER_ALIASES,
-)
+from .config import route_allowlist
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +121,14 @@ class ModelCatalog:
         provider_prefixes: Sequence[str] = (),
         *,
         provider: str = "",
+        decider: str = "",
     ) -> Optional[bool]:
         """``True``/``False`` when the catalog can answer, ``None`` when it cannot.
+
+        An opt-in OpenCode route is answered from its own allowlist (see
+        :func:`config.route_allowlist`): a model the route does not serve is a ``False``, not
+        "no evidence", so a decision naming it is never put on the wire. The Go cap is only in
+        force while the ``jev_console`` decider is active, so legacy setups keep "no evidence".
 
         The cache file is specific to ollama-cloud. If the active provider is not
         ollama-cloud, there is no catalog evidence for it, so returns None (no veto).
@@ -135,12 +137,11 @@ class ModelCatalog:
         namespaced as ``vendor/model``), so a grid entry naming the bare id is not judged absent
         for a formatting difference.
         """
-        provider_key = (provider or "").strip().lower()
-        if provider_key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
+        allowlist = route_allowlist(provider, decider)
+        if allowlist is not None:
             wanted = (model_id or "").strip()
-            if not wanted:
-                return False
-            return wanted in OPENCODE_CONSOLE_ALLOWLIST
+            return bool(wanted) and wanted in allowlist
+        provider_key = (provider or "").strip().lower()
         if provider_key and provider_key not in ("ollama-cloud", "ollama_cloud"):
             return None
         models = self.models()

@@ -653,7 +653,7 @@ def test_openai_compatible_invalid_confidence_fails_open(monkeypatch):
 
 def test_jev_console_decider_happy_path(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
-    resp_payload = decision_payload(model_choice="1", model_confidence=0.9, grid_size=2)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.9, grid_size=1)
     transport = StubTransport([StubResponse(resp_payload)])
     client, settings = make(
         transport,
@@ -686,7 +686,7 @@ def test_jev_console_decider_happy_path(monkeypatch):
 def test_jev_console_decider_fallback_to_paid_jev(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
     # First call (free jev) fails with 500; second call (paid jev) succeeds with 200
-    resp_payload = decision_payload(model_choice="2", model_confidence=0.88, grid_size=2)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.88, grid_size=1)
     transport = StubTransport([
         StubResponse({"error": "free quota exhausted"}, status_code=500),
         StubResponse(resp_payload, status_code=200),
@@ -704,7 +704,7 @@ def test_jev_console_decider_fallback_to_paid_jev(monkeypatch):
     )
     assert reason is None
     assert decision is not None
-    assert decision.model == "mimo-v2.6-flash"
+    assert decision.model == "deepseek-v4.1-flash"
     assert len(transport.calls) == 2
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
     assert transport.calls[1]["json"]["model"] == "jev-1.13"
@@ -760,7 +760,7 @@ def test_jev_console_decider_malformed_json(monkeypatch):
 
 def test_jev_console_decider_low_confidence_degrades(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
-    resp_payload = decision_payload(model_choice="2", model_confidence=0.2, grid_size=2)
+    resp_payload = decision_payload(model_choice="1", model_confidence=0.2, grid_size=1)
     transport = StubTransport([StubResponse(resp_payload)])
     client, settings = make(
         transport,
@@ -867,13 +867,13 @@ def test_jev_console_decider_response_defined_probability_domain(monkeypatch):
 def test_jev_console_decider_invalid_types_and_float_choice(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
     # Float choice
-    payload_float = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
-    payload_float["answers"]["model_route"]["choice"] = 2.0
+    payload_float = decision_payload("1", 0.99, "high", 0.8, grid_size=1)
+    payload_float["answers"]["model_route"]["choice"] = 1.0
     # Non-choice type
-    payload_bad_type = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
+    payload_bad_type = decision_payload("1", 0.99, "high", 0.8, grid_size=1)
     payload_bad_type["answers"]["model_route"]["type"] = "free_text"
     # Numeric effort choice
-    payload_bad_effort = decision_payload("2", 0.99, "high", 0.8, grid_size=2)
+    payload_bad_effort = decision_payload("1", 0.99, "high", 0.8, grid_size=1)
     payload_bad_effort["answers"]["reasoning_effort"]["choice"] = 3
     payload_bad_effort["answers"]["reasoning_effort"]["probabilities"] = {"3": 1.0}
 

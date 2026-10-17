@@ -25,16 +25,13 @@ from .config import (
     DEFAULT_CONSOLE_JEV_MODEL,
     DEFAULT_CONSOLE_KEY_ENV,
     EFFORT_LEVELS,
-    OPENCODE_CONSOLE_ALLOWLIST,
-    OPENCODE_CONSOLE_MODELS,
-    OPENCODE_CONSOLE_PROVIDER,
-    OPENCODE_CONSOLE_PROVIDER_ALIASES,
     EffectiveSettings,
     Settings,
     _as_float,
     _as_optional_float,
     api_key,
     redact,
+    route_allowlist,
 )
 from .effort import resolve_effort
 from .grid import Entry, criteria, resolve
@@ -820,10 +817,9 @@ class JevConsoleDecider(BaseDecider):
             return None, REASON_LOW_CONFIDENCE
 
         model = chosen.model_id
-        prov_key = (provider or "").strip().lower()
-        if prov_key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
-            if model not in OPENCODE_CONSOLE_ALLOWLIST:
-                return None, REASON_UNKNOWN_CHOICE
+        allowlist = route_allowlist(provider, self._settings.decider)
+        if allowlist is not None and model not in allowlist:
+            return None, REASON_UNKNOWN_CHOICE
 
         # -- effort ----------------------------------------------------------------
         requested: Optional[str] = None

@@ -313,8 +313,73 @@ def test_console_config_options_parsed_and_queried():
 def test_opencode_console_grid_resolution():
     settings = settings_for({})
     grid = settings.grid_for("opencode-console")
-    assert [e.model_id for e in grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+    # Console serves only the normal generation id its own catalog lists; normal MiMo is Go-only.
+    assert [e.model_id for e in grid] == ["deepseek-v4.1-flash"]
     assert settings.grid_for("opencode_console") == grid
+
+
+def test_opencode_go_grid_is_the_two_model_catalog_under_the_console_decider():
+    settings = settings_for({"decider": "jev_console"})
+    for provider in ("opencode-go", "opencode_go"):
+        assert [e.model_id for e in settings.grid_for(provider)] == [
+            "deepseek-v4.1-flash",
+            "mimo-v2.6-flash",
+        ]
+        effective = settings.effective(None, provider=provider)
+        assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+        # No legacy Ollama model can leak into the opt-in Go route.
+        assert "kimi-k3" not in [e.model_id for e in effective.grid]
+
+
+def test_opencode_go_grid_cap_applies_to_operator_grids_without_widening_them():
+    settings = settings_for(
+        {
+            "decider": "jev_console",
+            "grids": {
+                "opencode-go": [
+                    "deepseek-v4.1-flash: routine",
+                    "unauthorized-model: invented",
+                ],
+            },
+        }
+    )
+    assert [e.model_id for e in settings.grid_for("opencode-go")] == ["deepseek-v4.1-flash"]
+
+    # A Go grid with nothing authorized at all falls back to the built-in two-model catalog.
+    only_outsiders = settings_for(
+        {"decider": "jev_console", "grids": {"opencode-go": ["glm-5-free: invented"]}}
+    )
+    assert [e.model_id for e in only_outsiders.grid_for("opencode-go")] == [
+        "deepseek-v4.1-flash",
+        "mimo-v2.6-flash",
+    ]
+
+    # A surface policy grid cannot widen the catalog either.
+    policy_settings = settings_for(
+        {
+            "decider": "jev_console",
+            "platform_overrides": {
+                "cli": {"grid": ["deepseek-v4.1-flash: a", "glm-5-free: b"]},
+            },
+        }
+    )
+    policy = policy_settings.effective(policy_settings.policy_for("cli"), provider="opencode-go")
+    assert [e.model_id for e in policy.grid] == ["deepseek-v4.1-flash"]
+
+
+def test_opencode_go_grid_untouched_for_legacy_deciders():
+    settings = settings_for(
+        {"grids": {"opencode-go": ["deepseek-v4.1-flash: fast", "kimi-k3: code"]}}
+    )
+    assert [e.model_id for e in settings.grid_for("opencode-go")] == [
+        "deepseek-v4.1-flash",
+        "kimi-k3",
+    ]
+    # ... and with no configured grid at all, a legacy decider keeps the global grid.
+    bare = settings_for({})
+    assert [e.model_id for e in bare.grid_for("opencode-go")] == [
+        e.model_id for e in bare.grid
+    ]
 
 
 def _load_schema_defaults():

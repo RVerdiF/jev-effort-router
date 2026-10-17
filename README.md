@@ -95,7 +95,7 @@ Requirements: **Hermes Agent** with the `llm_request` middleware kind (0.21.4 or
 2. **`decider: jev_console` (OpenCode Console)**:
    - Uses OpenCode Console SystemOne API (`https://opencode.ai/inference/systemone/v1/systemone`) with `OPENCODE_CONSOLE_API_KEY`.
    - Decider model: primary `console_jev_model` (`jev-1.13-free`) with automatic fallback iteration to `console_jev_fallback_model` (`jev-1.13`, standard/paid Jev).
-   - Routes generation models: per owner directive reconciling routes (Comment 108), Jev SystemOne operates as decider, while downstream generation of `deepseek-v4.1-flash` and non-free `mimo-v2.6-flash` is routed via `opencode-go` (where official OpenCode Go documentation lists MiMo-V2.6-Flash normal alongside DeepSeek V4.1 Flash with per-token pricing); `mimo-v2.6-flash-free` is never substituted — see `docs/routing-grid.md` and `docs/EVIDENCIAS_OPERACIONAIS.md` for details).
+   - Routes generation models: per owner directive reconciling routes (Comment 108), Jev SystemOne operates as decider, while downstream generation of `deepseek-v4.1-flash` and non-free `mimo-v2.6-flash` is routed via `opencode-go` (where official OpenCode Go documentation lists MiMo-V2.6-Flash normal alongside DeepSeek V4.1 Flash with per-token pricing); `mimo-v2.6-flash-free` is never substituted. While this decider is active the `opencode-go` route is capped to those two models (configured grid entries outside the catalog are dropped, and no choice, fallback, alternative or replay can escape it), and the `opencode-console` route serves only `deepseek-v4.1-flash` — normal MiMo is never associated with it. See `docs/routing-grid.md` and `docs/EVIDENCIAS_OPERACIONAIS.md` for details.
 3. **`decider: openai_compatible` (OpenCode Go / Generic)**:
    - Uses OpenAI-compatible chat completions (`https://opencode.ai/zen/go/v1/chat/completions`) with `OPENCODE_GO_API_KEY`.
    - Decider model: `decider_model` (e.g. `deepseek-v4.1-flash`).
@@ -196,6 +196,7 @@ plugins:
 ```
 
 #### Key differences between backends:
+- **Go route catalog under `jev_console`**: the example above uses the legacy `openai_compatible` decider, so its `grids.opencode-go` is taken verbatim. With `decider: jev_console` the same route is capped to `deepseek-v4.1-flash` and `mimo-v2.6-flash`; a third entry is dropped rather than offered to the decider.
 - **Authentication**: `decider_api_key_env` names the environment variable containing the key (e.g. `OPENCODE_GO_API_KEY`). The secret itself is never written to configuration files or audit logs.
 - **Confidence**: For TypeSafe Jev (`jev`), confidence reflects a mathematically calibrated probability distribution. For `openai_compatible`, confidence is an LLM self-reported heuristic score parsed from the model's JSON response, strictly validated to be a finite float in `[0.0, 1.0]`.
 - **Effort verification**: Reasoning effort levels for custom providers must never be guessed or escalated. If unverified or empty, the router safely omits `reasoning_effort` rather than risking HTTP 400 errors. Verified levels for `deepseek-v4.1-flash` were empirically confirmed via the opt-in probe (`tests/test_live_probe.py`).
