@@ -218,7 +218,7 @@ OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     ),
 }
 
-#: Explicit reasoning policies for the ``opencode-go`` generation models.
+#: Explicit reasoning policies for the ``opencode-go`` generation model.
 OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     model_id: ModelReasoningPolicy(
         provider="opencode-go",
@@ -236,7 +236,36 @@ OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
             f"rather than guessed, and no claim is made that the model executed at that effort."
         ),
     )
-    for model_id in ("deepseek-v4.1-flash", "mimo-v2.6-flash")
+    for model_id in ("deepseek-v4.1-flash",)
+}
+
+#: Explicit reasoning policies for the opt-in ``commandcode`` generation model.
+#:
+#: This route's contract is *not* the OpenCode one. The provider profile maps ``deepseek/*``
+#: ids onto DeepSeek's native wire controls — ``build_api_kwargs_extras`` delegates to the
+#: DeepSeek profile, which emits the ``thinking`` toggle (``always_emit_toggle=True``) — so the
+#: generation payload carries a native reasoning knob that Hermes' provider layer owns, and no
+#: top-level ``reasoning_effort`` field is part of the contract. Sending one would be a guess.
+COMMANDCODE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
+    model_id: ModelReasoningPolicy(
+        provider="commandcode",
+        model_id=model_id,
+        wire_parameter=None,
+        accepted_levels=(),
+        evidence=(
+            "CommandCode maps deepseek/* ids onto DeepSeek's native thinking controls in the provider "
+            "profile (build_api_kwargs_extras -> thinking_toggle_extras); no reasoning_effort field is "
+            "part of this generation contract, and the OpenCode policy cannot be reused here."
+        ),
+        omitted=True,
+        decision=(
+            f"Explicit omission: on commandcode the reasoning control for {model_id} is the native DeepSeek "
+            "thinking toggle emitted by the provider profile, not a reasoning_effort field. The plugin omits "
+            "reasoning_effort on this wire; the Jev logical effort stays in effort_requested and no claim is "
+            "made that the model executed at that effort."
+        ),
+    )
+    for model_id in ("deepseek/deepseek-v4.1-flash",)
 }
 
 
@@ -317,6 +346,21 @@ def model_reasoning_policy(
             wire_parameter=None,
             accepted_levels=(),
             evidence="Model not in the opencode-go catalog; unconfirmed reasoning support.",
+            omitted=True,
+            decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
+        )
+
+    # commandcode built-in policy: namespaced ids, native DeepSeek thinking controls.
+    if provider_key in ("commandcode", "commandcode-chat", "commandcode_chat"):
+        for k, pol in COMMANDCODE_REASONING_POLICIES.items():
+            if k == (model_id or "").strip().lower() or k.rsplit("/", 1)[-1] == mid:
+                return pol
+        return ModelReasoningPolicy(
+            provider=provider_key,
+            model_id=model_id or "",
+            wire_parameter=None,
+            accepted_levels=(),
+            evidence="Model not in the commandcode allowlist; unconfirmed reasoning support.",
             omitted=True,
             decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
         )

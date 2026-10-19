@@ -318,15 +318,12 @@ def test_opencode_console_grid_resolution():
     assert settings.grid_for("opencode_console") == grid
 
 
-def test_opencode_go_grid_is_the_two_model_catalog_under_the_console_decider():
+def test_opencode_go_grid_is_the_single_model_catalog_under_the_console_decider():
     settings = settings_for({"decider": "jev_console"})
     for provider in ("opencode-go", "opencode_go"):
-        assert [e.model_id for e in settings.grid_for(provider)] == [
-            "deepseek-v4.1-flash",
-            "mimo-v2.6-flash",
-        ]
+        assert [e.model_id for e in settings.grid_for(provider)] == ["deepseek-v4.1-flash"]
         effective = settings.effective(None, provider=provider)
-        assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+        assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash"]
         # No legacy Ollama model can leak into the opt-in Go route.
         assert "kimi-k3" not in [e.model_id for e in effective.grid]
 
@@ -345,14 +342,11 @@ def test_opencode_go_grid_cap_applies_to_operator_grids_without_widening_them():
     )
     assert [e.model_id for e in settings.grid_for("opencode-go")] == ["deepseek-v4.1-flash"]
 
-    # A Go grid with nothing authorized at all falls back to the built-in two-model catalog.
+    # A Go grid with nothing authorized at all falls back to the built-in one-model catalog.
     only_outsiders = settings_for(
         {"decider": "jev_console", "grids": {"opencode-go": ["glm-5-free: invented"]}}
     )
-    assert [e.model_id for e in only_outsiders.grid_for("opencode-go")] == [
-        "deepseek-v4.1-flash",
-        "mimo-v2.6-flash",
-    ]
+    assert [e.model_id for e in only_outsiders.grid_for("opencode-go")] == ["deepseek-v4.1-flash"]
 
     # A surface policy grid cannot widen the catalog either.
     policy_settings = settings_for(
@@ -380,6 +374,110 @@ def test_opencode_go_grid_untouched_for_legacy_deciders():
     assert [e.model_id for e in bare.grid_for("opencode-go")] == [
         e.model_id for e in bare.grid
     ]
+
+
+def test_commandcode_grid_is_the_single_namespaced_catalog_under_the_console_decider():
+    settings = settings_for({"decider": "jev_console"})
+    for provider in ("commandcode", "commandcode-chat", "commandcode_chat"):
+        assert [e.model_id for e in settings.grid_for(provider)] == [
+            "deepseek/deepseek-v4.1-flash"
+        ]
+        effective = settings.effective(None, provider=provider)
+        assert [e.model_id for e in effective.grid] == ["deepseek/deepseek-v4.1-flash"]
+        assert effective.default_model == "deepseek/deepseek-v4.1-flash"
+        # The bare OpenCode id is a different contract and cannot enter this route.
+        assert "deepseek-v4.1-flash" not in [e.model_id for e in effective.grid]
+
+
+def test_commandcode_grid_cap_applies_to_operator_grids_without_widening_them():
+    settings = settings_for(
+        {
+            "decider": "jev_console",
+            "grids": {
+                "commandcode": [
+                    "deepseek/deepseek-v4.1-flash: routine",
+                    "deepseek-v4.1-flash: bare OpenCode id",
+                    "deepseek/deepseek-v4.1-flash-fast: not authorized",
+                ],
+            },
+        }
+    )
+    # The alias resolves to the same configured grid, and only the authorized id survives.
+    assert [e.model_id for e in settings.grid_for("commandcode-chat")] == [
+        "deepseek/deepseek-v4.1-flash"
+    ]
+
+    # A grid with nothing authorized falls back to the built-in one-model catalog.
+    only_outsiders = settings_for(
+        {"decider": "jev_console", "grids": {"commandcode": ["glm-5-free: invented"]}}
+    )
+    assert [e.model_id for e in only_outsiders.grid_for("commandcode")] == [
+        "deepseek/deepseek-v4.1-flash"
+    ]
+
+    # A surface policy grid cannot widen the catalog either.
+    policy_settings = settings_for(
+        {
+            "decider": "jev_console",
+            "platform_overrides": {
+                "cli": {"grid": ["deepseek/deepseek-v4.1-flash: a", "kimi-k3: b"]},
+            },
+        }
+    )
+    policy = policy_settings.effective(
+        policy_settings.policy_for("cli"), provider="commandcode"
+    )
+    assert [e.model_id for e in policy.grid] == ["deepseek/deepseek-v4.1-flash"]
+
+
+def test_commandcode_grid_untouched_for_legacy_deciders():
+    settings = settings_for(
+        {
+            "grids": {
+                "commandcode": [
+                    "deepseek/deepseek-v4.1-flash: fast",
+                    "kimi-k3: code",
+                ]
+            }
+        }
+    )
+    assert [e.model_id for e in settings.grid_for("commandcode")] == [
+        "deepseek/deepseek-v4.1-flash",
+        "kimi-k3",
+    ]
+    # ... and with no configured grid at all, a legacy decider keeps the global grid.
+    bare = settings_for({})
+    assert [e.model_id for e in bare.grid_for("commandcode")] == [
+        e.model_id for e in bare.grid
+    ]
+
+
+def test_is_provider_routable_normalises_every_route_alias():
+    """A canonical name and any alias of the same route match in both directions."""
+    pairs = (
+        ("ollama-cloud", "ollama_cloud"),
+        ("ollama_cloud", "ollama-cloud"),
+        ("opencode-console", "opencode_console"),
+        ("opencode-console", "opencode-console"),
+        ("opencode-go", "opencode_go"),
+        ("opencode-go", "opencode-go"),
+        ("commandcode", "commandcode-chat"),
+        ("commandcode", "commandcode_chat"),
+        ("commandcode-chat", "commandcode"),
+    )
+    for declared, queried in pairs:
+        assert settings_for({"routable_providers": [declared]}).is_provider_routable(
+            queried
+        ) is True, (declared, queried)
+
+    # The opencode-go asymmetry this replaced: a declared canonical name never matched its
+    # underscore alias, so the route was skipped silently.
+    assert settings_for({"routable_providers": ["opencode-go"]}).is_provider_routable(
+        "opencode_go"
+    ) is True
+
+    assert settings_for({}).is_provider_routable("commandcode") is False
+    assert settings_for({}).is_provider_routable("openrouter") is False
 
 
 def _load_schema_defaults():

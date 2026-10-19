@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from .grid import (
+    COMMANDCODE_GRID,
     DEFAULT_GRID,
     OPENCODE_CONSOLE_GRID,
     OPENCODE_GO_GRID,
@@ -36,21 +37,36 @@ OPENCODE_CONSOLE_PROVIDER_ALIASES = ("opencode_console",)
 OPENCODE_GO_PROVIDER = "opencode-go"
 OPENCODE_GO_PROVIDER_ALIASES = ("opencode_go",)
 
+#: CommandCode provider and aliases: an opt-in OpenAI-compatible generation route.
+COMMANDCODE_PROVIDER = "commandcode"
+COMMANDCODE_PROVIDER_ALIASES = ("commandcode-chat", "commandcode_chat")
+
 #: Console serves generation for the one normal (non-free) id its public model list carries.
-#: Normal MiMo-V2.6-Flash is a Go model, so it is deliberately absent here; the free variant
-#: was refused by the owner and is absent from both catalogs.
+#: The free variant was refused by the owner and is absent from every catalog.
 OPENCODE_CONSOLE_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash",)
 OPENCODE_CONSOLE_ALLOWLIST = frozenset(OPENCODE_CONSOLE_MODELS)
 
-#: The Go generation route's initial catalog: the two authorized normal models.
-OPENCODE_GO_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash", "mimo-v2.6-flash")
+#: The Go generation route's catalog: one authorized normal model. Every generation catalog
+#: this plugin carries now names the same single model, so the model question is degenerate
+#: by construction and the decider effectively chooses only the reasoning level.
+OPENCODE_GO_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash",)
 OPENCODE_GO_ALLOWLIST = frozenset(OPENCODE_GO_MODELS)
 
-#: The provider/alias pairs an operator grid may be declared under.
+#: CommandCode namespaces its model ids, so the id here is **not** the bare OpenCode one of
+#: the same model — they are different contracts. Verified against the provider's public,
+#: unauthenticated model list (``https://api.commandcode.ai/provider/v1/models``), which
+#: publishes ``deepseek/deepseek-v4.1-flash``; the ``-fast`` variant is not authorized.
+COMMANDCODE_MODELS: Tuple[str, ...] = ("deepseek/deepseek-v4.1-flash",)
+COMMANDCODE_ALLOWLIST = frozenset(COMMANDCODE_MODELS)
+
+#: The provider/alias pairs an operator grid may be declared under. The same table drives the
+#: alias normalisation in :meth:`Settings.is_provider_routable`, so a route cannot be known to
+#: the grid lookups while its aliases are forgotten by the routable check.
 _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (ROUTED_PROVIDER, ROUTED_PROVIDER_ALIASES),
     (OPENCODE_CONSOLE_PROVIDER, OPENCODE_CONSOLE_PROVIDER_ALIASES),
     (OPENCODE_GO_PROVIDER, OPENCODE_GO_PROVIDER_ALIASES),
+    (COMMANDCODE_PROVIDER, COMMANDCODE_PROVIDER_ALIASES),
 )
 
 #: API modes this router understands. The Ollama:cloud profile is chat_completions;
@@ -164,19 +180,35 @@ def _entry_for(grid: Sequence[Entry], model_id: str) -> Optional[Entry]:
     return None
 
 
+def _provider_group(provider: str) -> frozenset:
+    """Every name (canonical plus aliases) denoting the same route as ``provider``.
+
+    Empty for a provider this router does not know, which callers treat as "match that name
+    verbatim". One table backs this, so registering a route cannot leave an alias behind.
+    """
+    key = (provider or "").strip().lower()
+    for name, aliases in _GRID_ALIASES:
+        group = (name, *aliases)
+        if key in group:
+            return frozenset(group)
+    return frozenset()
+
+
 def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
     """The allowlist that pins ``provider``'s catalog, or ``None`` when it has none.
 
     ``opencode-console`` is pinned at all times: its models are the Console's own. The
-    ``opencode-go`` cap is **opt-in** — it is in force only while the ``jev_console`` decider
-    is active, so a legacy ``jev``/``openai_compatible`` setup keeps whatever Go grid the
-    operator configured, unchanged.
+    ``opencode-go`` and ``commandcode`` caps are **opt-in** — they are in force only while the
+    ``jev_console`` decider is active, so a legacy ``jev``/``openai_compatible`` setup keeps
+    whatever grid the operator configured, unchanged.
     """
     key = (provider or "").strip().lower()
     if key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
         return OPENCODE_CONSOLE_ALLOWLIST
     if key in (OPENCODE_GO_PROVIDER, *OPENCODE_GO_PROVIDER_ALIASES):
         return OPENCODE_GO_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
+    if key in (COMMANDCODE_PROVIDER, *COMMANDCODE_PROVIDER_ALIASES):
+        return COMMANDCODE_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
     return None
 
 
@@ -187,6 +219,8 @@ def route_catalog(provider: str) -> Optional[Tuple[Entry, ...]]:
         return OPENCODE_CONSOLE_GRID
     if key in (OPENCODE_GO_PROVIDER, *OPENCODE_GO_PROVIDER_ALIASES):
         return OPENCODE_GO_GRID
+    if key in (COMMANDCODE_PROVIDER, *COMMANDCODE_PROVIDER_ALIASES):
+        return COMMANDCODE_GRID
     return None
 
 
@@ -323,8 +357,8 @@ class Settings:
     def grid_for(self, provider: str = "") -> Tuple[Entry, ...]:
         """The grid for ``provider``, or the global grid when unlisted.
 
-        An opt-in OpenCode route is pinned by its catalog (see :func:`route_allowlist`): an
-        entry outside the catalog is dropped, and a grid the cap empties falls back to the
+        An opt-in route is pinned by its catalog (see :func:`route_allowlist`): an entry
+        outside the catalog is dropped, and a grid the cap empties falls back to the
         route's built-in catalog. Choice, fallback, alternatives and replay all read their
         options from here, so none of them can name a model the route does not serve.
         """
@@ -396,26 +430,21 @@ class Settings:
         return self.confidence_threshold
 
     def is_provider_routable(self, provider: str) -> bool:
-        """Whether ``provider`` is in the configured routable providers list."""
+        """Whether ``provider`` is in the configured routable providers list.
+
+        A canonical name and its aliases denote the same route, so declaring either side
+        counts for both (``opencode-go``/``opencode_go``, ``commandcode``/``commandcode-chat``,
+        ...). Normalisation is driven by one table, so no route can be routable under its
+        canonical name while its aliases are ignored.
+        """
         key = (provider or "").strip().lower()
         if not key:
             return any(
                 p.strip().lower() in (ROUTED_PROVIDER, *ROUTED_PROVIDER_ALIASES)
                 for p in self.routable_providers
             )
-        for p in self.routable_providers:
-            cand = p.strip().lower()
-            if cand == key:
-                return True
-            if key in ROUTED_PROVIDER_ALIASES and cand == ROUTED_PROVIDER:
-                return True
-            if cand in ROUTED_PROVIDER_ALIASES and key == ROUTED_PROVIDER:
-                return True
-            if key in OPENCODE_CONSOLE_PROVIDER_ALIASES and cand == OPENCODE_CONSOLE_PROVIDER:
-                return True
-            if cand in OPENCODE_CONSOLE_PROVIDER_ALIASES and key == OPENCODE_CONSOLE_PROVIDER:
-                return True
-        return False
+        group = _provider_group(key) or {key}
+        return any(p.strip().lower() in group for p in self.routable_providers)
 
     def effective(self, policy: Optional[PlatformPolicy], provider: str = "") -> EffectiveSettings:
         """Resolve one frozen snapshot, applying ``policy`` over the global settings.

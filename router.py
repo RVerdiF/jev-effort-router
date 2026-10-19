@@ -394,7 +394,7 @@ class Router:
         file, a non-Ollama provider, or a host that exposes none of it all mean "no evidence",
         and the router must not start refusing decisions on missing evidence. Only a catalog that
         lists models and does not contain this one is a No. An opt-in OpenCode route pins its
-        own catalog, so ``decider`` is what makes the Go cap apply.
+        own catalog, so ``decider`` is what makes an opt-in route's cap apply.
         """
         try:
             known = self._catalog.is_known(model_id, provider=provider, decider=decider)

@@ -1146,20 +1146,20 @@ def test_jev_console_decider_routing_end_to_end(tmp_path, monkeypatch):
     assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
 
 
-def test_jev_console_decider_generation_route_go_uses_the_two_model_catalog(tmp_path, monkeypatch):
-    """Jev Console decides; generation lands on ``opencode-go`` with its two-model catalog.
+def test_jev_console_decider_generation_route_go_uses_the_single_model_catalog(tmp_path, monkeypatch):
+    """Jev Console decides; generation lands on ``opencode-go`` with its one-model catalog.
 
     The grid is the *effective* one — no per-provider grid is injected here — so this exercises
-    what an operator actually gets: the opt-in Go route caps itself to ``deepseek-v4.1-flash``
-    and ``mimo-v2.6-flash``, and no Ollama model can be selected or offered as an alternative.
+    what an operator actually gets: the opt-in Go route caps itself to ``deepseek-v4.1-flash``,
+    and no Ollama model can be selected or offered as an alternative.
     """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
     resp_payload = decision_payload(
-        model_choice="2",
+        model_choice="1",
         model_confidence=0.95,
         effort_choice="high",
         effort_confidence=0.9,
-        grid_size=2,
+        grid_size=1,
     )
     transport = StubTransport([StubResponse(resp_payload)])
     router, settings = build(
@@ -1170,7 +1170,7 @@ def test_jev_console_decider_generation_route_go_uses_the_two_model_catalog(tmp_
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
 
     effective = settings.effective(None, provider="opencode-go")
-    assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash", "mimo-v2.6-flash"]
+    assert [e.model_id for e in effective.grid] == ["deepseek-v4.1-flash"]
     assert effective.default_model == "deepseek-v4.1-flash"
 
     # Two independent, distinguishable payloads: the router must rewrite neither in place.
@@ -1196,20 +1196,22 @@ def test_jev_console_decider_generation_route_go_uses_the_two_model_catalog(tmp_
     )
 
     assert result is not None
-    # The generation model comes from the two-model Go catalog, never from the Ollama six.
-    assert result["request"]["model"] == "mimo-v2.6-flash"
+    # The generation model comes from the one-model Go catalog, never from the Ollama six.
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
     # The decider call goes to Console SystemOne — never to the Go generation base URL.
     assert transport.call_count == 1
     assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
+    # Only one model was ever offered to the decider, so no alternative can exist.
+    assert list(transport.calls[0]["json"]["questions"]["model_route"]["criteria"]) == ["1"]
     # No reasoning field on the Go wire (contract unconfirmed); the logical choice is audited.
     assert "reasoning_effort" not in result["request"]
     record = router.tail(settings, limit=1)[0]
     assert record["event"] == "route"
-    assert record["model"] == "mimo-v2.6-flash"
+    assert record["model"] == "deepseek-v4.1-flash"
     assert record["effort_requested"] == "high"
     assert record["effort"] is None
-    assert record["alternatives"] == ["deepseek-v4.1-flash"]
+    assert record["alternatives"] is None
     # Neither payload was mutated in place, and the pre-middleware payload is intact.
     assert json.dumps(request, sort_keys=True) == request_before
     assert json.dumps(original, sort_keys=True) == original_before
@@ -1225,11 +1227,11 @@ def test_jev_console_decider_generation_route_go_uses_the_two_model_catalog(tmp_
         api_call_count=1,
     )
     assert replayed is not None
-    assert replayed["request"]["model"] == "mimo-v2.6-flash"
+    assert replayed["request"]["model"] == "deepseek-v4.1-flash"
     assert transport.call_count == 1
 
 
-def test_opencode_go_route_cap_rejects_models_outside_the_two_model_catalog(tmp_path, monkeypatch):
+def test_opencode_go_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
     """A widened operator grid or an invented choice cannot escape the Go catalog."""
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
     # Valid one-option distribution, but the chosen id is not in the (capped) grid.
@@ -1260,6 +1262,140 @@ def test_opencode_go_route_cap_rejects_models_outside_the_two_model_catalog(tmp_
     original = ollama_request(model="deepseek-v4.1-flash")
     original_before = json.dumps(original, sort_keys=True)
     result = route(router, dict(original), provider="opencode-go", model="deepseek-v4.1-flash")
+
+    assert result is None
+    assert json.dumps(original, sort_keys=True) == original_before
+    # Both Jev variants were asked, both answers were rejected, and the turn stayed untouched.
+    assert transport.call_count == 2
+    assert [call["json"]["model"] for call in transport.calls] == ["jev-1.13-free", "jev-1.13"]
+    assert router.tail(settings, limit=1)[0]["event"] == "skip"
+
+
+def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_catalog(
+    tmp_path, monkeypatch
+):
+    """Jev Console decides; generation lands on ``commandcode`` with its one namespaced id.
+
+    Effective configuration only — no grid is injected — so this is what an operator gets:
+    the opt-in CommandCode route is capped to ``deepseek/deepseek-v4.1-flash``, the decider is
+    still Console SystemOne, and ``reasoning_effort`` never reaches this wire (the provider
+    profile owns the native DeepSeek ``thinking`` knob instead).
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    resp_payload = decision_payload(
+        model_choice="1",
+        model_confidence=0.95,
+        effort_choice="high",
+        effort_confidence=0.9,
+        grid_size=1,
+    )
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={"decider": "jev_console", "routable_providers": ["commandcode"]},
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    effective = settings.effective(None, provider="commandcode")
+    assert [e.model_id for e in effective.grid] == ["deepseek/deepseek-v4.1-flash"]
+    assert effective.default_model == "deepseek/deepseek-v4.1-flash"
+
+    request = ollama_request(model="deepseek/deepseek-v4.1-flash")
+    request["injected_by_an_earlier_middleware"] = True
+    original = ollama_request(
+        model="deepseek/deepseek-v4.1-flash", reasoning_config={"mode": "on"}
+    )
+    request_before = json.dumps(request, sort_keys=True)
+    original_before = json.dumps(original, sort_keys=True)
+    original_snapshot = copy.deepcopy(original)
+
+    result = router.on_llm_request(
+        request,
+        original,
+        turn_id="ccwire-1",
+        session_id="ccwire",
+        platform="cli",
+        model="deepseek/deepseek-v4.1-flash",
+        provider="commandcode",
+        base_url="https://api.commandcode.ai/provider/v1",
+        api_mode="chat_completions",
+        api_call_count=0,
+        api_request_id="ccwire-1:api:0",
+    )
+
+    assert result is not None
+    assert result["request"]["model"] == "deepseek/deepseek-v4.1-flash"
+    # The bare OpenCode id of the same model must never reach this wire.
+    assert result["request"]["model"] != "deepseek-v4.1-flash"
+    # The decision came from Console SystemOne, never from the generation base URL.
+    assert transport.call_count == 1
+    assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
+    assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
+    # Only the namespaced id was offered: the decider saw a one-option model question.
+    assert list(transport.calls[0]["json"]["questions"]["model_route"]["criteria"]) == ["1"]
+    # No reasoning field: the native DeepSeek thinking knob is the provider layer's contract.
+    assert "reasoning_effort" not in result["request"]
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["model"] == "deepseek/deepseek-v4.1-flash"
+    assert record["effort_requested"] == "high"
+    assert record["effort"] is None
+    assert record["alternatives"] is None
+    # Neither payload was mutated in place, and the pre-middleware payload is intact.
+    assert json.dumps(request, sort_keys=True) == request_before
+    assert json.dumps(original, sort_keys=True) == original_before
+    assert original == original_snapshot
+
+    # Replay in the same turn reuses the decision instead of calling the decider again.
+    replayed = route(
+        router,
+        provider="commandcode",
+        model="deepseek/deepseek-v4.1-flash",
+        session_id="ccwire",
+        turn_id="ccwire-1",
+        api_call_count=1,
+    )
+    assert replayed is not None
+    assert replayed["request"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert transport.call_count == 1
+
+
+def test_commandcode_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
+    """A widened operator grid or a decision naming the bare OpenCode id cannot escape the cap."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
+    # Valid one-option distribution, but the chosen id is not in the (capped) grid.
+    resp_payload = decision_payload(
+        model_choice="unauthorized-model", model_confidence=0.95, grid_size=1
+    )
+    # Both Jev variants answer the same way: the free model, then the paid fallback.
+    transport = StubTransport([StubResponse(resp_payload), StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["commandcode"],
+            "grids": {
+                "commandcode": [
+                    "deepseek/deepseek-v4.1-flash: routine",
+                    "deepseek-v4.1-flash: bare OpenCode id",
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    # The operator's grid is capped to the catalog before it ever becomes the question.
+    assert [
+        e.model_id for e in settings.effective(None, provider="commandcode").grid
+    ] == ["deepseek/deepseek-v4.1-flash"]
+
+    original = ollama_request(model="deepseek/deepseek-v4.1-flash")
+    original_before = json.dumps(original, sort_keys=True)
+    result = route(
+        router, dict(original), provider="commandcode", model="deepseek/deepseek-v4.1-flash"
+    )
 
     assert result is None
     assert json.dumps(original, sort_keys=True) == original_before

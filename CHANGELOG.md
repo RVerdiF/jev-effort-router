@@ -4,6 +4,33 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in `commandcode` generation route.** A new OpenAI-compatible provider (`commandcode`, aliases
+  `commandcode-chat` / `commandcode_chat`) carries its own one-model catalog, `COMMANDCODE_GRID`:
+  `deepseek/deepseek-v4.1-flash`. The namespaced id was confirmed from the provider's public,
+  unauthenticated `/models` endpoint (`https://api.commandcode.ai/provider/v1/models`); the bare
+  OpenCode id of the same model is a different contract and is rejected on this route. The cap is
+  applied by the existing `route_allowlist` / `route_catalog` mechanism and is opt-in under
+  `decider: jev_console`, like the Go route; legacy deciders keep the operator's grid.
+- **Provider alias normalisation in `is_provider_routable`.** One table (`_GRID_ALIASES`) now drives
+  both the grid lookups and the routable check, so a canonical name and any alias of the same route
+  match in both directions. This also fixes a pre-existing asymmetry: a declared `opencode-go` never
+  matched the `opencode_go` the host reports, so the route was skipped silently.
+
+### Changed
+
+- **Every generation catalog now names a single model.** `OPENCODE_GO_MODELS` is
+  `("deepseek-v4.1-flash",)`; `mimo-v2.6-flash` was removed from all grids, allowlists and catalogs.
+  With one model per route the model question is degenerate by construction and the decider
+  effectively chooses only the reasoning level.
+- **`commandcode` reasoning policy is explicit and route-specific.** The provider profile maps
+  `deepseek/*` ids onto DeepSeek's native `thinking` controls (`build_api_kwargs_extras`), so
+  `reasoning_effort` is not part of that wire and is omitted rather than copied from the OpenCode
+  policy. Wire `effort` stays `null` in the audit while `effort_requested` records the Jev choice.
+
 ## [0.4.0] - 2026-10-15
 
 ### Added

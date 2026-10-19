@@ -169,7 +169,7 @@ Unlike unstructured chat responses, the decider's output is subjected to strict 
 | **Protocol** | SystemOne typed decisions (`model`, `state`, `questions` -> `answers`) | OpenAI Chat Completions JSON mode | OpenRouter Decisions API |
 | **Credential Env** | `OPENCODE_CONSOLE_API_KEY` (or `console_api_key_env`) | `OPENCODE_GO_API_KEY` (or `decider_api_key_env`) | `OPENROUTER_API_KEY` |
 | **Decider Model** | `jev-1.13-free` (primary) with fallback to `jev-1.13` (paid) | `deepseek-v4.1-flash` (or custom chat model) | `typesafe/jev-1.13` |
-| **Target Generation Provider** | `opencode-console` (generation model: `deepseek-v4.1-flash` only — normal MiMo is a Go model) | `opencode-go` (catalog: `deepseek-v4.1-flash`, `mimo-v2.6-flash`) | `ollama-cloud` (by default) |
+| **Target Generation Provider** | `opencode-console` (generation model: `deepseek-v4.1-flash` only) | `opencode-go` (catalog: `deepseek-v4.1-flash`) or `commandcode` (catalog: `deepseek/deepseek-v4.1-flash`) | `ollama-cloud` (by default) |
 | **Decider Role** | Steering decider only, not generation model | Steering decider only | Steering decider only |
 
 ### Endpoint
@@ -197,8 +197,7 @@ User-Agent: Hermes-Agent/0.21.4 (jev-effort-router)
       "type": "choice",
       "instructions": "Which model is best suited to handle this task?",
       "criteria": {
-        "1": "deepseek-v4.1-flash: general work, ordinary coding and tool use; 1M context",
-        "2": "mimo-v2.6-flash: multi-modal, agentic coding and fast reasoning"
+        "1": "deepseek-v4.1-flash: general work, ordinary coding and tool use; 1M context"
       }
     },
     "reasoning_effort": {
@@ -220,7 +219,7 @@ The decider responds with SystemOne envelope carrying `answers`:
     "model_route": {
       "type": "choice",
       "choice": "1",
-      "probabilities": {"1": 0.95, "2": 0.05},
+      "probabilities": {"1": 1.0},
       "confidence": 0.95
     },
     "reasoning_effort": {

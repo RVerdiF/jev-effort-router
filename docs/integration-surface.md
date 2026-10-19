@@ -121,8 +121,8 @@ logged and never included in an audit record. `OPENROUTER_API_KEY` is treated as
    - All implement `decide(messages, effective, *, platform, provider) -> Tuple[Optional[Decision], Optional[str]]`.
 3. **Provider Allowlist (`routable_providers`) & OpenCode routes:**
    - Replaces hardcoded `ollama-cloud` check with an allowlist gate (`settings.routable_providers`).
-   - Built-in support for `opencode-console` (and alias `opencode_console`), pinned to its own catalog (`deepseek-v4.1-flash` — the Console does not serve normal MiMo).
-   - While `decider: jev_console` is active, `opencode-go` (alias `opencode_go`) is capped to the two authorized generation models (`deepseek-v4.1-flash`, `mimo-v2.6-flash`); the cap covers the effective grid, surface-policy grids, catalog veto, alternatives and memo replay. A legacy decider keeps whatever Go grid the operator configured.
+   - Built-in support for `opencode-console` (and alias `opencode_console`), pinned to its own catalog (`deepseek-v4.1-flash`).
+   - While `decider: jev_console` is active, `opencode-go` (alias `opencode_go`) is capped to the single authorized generation model (`deepseek-v4.1-flash`), and `commandcode` (aliases `commandcode-chat` / `commandcode_chat`) to its single namespaced id (`deepseek/deepseek-v4.1-flash`); the cap covers the effective grid, surface-policy grids, catalog veto, alternatives and memo replay. A legacy decider keeps whatever grid the operator configured.
    - Providers not on the list pass through 100% untouched.
 4. **Isolated Provider Catalog Checks:**
    - The host's `ollama_cloud_models_cache.json` check is strictly scoped to `provider == "ollama-cloud"`. Non-Ollama providers (like `opencode-console` or `opencode-go`) are not falsely rejected by an Ollama catalog.

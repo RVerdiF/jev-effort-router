@@ -234,10 +234,36 @@ def test_opencode_go_catalog_is_capped_only_for_the_console_decider(tmp_path):
     catalog = catalog_for(tmp_path, ["ollama-only-model"])
     for provider in ("opencode-go", "opencode_go"):
         assert catalog.is_known("deepseek-v4.1-flash", provider=provider, decider="jev_console") is True
-        assert catalog.is_known("mimo-v2.6-flash", provider=provider, decider="jev_console") is True
+        # MiMo left the catalog: no generation route serves it any more.
+        assert catalog.is_known("mimo-v2.6-flash", provider=provider, decider="jev_console") is False
         assert catalog.is_known("mimo-v2.6-flash-free", provider=provider, decider="jev_console") is False
         assert catalog.is_known("kimi-k3", provider=provider, decider="jev_console") is False
         # Legacy deciders keep "no evidence" for the Go route: their configured grid still rules.
+        assert catalog.is_known("kimi-k3", provider=provider) is None
+        assert catalog.is_known("kimi-k3", provider=provider, decider="jev") is None
+
+
+def test_commandcode_catalog_is_capped_only_for_the_console_decider(tmp_path):
+    catalog = catalog_for(tmp_path, ["ollama-only-model"])
+    for provider in ("commandcode", "commandcode-chat", "commandcode_chat"):
+        assert (
+            catalog.is_known("deepseek/deepseek-v4.1-flash", provider=provider, decider="jev_console")
+            is True
+        )
+        # CommandCode's namespace is strict: its own catalog publishes these ids, and neither
+        # the bare OpenCode id nor the ``-fast`` variant is authorized on this route.
+        assert (
+            catalog.is_known("deepseek-v4.1-flash", provider=provider, decider="jev_console")
+            is False
+        )
+        assert (
+            catalog.is_known(
+                "deepseek/deepseek-v4.1-flash-fast", provider=provider, decider="jev_console"
+            )
+            is False
+        )
+        assert catalog.is_known("kimi-k3", provider=provider, decider="jev_console") is False
+        # Legacy deciders keep "no evidence": their configured grid still rules.
         assert catalog.is_known("kimi-k3", provider=provider) is None
         assert catalog.is_known("kimi-k3", provider=provider, decider="jev") is None
 

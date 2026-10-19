@@ -174,9 +174,9 @@ def test_opencode_console_explicit_reasoning_policies():
 
 
 def test_opencode_go_explicit_reasoning_policies():
-    # Both Go generation models declare omission explicitly rather than inheriting a guess.
+    # The Go generation model declares omission explicitly rather than inheriting a guess.
     for provider_name in ("opencode-go", "opencode_go"):
-        for model_id in ("deepseek-v4.1-flash", "mimo-v2.6-flash"):
+        for model_id in ("deepseek-v4.1-flash",):
             pol = model_reasoning_policy(model_id, provider=provider_name)
             assert pol.provider == "opencode-go"
             assert pol.model_id == model_id
@@ -197,10 +197,43 @@ def test_opencode_go_explicit_reasoning_policies():
 
 
 def test_opencode_go_effort_cannot_be_inferred_from_other_providers():
-    # Same model, different wire: ollama-cloud honours the level, the Go route does not.
+    # Same model id, different wire: ollama-cloud honours the level, the Go route does not.
+    # MiMo is out of every catalog now, so the Go route answers with its outsider policy.
     assert resolve_effort("mimo-v2.6-flash", "high", provider="ollama-cloud") == "high"
     assert resolve_effort("mimo-v2.6-flash", "high", provider="opencode-go") is None
     assert is_omitted("mimo-v2.6-flash", "high", provider="opencode-go") is True
+
+
+def test_commandcode_explicit_reasoning_policy():
+    """The namespaced route omits ``reasoning_effort``: its knob is the native ``thinking``.
+
+    CommandCode's profile maps ``deepseek/*`` onto DeepSeek's native wire controls, so this
+    route's policy is *not* the OpenCode one and is stated on its own evidence.
+    """
+    for provider_name in ("commandcode", "commandcode-chat", "commandcode_chat"):
+        for model_id in ("deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash"):
+            pol = model_reasoning_policy(model_id, provider=provider_name)
+            assert pol.provider == "commandcode"
+            assert pol.model_id == "deepseek/deepseek-v4.1-flash"
+            assert pol.wire_parameter is None
+            assert pol.accepted_levels == ()
+            assert pol.omitted is True
+            assert "thinking" in pol.evidence
+            assert "cannot be reused" in pol.evidence
+            assert "Explicit omission" in pol.decision
+            assert "effort_requested" in pol.decision
+
+            for lvl in ("low", "medium", "high"):
+                assert resolve_effort(model_id, lvl, provider=provider_name) is None
+                assert is_omitted(model_id, lvl, provider=provider_name) is True
+
+    # An out-of-catalog model on this route is omitted too, never guessed from another wire.
+    outsider = model_reasoning_policy("kimi-k3", provider="commandcode")
+    assert outsider.omitted is True
+    assert resolve_effort("kimi-k3", "high", provider="commandcode") is None
+
+    # The same namespaced id on ollama-cloud is a different contract: it resolves normally.
+    assert resolve_effort("deepseek/deepseek-v4.1-flash", "high", provider="ollama-cloud") == "high"
 
 
 def test_opencode_console_effort_cannot_be_inferred_from_other_providers():

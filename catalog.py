@@ -125,10 +125,11 @@ class ModelCatalog:
     ) -> Optional[bool]:
         """``True``/``False`` when the catalog can answer, ``None`` when it cannot.
 
-        An opt-in OpenCode route is answered from its own allowlist (see
+        An opt-in route is answered from its own allowlist (see
         :func:`config.route_allowlist`): a model the route does not serve is a ``False``, not
-        "no evidence", so a decision naming it is never put on the wire. The Go cap is only in
-        force while the ``jev_console`` decider is active, so legacy setups keep "no evidence".
+        "no evidence", so a decision naming it is never put on the wire. The ``opencode-go``
+        and ``commandcode`` caps are only in force while the ``jev_console`` decider is active,
+        so legacy setups keep "no evidence".
 
         The cache file is specific to ollama-cloud. If the active provider is not
         ollama-cloud, there is no catalog evidence for it, so returns None (no veto).

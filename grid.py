@@ -91,17 +91,28 @@ OPENCODE_CONSOLE_GRID: Tuple[Entry, ...] = (
     ),
 )
 
-#: The initial two-model generation catalog of the opt-in ``opencode-go`` route.
-#: Both ids are the normal (paid) variants — the owner refused ``mimo-v2.6-flash-free``.
+#: The generation catalog of the opt-in ``opencode-go`` route: one model, the same id the
+#: Console catalog carries. The free MiMo variant the owner refused is absent from every
+#: catalog, and no catalog carries a second generation model any more.
 OPENCODE_GO_GRID: Tuple[Entry, ...] = (
     Entry(
         "deepseek-v4.1-flash",
         "the usual choice for general work: everyday writing, explanation, summarising, "
         "ordinary coding and tool use; 1M context",
     ),
+)
+
+#: The generation catalog of the opt-in ``commandcode`` route.
+#:
+#: CommandCode namespaces its model ids: this is ``deepseek/deepseek-v4.1-flash``, verified
+#: against the provider's public unauthenticated model list
+#: (``https://api.commandcode.ai/provider/v1/models``). The bare ``deepseek-v4.1-flash`` of the
+#: OpenCode routes is a *different* contract and must not be sent here.
+COMMANDCODE_GRID: Tuple[Entry, ...] = (
     Entry(
-        "mimo-v2.6-flash",
-        "fast multimodal reasoning, coding, and efficient agentic tool calling",
+        "deepseek/deepseek-v4.1-flash",
+        "the usual choice for general work: everyday writing, explanation, summarising, "
+        "ordinary coding and tool use; 1M context",
     ),
 )
 

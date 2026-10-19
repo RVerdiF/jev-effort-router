@@ -216,6 +216,8 @@ Isso sustenta rigorosamente a declaração da seção "Effort-to-wire mapping (O
 
 ## 6. Implementação OpenCode Console Jev & Catálogo de 2 Modelos (`t_6ec7a94d`)
 
+> **Superado pela seção 7 (`t_14209379`)**: o catálogo Go passou a ter **um único modelo**, o MiMo foi removido de todas as grades/allowlists e a rota `commandcode` foi adicionada. As afirmações de 6.1–6.4 registram o estado entregue no card `t_6ec7a94d` e ficam mantidas como histórico; a verdade corrente está na seção 7.
+
 ### 6.1 Resumo Normativo e Decisões de Escopo
 - **Diretiva do Dono & Separação de Rotas (Console Decider / Go Geração)**: O dono do produto definiu formalmente a escolha do ID padrão `mimo-v2.6-flash` (não-free) na geração, rejeitando estritamente a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. Conforme orientado pelo dono (Comentário 108), as fontes oficiais distinguem claramente os produtos:
   - **Decider Jev Console**: Opera via SystemOne (`https://opencode.ai/inference/systemone/v1/systemone`) com modelo primário gratuito `jev-1.13-free` e fallback automático para o Jev pago (`jev-1.13`).
@@ -315,3 +317,59 @@ Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterio
 | `opencode-go` | `mimo-v2.6-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: modelo multimodal/agentic normal, sem knob de reasoning documentado. Omitido no wire. |
 | `ollama-cloud` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `reasoning_effort` | low, medium, high, max | **Verificado**: Contrato formal Ollama:cloud (`DEEPSEEK_V4_EFFORTS`). |
 | `ollama-cloud` | Outros (Kimi, GLM, etc.) | Sim (`low`/`medium`/`high`) | `reasoning_effort` | Por família | **Verificado**: Mapeamento e clamping estrito sem escalada. |
+
+---
+
+## 7. Rota `commandcode` e catálogos de geração de um modelo (`t_14209379`)
+
+### 7.1 Escopo entregue
+- Rota `commandcode` registrada como provedor opt-in de geração, com catálogo de **um** modelo namespaced.
+- `mimo-v2.6-flash` removido de todas as grades, allowlists e catálogos: `OPENCODE_GO_MODELS = ("deepseek-v4.1-flash",)`. Nenhum catálogo de geração cita MiMo.
+- Efeito pretendido: com um modelo por rota a escolha de modelo é degenerada; o decider passa a decidir, na prática, apenas o nível de raciocínio.
+
+### 7.2 Fonte do id do modelo `commandcode` (sem ler credencial)
+- Endpoint público e **não autenticado** `GET https://api.commandcode.ai/provider/v1/models` (o próprio profile do provider o declara como público): resposta `HTTP 200`, 18.707 bytes, sem header `Authorization`; a lista contém `"id":"deepseek/deepseek-v4.1-flash"` e também `"deepseek/deepseek-v4.1-flash-fast"`.
+- Profile do provider (`/home/rafael/hermes/core/plugins/model-providers/commandcode/__init__.py`): `api_mode="chat_completions"`, `base_url="https://api.commandcode.ai/provider/v1"`, aliases `("commandcode-chat",)`, env `COMMANDCODE_API_KEY`.
+- **Id literal usado**: `deepseek/deepseek-v4.1-flash`. É namespaced de propósito: o id bare `deepseek-v4.1-flash` das rotas OpenCode é outro contrato e não é aceito nesta rota. A variante `-fast` não foi autorizada e não entra na allowlist.
+
+### 7.3 Catálogos vigentes
+- `OPENCODE_CONSOLE_MODELS = ("deepseek-v4.1-flash",)` (inalterado; rota sempre pinada).
+- `OPENCODE_GO_MODELS = ("deepseek-v4.1-flash",)` (MiMo removido).
+- `COMMANDCODE_MODELS = ("deepseek/deepseek-v4.1-flash",)` (novo; opt-in sob `decider: jev_console`, como o Go).
+- Com deciders legados (`jev`, `openai_compatible`) nenhuma das rotas opt-in é capada: a grade declarada pelo operador continua valendo, byte a byte como antes.
+
+### 7.4 Mecanismo e correção de assimetria
+- O teto usa o mecanismo existente: `config.route_allowlist(provider, decider)` é a fonte única, `route_catalog` devolve `COMMANDCODE_GRID`/`OPENCODE_GO_GRID`, e `Settings.grid_for`/`EffectiveSettings` cortam choice, alternativas, fallback e replay. `ModelCatalog.is_known(..., decider=...)` responde `False` para modelo fora da allowlist e `JevConsoleDecider._interpret` rejeita a escolha fora dela antes de qualquer aplicação.
+- `_GRID_ALIASES` passou a listar `commandcode` e agora também alimenta `is_provider_routable` por uma tabela única (`_provider_group`), corrigindo a assimetria anterior: `opencode-go` não casava com `opencode_go` e a rota era pulada em silêncio. `commandcode`, `commandcode-chat` e `commandcode_chat` normalizam entre si.
+
+### 7.5 Política explícita de reasoning por rota/modelo
+| Provedor | Modelo | Parâmetro no wire | Evidência / Decisão |
+|---|---|---|---|
+| `opencode-console` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: contrato não confirmado no endpoint de geração do Console. |
+| `opencode-go` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: nenhum contrato documentado/sondado; nada inferido de outra rota. |
+| `commandcode` | `deepseek/deepseek-v4.1-flash` | `None` (omitido) | **Contrato diferente**: o profile do provider mapeia ids `deepseek/*` para os controles nativos do DeepSeek (`build_api_kwargs_extras` → `thinking_toggle_extras(..., always_emit_toggle=True)`, emitindo `thinking`). `reasoning_effort` não faz parte desse wire; a política OpenCode **não** é copiada. O esforço lógico do Jev fica em `effort_requested` e o wire registra `effort=null`, sem alegar execução no nível escolhido. |
+
+### 7.6 Evidência de execução offline
+Suíte canônica, no worktree `.worktrees/t_14209379`, sem grade artificial (configuração efetiva):
+```text
+$ uv sync --offline --extra dev      # pytest 9.1.1 + deps do cache local
+$ uv run --offline --extra dev pytest
+collected 271 items
+...
+======================== 263 passed, 8 skipped in 1.69s ========================
+```
+Mesma suíte com `socket.socket.connect` e `socket.create_connection` bloqueados (interpreter da venv + patch, sem rede):
+```text
+======================== 263 passed, 8 skipped in 1.19s ========================
+```
+Os 8 skips são os mesmos de sempre: 5 do live probe (exigem `JEV_LIVE_PROBE=1` e chave real) e 3 de `test_registration.py` condicionados a PyYAML. Nenhum skip decorre de socket bloqueado.
+
+Testes novos/ajustados que sustentam os critérios:
+- `test_commandcode_grid_is_the_single_namespaced_catalog_under_the_console_decider`, `test_commandcode_grid_cap_applies_to_operator_grids_without_widening_them`, `test_commandcode_grid_untouched_for_legacy_deciders` (`tests/test_config_policy.py`).
+- `test_is_provider_routable_normalises_every_route_alias` — cobre a assimetria `opencode-go`/`opencode_go` e os aliases de `commandcode`.
+- `test_commandcode_catalog_is_capped_only_for_the_console_decider` e o Go atualizado para um modelo (`tests/test_catalog.py`).
+- `test_commandcode_explicit_reasoning_policy` (`tests/test_effort.py`).
+- `test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_catalog` e `test_commandcode_route_cap_rejects_models_outside_the_catalog` (`tests/test_router.py`): grade efetiva de um modelo, pergunta com um único critério, decider no SystemOne (nunca no `base_url` de geração), `reasoning_effort` ausente, `effort_requested='high'` + `effort=None`, snapshots serializados de `request`/`original_request` byte-idênticos (sem mutação in-place) e replay no mesmo turno sem segunda chamada; no caminho de rejeição, dois Jev (free e pago) recusam a escolha inventada e o payload permanece intacto.
+- Go atualizado para o catálogo de um modelo: `test_jev_console_decider_generation_route_go_uses_the_single_model_catalog` e `test_opencode_go_route_cap_rejects_models_outside_the_catalog`.
+
+Nenhuma alteração no core Hermes, nenhum PR upstream, nenhuma inferência paga. A única chamada de rede desta entrega foi o `GET` público e não autenticado de `/models`, usado apenas para confirmar o id.
