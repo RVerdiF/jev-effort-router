@@ -1361,6 +1361,92 @@ def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_ca
     assert transport.call_count == 1
 
 
+def test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_effort(
+    tmp_path, monkeypatch
+):
+    """The real profile shape for this id: ``extra_body.thinking`` **and** ``reasoning_effort``.
+
+    CommandCode's profile delegates ``deepseek/*`` to the DeepSeek profile, whose
+    ``thinking_toggle_extras(..., always_emit_toggle=True)`` emits both halves from the params-level
+    ``reasoning_config``. The transport merges the routed payload *after* those profile extras, so a
+    pre-existing top-level ``reasoning_effort`` would override the profile's own derivation and claim
+    a level CommandCode never confirmed it grades. The plugin therefore removes it, leaves both
+    profile-owned inputs untouched, and replay reproduces the same payload byte for byte.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    resp_payload = decision_payload(
+        model_choice="1",
+        model_confidence=0.95,
+        effort_choice="high",
+        effort_confidence=0.9,
+        grid_size=1,
+    )
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={"decider": "jev_console", "routable_providers": ["commandcode"]},
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    request = ollama_request(
+        model="deepseek/deepseek-v4.1-flash", reasoning_config={"effort": "high"}
+    )
+    # Exactly what the provider profile puts on this wire for this id, derived from that config.
+    request["extra_body"] = {"thinking": {"type": "enabled"}}
+    request["reasoning_effort"] = "high"
+    request_before = json.dumps(request, sort_keys=True)
+    original = copy.deepcopy(request)
+    original_before = json.dumps(original, sort_keys=True)
+
+    result = router.on_llm_request(
+        request,
+        original,
+        turn_id="ccnative-1",
+        session_id="ccnative",
+        platform="cli",
+        model="deepseek/deepseek-v4.1-flash",
+        provider="commandcode",
+        base_url="https://api.commandcode.ai/provider/v1",
+        api_mode="chat_completions",
+        api_call_count=0,
+        api_request_id="ccnative-1:api:0",
+    )
+
+    assert result is not None
+    routed = result["request"]
+    # The plugin's own choice is never put on this wire: the pre-existing effort is removed...
+    assert "reasoning_effort" not in routed
+    # ...while both components owned by the provider layer survive untouched.
+    assert routed["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert routed["reasoning_config"] == {"effort": "high"}
+    assert routed["model"] == "deepseek/deepseek-v4.1-flash"
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["effort_requested"] == "high"
+    assert record["effort"] is None
+    # Neither input payload was mutated in place.
+    assert json.dumps(request, sort_keys=True) == request_before
+    assert json.dumps(original, sort_keys=True) == original_before
+
+    # Replay rebuilds the same payload from the same snapshot, without a second decider call.
+    replayed = route(
+        router,
+        request,
+        provider="commandcode",
+        model="deepseek/deepseek-v4.1-flash",
+        base_url="https://api.commandcode.ai/provider/v1",
+        api_mode="chat_completions",
+        session_id="ccnative",
+        turn_id="ccnative-1",
+        api_call_count=1,
+        api_request_id="ccnative-1:api:1",
+    )
+    assert replayed is not None
+    assert json.dumps(replayed["request"], sort_keys=True) == json.dumps(routed, sort_keys=True)
+    assert transport.call_count == 1
+
+
 def test_commandcode_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
     """A widened operator grid or a decision naming the bare OpenCode id cannot escape the cap."""
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")

@@ -26,10 +26,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `("deepseek-v4.1-flash",)`; `mimo-v2.6-flash` was removed from all grids, allowlists and catalogs.
   With one model per route the model question is degenerate by construction and the decider
   effectively chooses only the reasoning level.
-- **`commandcode` reasoning policy is explicit and route-specific.** The provider profile maps
-  `deepseek/*` ids onto DeepSeek's native `thinking` controls (`build_api_kwargs_extras`), so
-  `reasoning_effort` is not part of that wire and is omitted rather than copied from the OpenCode
-  policy. Wire `effort` stays `null` in the audit while `effort_requested` records the Jev choice.
+- **`commandcode` reasoning policy is explicit and route-specific.** The profile delegates `deepseek/*`
+  ids to the DeepSeek profile, whose `thinking_toggle_extras(..., always_emit_toggle=True)` emits **both**
+  the native `extra_body.thinking` toggle and a top-level `reasoning_effort` derived from
+  `reasoning_config`. The plugin's own field is deliberately omitted — a pre-existing top-level
+  `reasoning_effort` is removed so it cannot override the profile's derivation — and whether CommandCode
+  grades a Jev-chosen level remains unconfirmed (no probe, no paid call), so wire `effort` stays `null`
+  while `effort_requested` records the Jev choice. The OpenCode policy is not reused.
 
 ## [0.4.0] - 2026-10-15
 

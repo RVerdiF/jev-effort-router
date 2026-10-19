@@ -241,11 +241,20 @@ OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 
 #: Explicit reasoning policies for the opt-in ``commandcode`` generation model.
 #:
-#: This route's contract is *not* the OpenCode one. The provider profile maps ``deepseek/*``
-#: ids onto DeepSeek's native wire controls — ``build_api_kwargs_extras`` delegates to the
-#: DeepSeek profile, which emits the ``thinking`` toggle (``always_emit_toggle=True``) — so the
-#: generation payload carries a native reasoning knob that Hermes' provider layer owns, and no
-#: top-level ``reasoning_effort`` field is part of the contract. Sending one would be a guess.
+#: This route's contract is *not* the OpenCode one, and it has **two** components — both owned by
+#: the provider layer. CommandCode's ``build_api_kwargs_extras`` delegates ``deepseek/*`` ids to the
+#: DeepSeek profile, which calls ``thinking_toggle_extras(..., always_emit_toggle=True)`` and so
+#: emits ``extra_body.thinking`` **and** a top-level ``reasoning_effort`` carrying the level clamped
+#: to DeepSeek's V4 vocabulary (low/medium/high/max, xhigh->max). Both are derived from the
+#: params-level ``reasoning_config``; the profile is their only author.
+#:
+#: The plugin omits *its own* effort on purpose. It builds the payload from the pre-middleware
+#: request, and a top-level ``reasoning_effort`` left there would be merged by the transport *after*
+#: the profile extras, so it could override or contradict the profile's derivation; ``_apply``
+#: therefore drops it. What stands unconfirmed is whether the CommandCode endpoint grades a
+#: Jev-chosen level at all: the profile proves Hermes sends the field, not that this provider
+#: honours it, and no paid probe was run. The Jev choice is recorded in ``effort_requested`` and
+#: never claimed on the wire; support is never inferred from the OpenCode routes.
 COMMANDCODE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     model_id: ModelReasoningPolicy(
         provider="commandcode",
@@ -253,16 +262,23 @@ COMMANDCODE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
         wire_parameter=None,
         accepted_levels=(),
         evidence=(
-            "CommandCode maps deepseek/* ids onto DeepSeek's native thinking controls in the provider "
-            "profile (build_api_kwargs_extras -> thinking_toggle_extras); no reasoning_effort field is "
-            "part of this generation contract, and the OpenCode policy cannot be reused here."
+            "Two-component contract, traced offline: CommandCode's build_api_kwargs_extras delegates "
+            "deepseek/* ids to the DeepSeek profile, whose thinking_toggle_extras(..., "
+            "always_emit_toggle=True) emits BOTH extra_body.thinking and a top-level reasoning_effort "
+            "clamped to DeepSeek's V4 vocabulary (low/medium/high/max, xhigh->max). The plugin drops a "
+            "pre-existing top-level reasoning_effort so it cannot override the profile's derivation, and "
+            "does not claim the endpoint grades a Jev-chosen level: unconfirmed, never inferred from OpenCode."
         ),
         omitted=True,
         decision=(
-            f"Explicit omission: on commandcode the reasoning control for {model_id} is the native DeepSeek "
-            "thinking toggle emitted by the provider profile, not a reasoning_effort field. The plugin omits "
-            "reasoning_effort on this wire; the Jev logical effort stays in effort_requested and no claim is "
-            "made that the model executed at that effort."
+            f"Deliberate omission of the plugin's own field: on commandcode the native reasoning controls for "
+            f"{model_id} belong to the provider profile (extra_body.thinking plus its own top-level "
+            "reasoning_effort derived from reasoning_config). A pre-existing top-level reasoning_effort is "
+            "removed; extra_body.thinking and reasoning_config are left untouched. Stated uncertainty: the "
+            "profile proves Hermes sends reasoning_effort on this wire, but whether CommandCode honours a "
+            "Jev-chosen level is unconfirmed (no documented contract, no probe, no paid call). The Jev logical "
+            "effort stays in effort_requested, wire effort stays null, and no claim is made that the model "
+            "executed at that effort."
         ),
     )
     for model_id in ("deepseek/deepseek-v4.1-flash",)

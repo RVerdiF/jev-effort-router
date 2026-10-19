@@ -205,10 +205,11 @@ def test_opencode_go_effort_cannot_be_inferred_from_other_providers():
 
 
 def test_commandcode_explicit_reasoning_policy():
-    """The namespaced route omits ``reasoning_effort``: its knob is the native ``thinking``.
+    """The route omits the plugin's own field, on a two-component contract.
 
-    CommandCode's profile maps ``deepseek/*`` onto DeepSeek's native wire controls, so this
-    route's policy is *not* the OpenCode one and is stated on its own evidence.
+    CommandCode's profile delegates ``deepseek/*`` ids to the DeepSeek profile, which emits BOTH
+    ``extra_body.thinking`` and a top-level ``reasoning_effort``. The policy must say that, and must
+    justify the omission by the endpoint-level uncertainty — never by the field's absence.
     """
     for provider_name in ("commandcode", "commandcode-chat", "commandcode_chat"):
         for model_id in ("deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash"):
@@ -218,9 +219,20 @@ def test_commandcode_explicit_reasoning_policy():
             assert pol.wire_parameter is None
             assert pol.accepted_levels == ()
             assert pol.omitted is True
+            # Both halves of the real contract are named, together with the deliberate removal.
             assert "thinking" in pol.evidence
-            assert "cannot be reused" in pol.evidence
-            assert "Explicit omission" in pol.decision
+            assert "reasoning_effort" in pol.evidence
+            assert "thinking_toggle_extras" in pol.evidence
+            assert "BOTH" in pol.evidence
+            assert "drops a pre-existing top-level reasoning_effort" in pol.evidence
+            assert "unconfirmed" in pol.evidence
+            assert "never inferred from OpenCode" in pol.evidence
+            # The false claim that the field is absent from the contract is gone.
+            assert "no reasoning_effort field is part of this generation contract" not in pol.evidence
+            assert "not a reasoning_effort field" not in pol.decision
+            assert "Deliberate omission" in pol.decision
+            assert "pre-existing top-level reasoning_effort is removed" in pol.decision
+            assert "unconfirmed" in pol.decision
             assert "effort_requested" in pol.decision
 
             for lvl in ("low", "medium", "high"):

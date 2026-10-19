@@ -347,20 +347,46 @@ Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterio
 |---|---|---|---|
 | `opencode-console` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: contrato não confirmado no endpoint de geração do Console. |
 | `opencode-go` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: nenhum contrato documentado/sondado; nada inferido de outra rota. |
-| `commandcode` | `deepseek/deepseek-v4.1-flash` | `None` (omitido) | **Contrato diferente**: o profile do provider mapeia ids `deepseek/*` para os controles nativos do DeepSeek (`build_api_kwargs_extras` → `thinking_toggle_extras(..., always_emit_toggle=True)`, emitindo `thinking`). `reasoning_effort` não faz parte desse wire; a política OpenCode **não** é copiada. O esforço lógico do Jev fica em `effort_requested` e o wire registra `effort=null`, sem alegar execução no nível escolhido. |
+| `commandcode` | `deepseek/deepseek-v4.1-flash` | `None` (o plugin omite o seu) | **Contrato de dois componentes, rastreado offline** (§7.5.1): o profile do provider delega ids `deepseek/*` ao profile DeepSeek, cujo `thinking_toggle_extras(..., always_emit_toggle=True)` emite **tanto** `extra_body.thinking` **quanto** um `reasoning_effort` top-level com o nível clampado ao vocabulário V4. O plugin **remove** um `reasoning_effort` top-level preexistente (o transporte aplica o payload roteado depois dos extras do profile, então ele sobrescreveria a derivação do profile) e **não** alega nível escolhido pelo Jev: se o endpoint CommandCode gradua esse nível é **não confirmado** — o profile prova apenas que o Hermes envia o campo. `effort_requested` registra a escolha; `effort=null` no wire. A política OpenCode **não** é copiada. |
+
+#### 7.5.1 Rastreio do contrato `commandcode` (correção da revisão, rodada 1)
+
+A revisão apontou que a justificativa anterior — "`reasoning_effort` não faz parte do contrato" — era falsa. Rastreio das fontes, sem importar o core, sem rede e sem ler credencial:
+
+1. `core/plugins/model-providers/commandcode/__init__.py:42-59` — `build_api_kwargs_extras` reconhece ids `deepseek/*` e delega ao profile `deepseek` via registry, repassando `reasoning_config` e o id **sem** o prefixo `deepseek/`.
+2. `core/plugins/model-providers/deepseek/__init__.py:28-43` — para ids `deepseek-v4*` chama `thinking_toggle_extras(reasoning_config, DEEPSEEK_V4_EFFORTS, DEEPSEEK_V4_OVERRIDES, always_emit_toggle=True)`.
+3. `core/agent/reasoning_effort.py:197-219` — no caminho de nível aceito, a linha 218 devolve **dois** valores: `({"thinking": {"type": "enabled"}}, {"reasoning_effort": <nível>})`.
+4. `core/agent/reasoning_effort.py:81-83` — vocabulário V4: `low`/`medium`/`high`/`max`, com `xhigh → max`.
+5. `core/agent/transports/chat_completions.py:562-583` — os extras do profile entram em `api_kwargs` (linha 568) **antes** de `request_overrides` (linhas 579-583); um `reasoning_effort` deixado no payload roteado sobrescreveria a derivação do profile.
+
+Execução offline das funções **reais** dessa fonte (AST: apenas os nós de `thinking_toggle_extras`, `clamp_effort`, `requested_effort` e as constantes; nenhum `import agent`, nenhuma chave), com os mesmos argumentos que o profile DeepSeek usa:
+
+```text
+$ uv run --offline python <scratch>/t_14209379_contract.py
+DEEPSEEK_V4_EFFORTS=('low', 'medium', 'high', 'max')  DEEPSEEK_V4_OVERRIDES={'xhigh': 'max'}
+  reasoning_config={'effort': 'high'} -> ({'thinking': {'type': 'enabled'}}, {'reasoning_effort': 'high'})
+  reasoning_config={'effort': 'xhigh'} -> ({'thinking': {'type': 'enabled'}}, {'reasoning_effort': 'max'})
+  reasoning_config={'effort': 'none'} -> ({'thinking': {'type': 'enabled'}}, {})
+  reasoning_config={} -> ({'thinking': {'type': 'enabled'}}, {})
+  reasoning_config={'enabled': False} -> ({'thinking': {'type': 'disabled'}}, {})
+```
+
+Decisão registrada em `COMMANDCODE_REASONING_POLICIES` (`effort.py`): os dois componentes pertencem ao profile; o plugin omite o seu próprio campo e remove um `reasoning_effort` top-level preexistente para não sobrepor a derivação do profile. A incerteza declarada é estritamente sobre o **endpoint CommandCode graduar o nível escolhido pelo Jev** — o profile prova só que o Hermes envia o campo. Nenhum probe pago foi executado.
+
+Regressão offline: `test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_effort` (`tests/test_router.py`) parte de um payload no formato real do profile (`extra_body.thinking` + `reasoning_effort`) e comprova a remoção deliberada, `extra_body.thinking` e `reasoning_config` intactos, `effort_requested='high'` com `effort=None`, snapshots byte-idênticos e replay estável sem segunda chamada ao decider.
 
 ### 7.6 Evidência de execução offline
 Suíte canônica, no worktree `.worktrees/t_14209379`, sem grade artificial (configuração efetiva):
 ```text
 $ uv sync --offline --extra dev      # pytest 9.1.1 + deps do cache local
 $ uv run --offline --extra dev pytest
-collected 271 items
+collected 272 items
 ...
-======================== 263 passed, 8 skipped in 1.69s ========================
+======================= 264 passed, 8 skipped in 0.74s ========================
 ```
-Mesma suíte com `socket.socket.connect` e `socket.create_connection` bloqueados (interpreter da venv + patch, sem rede):
+Mesma suíte com `socket.socket.connect`, `socket.socket.connect_ex` e `socket.create_connection` bloqueados (interpreter da venv + patch, sem rede):
 ```text
-======================== 263 passed, 8 skipped in 1.19s ========================
+======================= 264 passed, 8 skipped in 0.71s ========================
 ```
 Os 8 skips são os mesmos de sempre: 5 do live probe (exigem `JEV_LIVE_PROBE=1` e chave real) e 3 de `test_registration.py` condicionados a PyYAML. Nenhum skip decorre de socket bloqueado.
 
@@ -368,8 +394,11 @@ Testes novos/ajustados que sustentam os critérios:
 - `test_commandcode_grid_is_the_single_namespaced_catalog_under_the_console_decider`, `test_commandcode_grid_cap_applies_to_operator_grids_without_widening_them`, `test_commandcode_grid_untouched_for_legacy_deciders` (`tests/test_config_policy.py`).
 - `test_is_provider_routable_normalises_every_route_alias` — cobre a assimetria `opencode-go`/`opencode_go` e os aliases de `commandcode`.
 - `test_commandcode_catalog_is_capped_only_for_the_console_decider` e o Go atualizado para um modelo (`tests/test_catalog.py`).
-- `test_commandcode_explicit_reasoning_policy` (`tests/test_effort.py`).
+- `test_commandcode_explicit_reasoning_policy` (`tests/test_effort.py`) — agora exige os **dois** componentes do contrato no texto da política (`extra_body.thinking` + `reasoning_effort`), a remoção deliberada e a incerteza do endpoint, e rejeita a formulação antiga (campo ausente do contrato).
 - `test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_catalog` e `test_commandcode_route_cap_rejects_models_outside_the_catalog` (`tests/test_router.py`): grade efetiva de um modelo, pergunta com um único critério, decider no SystemOne (nunca no `base_url` de geração), `reasoning_effort` ausente, `effort_requested='high'` + `effort=None`, snapshots serializados de `request`/`original_request` byte-idênticos (sem mutação in-place) e replay no mesmo turno sem segunda chamada; no caminho de rejeição, dois Jev (free e pago) recusam a escolha inventada e o payload permanece intacto.
+- `test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_effort` (`tests/test_router.py`) — regressão da rodada de revisão: parte do formato real do profile (`extra_body.thinking` + `reasoning_effort` top-level), comprova a remoção deliberada do campo preexistente, `extra_body.thinking`/`reasoning_config` intactos, snapshots byte-idênticos e replay estável.
 - Go atualizado para o catálogo de um modelo: `test_jev_console_decider_generation_route_go_uses_the_single_model_catalog` e `test_opencode_go_route_cap_rejects_models_outside_the_catalog`.
+
+Fail-open continua byte-idêntico também fora do pytest: `scripts/verify_fail_open.py` executado com os mesmos sockets bloqueados imprime `ALL FAIL-OPEN CHECKS PASSED!` (3 casos, `res is None`, payload serializado idêntico ao `original_request`).
 
 Nenhuma alteração no core Hermes, nenhum PR upstream, nenhuma inferência paga. A única chamada de rede desta entrega foi o `GET` público e não autenticado de `/models`, usado apenas para confirmar o id.
