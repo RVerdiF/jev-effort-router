@@ -347,7 +347,7 @@ Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterio
 |---|---|---|---|
 | `opencode-console` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: contrato não confirmado no endpoint de geração do Console. |
 | `opencode-go` | `deepseek-v4.1-flash` | `reasoning_effort` (`low`/`medium`/`high`/`max`, `xhigh`→`max`) | **Superado pelo §8** (card `t_a0a4c186`): o probe direto de 2026-10-20 confirmou o parâmetro no endpoint Go. Vigente: o nível decidido vai no wire no vocabulário do core; qualquer valor fora do conjunto declarado é omitido. |
-| `commandcode` | `deepseek/deepseek-v4.1-flash` | `None` (o plugin omite o seu) | **Contrato de dois componentes, rastreado offline** (§7.5.1): o profile do provider delega ids `deepseek/*` ao profile DeepSeek, cujo `thinking_toggle_extras(..., always_emit_toggle=True)` emite **tanto** `extra_body.thinking` **quanto** um `reasoning_effort` top-level com o nível clampado ao vocabulário V4. O plugin **remove** um `reasoning_effort` top-level preexistente (o transporte aplica o payload roteado depois dos extras do profile, então ele sobrescreveria a derivação do profile) e **não** alega nível escolhido pelo Jev: se o endpoint CommandCode gradua esse nível é **não confirmado** — o profile prova apenas que o Hermes envia o campo. `effort_requested` registra a escolha; `effort=null` no wire. A política OpenCode **não** é copiada. |
+| `commandcode` | `deepseek/deepseek-v4.1-flash` | `None` (o plugin omitia o seu) | **Superado pelo §9** (card `t_1906910b`): o probe direto de 2026-10-20 confirmou `reasoning_effort` no endpoint CommandCode, e o plugin passa a enviar o nível decidido no campo top-level, ao lado do `extra_body.thinking` do profile. Histórico desta rodada: **contrato de dois componentes, rastreado offline** (§7.5.1), com omissão deliberada do campo do plugin e `effort=null` no wire. |
 
 #### 7.5.1 Rastreio do contrato `commandcode` (correção da revisão, rodada 1)
 
@@ -372,6 +372,8 @@ DEEPSEEK_V4_EFFORTS=('low', 'medium', 'high', 'max')  DEEPSEEK_V4_OVERRIDES={'xh
 ```
 
 Decisão registrada em `COMMANDCODE_REASONING_POLICIES` (`effort.py`): os dois componentes pertencem ao profile; o plugin omite o seu próprio campo e remove um `reasoning_effort` top-level preexistente para não sobrepor a derivação do profile. A incerteza declarada é estritamente sobre o **endpoint CommandCode graduar o nível escolhido pelo Jev** — o profile prova só que o Hermes envia o campo. Nenhum probe pago foi executado.
+
+> **Superado pelo §9 (`t_1906910b`)**: o probe direto mostrou que o endpoint aceita `reasoning_effort`, então o plugin passou a ser o autor do campo **top-level** com o nível do Jev, mantendo o `thinking` como propriedade do profile. O rastreio acima continua correto quanto à ordem do transporte (profile → middleware) e é o que sustenta a precedência documentada no §9.2.
 
 Regressão offline: `test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_effort` (`tests/test_router.py`) parte de um payload no formato real do profile (`extra_body.thinking` + `reasoning_effort`) e comprova a remoção deliberada, `extra_body.thinking` e `reasoning_config` intactos, `effort_requested='high'` com `effort=None`, snapshots byte-idênticos e replay estável sem segunda chamada ao decider.
 
@@ -407,7 +409,7 @@ Nenhuma alteração no core Hermes, nenhum PR upstream, nenhuma inferência paga
 
 ## 8. `reasoning_effort` aplicado no wire do `opencode-go` (`t_a0a4c186`)
 
-Esta seção **supera** a política do Go registrada em 6.1/6.4 e em 7.5: o `opencode-go` deixa de omitir o campo e passa a enviar o nível decidido pelo Jev. Console e `commandcode` continuam omitindo, cada um na sua própria evidência.
+Esta seção **supera** a política do Go registrada em 6.1/6.4 e em 7.5: o `opencode-go` deixa de omitir o campo e passa a enviar o nível decidido pelo Jev. Console continua omitindo; `commandcode` também omitia nesta rodada e passa a enviar no §9 (`t_1906910b`), na sua própria evidência.
 
 ### 8.1 Probe que sustenta a mudança (2026-10-20, reexecutado nesta rodada)
 
@@ -487,7 +489,7 @@ Novos/ajustados:
 - `test_jev_console_decider_generation_route_go_uses_the_single_model_catalog` (`tests/test_router.py`) — exige `request["reasoning_effort"] == "high"`, `record["effort"] == "high"`, `effort_requested == "high"` e `fallback_reasons == []`, preservando uma única chamada ao SystemOne, ausência de mutação in-place e replay sem segunda chamada.
 - `test_opencode_go_route_lands_every_decidable_level_on_the_wire` — parametrizado `low`/`medium`/`high` (os níveis que o decider pode produzir) com `decider: jev_console` + `routable_providers: [opencode-go]`: o campo vai no request e o audit registra o mesmo nível (nunca `null`).
 
-Não regredidos: `test_opencode_console_*` e `test_commandcode_explicit_reasoning_policy` seguem exigindo omissão explícita, e `test_opencode_go_effort_cannot_be_inferred_from_other_providers` continua comprovando que o Go não herda a família Ollama para um modelo fora do catálogo.
+Não regredidos: `test_opencode_console_*` seguem exigindo omissão explícita (o `commandcode` deixou de omitir no §9, e o teste dele foi reescrito lá), e `test_opencode_go_effort_cannot_be_inferred_from_other_providers` continua comprovando que o Go não herda a família Ollama para um modelo fora do catálogo.
 
 ### 8.6 Suíte
 
@@ -509,4 +511,131 @@ Os 8 skips são os mesmos de sempre (5 do live probe sem `JEV_LIVE_PROBE=1` e 3 
 - **`thinking` não é usado:** o Go exige objeto (`{type: enabled|disabled}`) e rejeita escalar; o parâmetro aplicado é o top-level `reasoning_effort`.
 - **`max` e `xhigh` são contrato, não caminho de produção:** o decider só oferece `low`/`medium`/`high` (`EFFORT_LEVELS`), então `max` e o mapeamento `xhigh`→`max` só se aplicam a chamadas diretas à API do plugin ou a um decider futuro. Estão cobertos por teste, não por turno real.
 - **Verificação end-to-end pós-merge** (plugin reinstalado + turno real com `"effort": "<nível>"` no audit e `reasoning_effort` no request) fica para o dono, porque o merge é dele: nenhum turno real com o plugin reinstalado foi executado nesta entrega. As chamadas de rede desta rodada foram apenas os probes de aceitação do endpoint (§8.1).
+
+---
+
+## 9. `reasoning_effort` aplicado no wire do `commandcode` (`t_1906910b`)
+
+Esta seção **supera** a política do `commandcode` registrada em §7.5/§7.5.1 (e a nota do §8 que dizia que a rota continuava omitindo): a rota passa a ser **roteada** e o nível decidido pelo Jev vai no `reasoning_effort` **top-level**, ao lado do `extra_body.thinking` que o profile do provider deriva. O `opencode-console` continua omitindo; o `opencode-go` não muda.
+
+### 9.1 Probe que sustenta a mudança (2026-10-20)
+
+`POST https://api.commandcode.ai/provider/v1/chat/completions`, modelo `deepseek/deepseek-v4.1-flash`:
+
+| Campo enviado | Resultado |
+|---|---|
+| `reasoning_effort=low` | HTTP 200 |
+| `reasoning_effort=medium` | HTTP 200 |
+| `reasoning_effort=high` | HTTP 200 |
+| `reasoning_effort=xhigh` | HTTP 200 |
+| `reasoning_effort=max` | HTTP 200 |
+
+O que o probe prova é **aceitação**, não calibração: `xhigh` também retorna 200 (o vocabulário é uma decisão nossa, a do core) e nenhuma medição de profundidade foi feita. É o mesmo limite registrado para o Go no §8.1/§8.7.
+
+### 9.2 Quem escreve o quê no wire (a ordem do transporte)
+
+A rota tem **dois** componentes de reasoning e eles passaram a ter **dois** autores:
+
+1. `extra_body.thinking` — **profile do provider**. `core/plugins/model-providers/commandcode/__init__.py:42-59` delega ids `deepseek/*` ao profile `deepseek`; `deepseek/__init__.py:28-43` chama `thinking_toggle_extras(reasoning_config, DEEPSEEK_V4_EFFORTS, DEEPSEEK_V4_OVERRIDES, always_emit_toggle=True)` (`core/agent/reasoning_effort.py:197-219`), que emite o toggle a partir do `reasoning_config` da sessão.
+2. `reasoning_effort` **top-level** — **plugin**, com o nível decidido pelo Jev.
+
+A precedência vem da ordem real de montagem, rastreada em `core/agent/turn_api_request.py::build_api_request`:
+
+- `api_kwargs = agent._build_api_kwargs(api_messages)` (linha 122/124) → o profile já colocou `extra_body.thinking` e o **seu próprio** `reasoning_effort` (via `chat_completions.py:562-568`) no payload;
+- `apply_llm_request_middleware(...)` (linhas 143-151) roda **depois** e `api_kwargs = _llm_request_mw.payload` — o payload devolvido pelo middleware é o que vai para a chamada.
+
+O plugin monta o payload roteado a partir do `original_request` (pré-middleware, que já contém `extra_body.thinking`) e reescreve apenas `model` e `EFFORT_WIRE_KEY` (`router.py::_apply`). Consequência exata:
+
+- o `reasoning_effort` do plugin **sobrescreve** o que o profile derivaria do `reasoning_config`;
+- o `extra_body.thinking` **não é tocado** (`extra_body` é preservado inteiro);
+- o wire fica `thinking: {"type": "enabled"}` **+** `reasoning_effort: <nível do Jev>`.
+
+Não foi preciso alterar `_apply` nem o core: o transport já aplica o campo do plugin **depois** do profile. Isso está fixado por teste (§9.6, `test_commandcode_lands_the_jev_level_beside_the_profile_thinking_toggle`), que parte de um payload no formato real do profile (`thinking` enabled + `reasoning_effort` derivado de `reasoning_config: {effort: low}`) e comprova o nível do Jev (`high`) no wire com o toggle e o `reasoning_config` intactos.
+
+### 9.3 Política embutida (`effort.py`)
+
+`COMMANDCODE_REASONING_POLICIES["deepseek/deepseek-v4.1-flash"]`: `wire_parameter="reasoning_effort"`, `accepted_levels=("low","medium","high","max")`, `overrides={"xhigh":"max"}`, `omitted=False`, com `evidence` citando o endpoint, a data, os cinco HTTP 200, a ordem `profile → middleware` e o contrato do core (`DEEPSEEK_V4_EFFORTS`/`DEEPSEEK_V4_OVERRIDES`). A `decision` registra que `low`/`medium`/`high`/`max` vão verbatim, `xhigh`→`max` pela override declarada, que nada fora do conjunto é enviado (nem clamp, nem invenção), que `extra_body.thinking`/`reasoning_config` ficam como o profile os montou, e que o 200 prova aceitação — não profundidade.
+
+### 9.4 Auditoria: `provider` no registro de rota
+
+O registro `event: route` não nomeava a rota (só o `skip` nomeava). Com duas rotas servindo `deepseek*/deepseek-v4.1-flash` e ambas enviando `reasoning_effort`, o registro ficou ambíguo. `router.py::_record_route` passou a gravar `"provider": where.provider`, a mesma chave que o `skip` já usava. Consumidores usam `record.get(...)`, então nenhum leitor quebrou.
+
+### 9.5 Config do perfil `code` (aplicada nesta rodada)
+
+`/home/rafael/hermes/home/profiles/code/config.yaml` (backup em `<scratch>/config.yaml.bak-t_1906910b`, permissões `600` preservadas):
+
+```yaml
+        routable_providers:
+          - opencode-go
+          - commandcode
+        grids:
+          opencode-go:
+            - 'deepseek-v4.1-flash: general work, explanation, ordinary coding and tool use'
+          commandcode:
+            - 'deepseek/deepseek-v4.1-flash: general work, explanation, ordinary coding and tool use'
+        effort_maps:
+          opencode-go:
+            deepseek-v4.1-flash:
+              accepted: [low, medium, high, max]
+          commandcode:
+            deepseek/deepseek-v4.1-flash:
+              accepted: [low, medium, high, max]
+```
+
+Leitura da config real pelo próprio `load_settings` do worktree:
+
+```text
+$ uv run --offline --with pyyaml python <scratch>/t_1906910b_verify_settings.py
+routable_providers: ('opencode-go', 'commandcode')
+commandcode routable: True
+commandcode-chat routable: True
+opencode-go routable: True
+commandcode grid: ['deepseek/deepseek-v4.1-flash']
+commandcode effective default_model: deepseek/deepseek-v4.1-flash
+
+== effort_maps path (o que a config viva declara) ==
+  commandcode/low: resolve='low'      omitted=False
+  commandcode/medium: resolve='medium' omitted=False
+  commandcode/high: resolve='high'    omitted=False
+  commandcode/max: resolve='max'      omitted=False
+  commandcode/xhigh: resolve='high'   omitted=False
+  commandcode/minimal|none|bogus|<empty>: resolve=None omitted=True
+  commandcode/ultra: resolve='max'    omitted=False
+
+== built-in policy path (sem effort_maps: o que o plugin mergeado responde) ==
+  policy: wire='reasoning_effort' accepted=('low','medium','high','max') overrides={'xhigh':'max'} omitted=False
+  low/medium/high/max -> verbatim; xhigh -> 'max'; minimal/none/bogus/ultra/'' -> None
+
+== sem regressão nas rotas já vivas ==
+  opencode-go/deepseek-v4.1-flash: {'low':'low','medium':'medium','high':'high','max':'max','xhigh':'high'}
+  opencode-console/deepseek-v4.1-flash: todos None
+```
+
+A entrada em `effort_maps` tem a mesma função dupla da rodada do Go (§8.4): faz o plugin **hoje instalado** (que só conhece o caminho de `effort_maps`) já honrar a rota, e mantém o perfil explícito. Divergências conhecidas entre os dois caminhos, ambas **inalcançáveis** pelo decider atual (`EFFORT_LEVELS = ("low","medium","high")` valida criteria, `default_effort` e `max_effort`): `xhigh` → `max` pela política embutida e `high` pelo caminho `effort_maps` (regra anti-escalada do caminho custom); `ultra` → omitido pela política embutida e `max` pelo `effort_maps`.
+
+### 9.6 Testes
+
+Novos/reescritos:
+
+- `test_commandcode_explicit_reasoning_policy` (`tests/test_effort.py`) — agora exige `wire_parameter='reasoning_effort'`, `accepted_levels=('low','medium','high','max')`, `overrides={'xhigh':'max'}`, `omitted=False`, marcadores do probe e da ordem do transporte (`turn_api_request`, `extra_body.thinking`) na `evidence`, `low`/`medium`/`high`/`max` verbatim nos três nomes de provider, `xhigh`→`max`, `minimal`/`none`/`bogus`/`ultra`/vazio → `None`, e modelo fora do catálogo continua omitido.
+- `test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_catalog` (`tests/test_router.py`) — passa a exigir `request["reasoning_effort"] == "high"` e `record["effort"] == "high"` (antes `None`), mantendo grade de um modelo, pergunta de um critério, decider no SystemOne, ausência de mutação in-place e replay sem segunda chamada.
+- `test_commandcode_lands_the_jev_level_beside_the_profile_thinking_toggle` — a regressão do §9.2: payload no formato real do profile, nível do Jev vencendo o derivado (`low`→`high`), `extra_body.thinking` e `reasoning_config` intactos, snapshots byte-idênticos, replay estável.
+- `test_commandcode_route_lands_every_decidable_level_on_the_wire` — parametrizado `low`/`medium`/`high`: o campo vai no request e o audit registra `event=route`, `provider=commandcode`, `decider=jev_console`, `effort` igual ao escolhido.
+
+### 9.7 Suíte
+
+```text
+$ cd .worktrees/t_1906910b
+$ uv sync --offline --extra dev
+$ uv run --offline --extra dev pytest -q
+276 passed, 8 skipped in 0.76s
+```
+
+Os 8 skips são os mesmos de sempre (5 do live probe sem `JEV_LIVE_PROBE=1` e 3 de `test_registration.py` condicionados a PyYAML). A linha de base desta branch era `273 passed, 8 skipped`; o delta são os três casos parametrizados novos.
+
+### 9.8 Limitações e pendências
+
+- **HTTP 200 não gradua nada:** o probe prova que o campo é aceito, não que o nível mude a profundidade do raciocínio. O audit segue afirmando apenas "o campo foi enviado".
+- **`thinking` explícito desabilitado pelo usuário não é reinterpretado:** quando o `reasoning_config` da sessão tem `enabled: false`, o profile emite `thinking: {"type": "disabled"}` e nenhum `reasoning_effort`; o plugin ainda aplica o nível do Jev nesse caso, exatamente como já fazia no `opencode-go` desde o §8 (o plugin é dono do nível, o profile é dono do toggle). Nenhum turno real dessa forma foi executado; o comportamento é o mesmo das duas rotas, não uma divergência nova.
+- **`max` e `xhigh` são contrato, não caminho de produção:** o decider só oferece `low`/`medium`/`high`.
 

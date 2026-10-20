@@ -35,24 +35,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `resolve_effort` passes a declared level verbatim, honours the declared override, and omits anything
   else (`minimal`, `none`, an unknown string) instead of clamping it, because the family fallback would
   have answered a level this route never declared. Wire `effort` is no longer `null` on this route;
-  `effort_requested` keeps recording the Jev choice. `opencode-console` and `commandcode` keep omitting
-  the plugin's own field, and an operator `effort_maps` entry still takes precedence. What the probe
-  proves is acceptance (HTTP 200 — even for an out-of-vocabulary level, so the route does not validate
-  the value), not calibrated depth: the audit claim stays at "the field was sent".
+  `effort_requested` keeps recording the Jev choice. `opencode-console` keeps omitting the plugin's own
+  field (the `commandcode` route did too until the entry below), and an operator `effort_maps` entry still
+  takes precedence. What the probe proves is acceptance (HTTP 200 — even for an out-of-vocabulary level, so
+  the route does not validate the value), not calibrated depth: the audit claim stays at "the field was
+  sent".
 - **Every generation catalog now names a single model.** `OPENCODE_GO_MODELS` is
   `("deepseek-v4.1-flash",)`; `mimo-v2.6-flash` was removed from all grids, allowlists and catalogs.
   With one model per route the model question is degenerate by construction and the decider
   effectively chooses only the reasoning level.
-- **`commandcode` reasoning policy is explicit and route-specific.** The profile delegates `deepseek/*`
-  ids to the DeepSeek profile, whose `thinking_toggle_extras(..., always_emit_toggle=True)` emits **both**
-  the native `extra_body.thinking` toggle and a top-level `reasoning_effort` derived from
-  `reasoning_config`. The plugin's own field is deliberately omitted — a pre-existing top-level
-  `reasoning_effort` is removed so it cannot override the profile's derivation — and whether CommandCode
-  grades a Jev-chosen level remains unconfirmed (no probe, no paid call), so wire `effort` stays `null`
-  while `effort_requested` records the Jev choice. The OpenCode policy is not reused.
+- **`commandcode` now applies the decided level as `reasoning_effort`, beside the profile's `thinking`
+  toggle.** The route's reasoning contract has two components with two authors: the provider profile keeps
+  emitting `extra_body.thinking` (CommandCode delegates `deepseek/*` ids to the DeepSeek profile, whose
+  `thinking_toggle_extras(..., always_emit_toggle=True)` derives it from `reasoning_config`), while the
+  plugin now authors the **top-level** `reasoning_effort` with the level Jev decided. The Hermes core builds
+  `api_kwargs` from the profile before the `llm_request` middleware runs and uses the middleware payload for
+  the call (`agent/turn_api_request.py::build_api_request`), and the routed payload is built from the
+  pre-middleware `original_request` and rewrites only `model` and `reasoning_effort` — so the plugin's level
+  lands after the profile's derivation, overrides the level the profile would have sent, and leaves the
+  toggle alone. The wire therefore carries `thinking: {"type": "enabled"}` **plus** `reasoning_effort: <level
+  chosen by Jev>`. A probe of `POST https://api.commandcode.ai/provider/v1/chat/completions` on 2026-10-20
+  returned HTTP 200 for `reasoning_effort` at `low`, `medium`, `high`, `xhigh` and `max`, so the policy
+  declares `wire_parameter="reasoning_effort"`, `accepted_levels=("low","medium","high","max")`,
+  `overrides={"xhigh":"max"}` and `omitted=False`, mirroring `DEEPSEEK_V4_EFFORTS`/`DEEPSEEK_V4_OVERRIDES`.
+  Anything the policy does not declare is omitted, never clamped or invented. The probe proves the field is
+  accepted, not that the endpoint grades the level. `opencode-console` still omits the plugin's own field,
+  and its OpenCode policy is not reused here.
 
 ### Fixed
 
+- **Route audit records name their `provider`.** A `route` record carried the model, the effort and the
+  decider but not the route the decision was applied to, while a `skip` record always named it. With
+  `opencode-go` and `commandcode` both sending `reasoning_effort` and both serving
+  `deepseek/deepseek-v4.1-flash` (under different ids), a route record could no longer be attributed to a
+  route by inspection. The record now carries `provider` at the top level, the same key skip records use.
 - **The audit record names the decider model that actually answered.** `router.py` stamped every route
   with `settings.jev_model`, the legacy OpenRouter id (`typesafe/jev-1.13`), so a `decider: jev_console`
   turn — which is answered by `console_jev_model` (`jev-1.13-free`) — was recorded as a model that was

@@ -199,7 +199,7 @@ plugins:
 - **Route catalogs under `jev_console`**: the example above uses the legacy `openai_compatible` decider, so its `grids.opencode-go` is taken verbatim. With `decider: jev_console` the same route is capped to `deepseek-v4.1-flash`, and the opt-in `commandcode` route is capped to `deepseek/deepseek-v4.1-flash`; any other entry is dropped rather than offered to the decider.
 - **Authentication**: `decider_api_key_env` names the environment variable containing the key (e.g. `OPENCODE_GO_API_KEY`). The secret itself is never written to configuration files or audit logs.
 - **Confidence**: For TypeSafe Jev (`jev`), confidence reflects a mathematically calibrated probability distribution. For `openai_compatible`, confidence is an LLM self-reported heuristic score parsed from the model's JSON response, strictly validated to be a finite float in `[0.0, 1.0]`.
-- **Effort verification**: Reasoning effort levels are never guessed. Each opt-in route declares its own contract in `effort.py`: `opencode-go` now sends the decided level as a top-level `reasoning_effort` (`low`/`medium`/`high`/`max`, with `xhigh` mapped onto `max` by the same declared override the Hermes core uses, probe-confirmed on 2026-10-20 against `POST https://opencode.ai/zen/go/v1/chat/completions`), while `opencode-console` and `commandcode` keep omitting the plugin's own field. A level outside a route's declared set (`minimal`, `none`, an unknown string) is omitted rather than clamped, and an operator `effort_maps` entry still overrides the built-in policy.
+- **Effort verification**: Reasoning effort levels are never guessed. Each opt-in route declares its own contract in `effort.py`: `opencode-go` and `commandcode` both send the decided level as a top-level `reasoning_effort` (`low`/`medium`/`high`/`max`, with `xhigh` mapped onto `max` by the same declared override the Hermes core uses, probe-confirmed on 2026-10-20 against `POST https://opencode.ai/zen/go/v1/chat/completions` and `POST https://api.commandcode.ai/provider/v1/chat/completions` respectively), while `opencode-console` keeps omitting the plugin's own field. On `commandcode` that level rides beside the `extra_body.thinking` toggle the provider profile derives, never instead of it. A level outside a route's declared set (`minimal`, `none`, an unknown string) is omitted rather than clamped, and an operator `effort_maps` entry still overrides the built-in policy.
 
 ### Per-surface routing policy (`platform_overrides`)
 
@@ -294,10 +294,11 @@ lands on `high`.
 
 The opt-in OpenCode/CommandCode routes do not use that family table: each one has an explicit per-model
 policy, and its declared set is matched exactly — no nearest-weaker clamp, because the fallback family
-table would answer a level the route never declared. `opencode-go` sends the level as `reasoning_effort`
-in the same vocabulary the Hermes core drives on that wire (`low`, `medium`, `high`, `max`, with `xhigh`
-mapped onto `max`); `opencode-console` and `commandcode` omit the plugin's own field for the reasons
-stated in [`docs/routing-grid.md`](docs/routing-grid.md).
+table would answer a level the route never declared. `opencode-go` and `commandcode` send the level as
+`reasoning_effort` in the same vocabulary the Hermes core drives on those wires (`low`, `medium`, `high`,
+`max`, with `xhigh` mapped onto `max`); on `commandcode` it is the top-level field, so it lands beside the
+`extra_body.thinking` toggle the provider profile derives rather than replacing it. `opencode-console`
+omits the plugin's own field for the reasons stated in [`docs/routing-grid.md`](docs/routing-grid.md).
 
 ## Audit trail
 
@@ -317,6 +318,7 @@ One JSONL record per routing attempt, under `<HERMES_HOME>/plugin-data/jev-effor
   "alternatives": ["deepseek-v4.1-flash", "glm-5.3", "..."],
   "latency_ms": 271,
   "fallback_reasons": [],
+  "provider": "ollama-cloud",
   "jev_model": "typesafe/jev-1.13",
   "decider": "jev",
   "decider_fallback_reason": null,
@@ -335,7 +337,8 @@ key is never written and the user message only when `include_user_message_in_aud
 when `decider` is `jev_console`, the OpenAI-compatible id when it is `openai_compatible` — never the legacy
 `typesafe/jev-1.13`, which only appears on `decider: jev` records. `decider_fallback_reason` is `null`
 unless the backend's fallback model answered, in which case it names why the primary was abandoned
-(`upstream_error`, `timeout`, `malformed_answer`).
+(`upstream_error`, `timeout`, `malformed_answer`). `provider` names the route the record belongs to, the
+same value a skip record carries; route and skip records are told apart by `event`, never by the shape.
 
 ## Development
 

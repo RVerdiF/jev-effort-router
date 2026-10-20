@@ -269,39 +269,54 @@ def test_opencode_go_effort_cannot_be_inferred_from_other_providers():
 
 
 def test_commandcode_explicit_reasoning_policy():
-    """The route omits the plugin's own field, on a two-component contract.
+    """The route carries the core's DeepSeek V4 contract on its top-level field.
 
-    CommandCode's profile delegates ``deepseek/*`` ids to the DeepSeek profile, which emits BOTH
-    ``extra_body.thinking`` and a top-level ``reasoning_effort``. The policy must say that, and must
-    justify the omission by the endpoint-level uncertainty — never by the field's absence.
+    CommandCode's profile delegates ``deepseek/*`` ids to the DeepSeek profile, which emits
+    ``extra_body.thinking``; the plugin authors the top-level level itself, because the transport
+    merges the routed payload *after* the profile extras. The policy must state both halves.
     """
     for provider_name in ("commandcode", "commandcode-chat", "commandcode_chat"):
         for model_id in ("deepseek/deepseek-v4.1-flash", "deepseek-v4.1-flash"):
             pol = model_reasoning_policy(model_id, provider=provider_name)
             assert pol.provider == "commandcode"
             assert pol.model_id == "deepseek/deepseek-v4.1-flash"
-            assert pol.wire_parameter is None
-            assert pol.accepted_levels == ()
-            assert pol.omitted is True
-            # Both halves of the real contract are named, together with the deliberate removal.
+            assert pol.wire_parameter == "reasoning_effort"
+            # The core's DEEPSEEK_V4_EFFORTS / DEEPSEEK_V4_OVERRIDES, not a narrower guess.
+            assert pol.accepted_levels == ("low", "medium", "high", "max")
+            assert dict(pol.overrides) == {"xhigh": "max"}
+            assert pol.omitted is False
+            # Both halves of the real contract are named, together with the split of authorship.
             assert "thinking" in pol.evidence
             assert "reasoning_effort" in pol.evidence
             assert "thinking_toggle_extras" in pol.evidence
-            assert "BOTH" in pol.evidence
-            assert "drops a pre-existing top-level reasoning_effort" in pol.evidence
-            assert "unconfirmed" in pol.evidence
-            assert "never inferred from OpenCode" in pol.evidence
-            # The false claim that the field is absent from the contract is gone.
-            assert "no reasoning_effort field is part of this generation contract" not in pol.evidence
+            assert "extra_body.thinking" in pol.evidence
+            assert "turn_api_request" in pol.evidence
+            # The probe behind the change, with the endpoint and its result.
+            assert "POST https://api.commandcode.ai/provider/v1/chat/completions" in pol.evidence
+            assert "2026-10-20" in pol.evidence
+            assert "HTTP 200" in pol.evidence
+            assert "DEEPSEEK_V4_EFFORTS" in pol.evidence
+            assert "DEEPSEEK_V4_OVERRIDES" in pol.evidence
+            assert "unconfirmed" not in pol.evidence
+            assert "Deliberate omission" not in pol.evidence
             assert "not a reasoning_effort field" not in pol.decision
-            assert "Deliberate omission" in pol.decision
-            assert "pre-existing top-level reasoning_effort is removed" in pol.decision
-            assert "unconfirmed" in pol.decision
+            assert "reasoning_effort" in pol.decision
+            assert "xhigh" in pol.decision
             assert "effort_requested" in pol.decision
 
-            for lvl in ("low", "medium", "high"):
-                assert resolve_effort(model_id, lvl, provider=provider_name) is None
-                assert is_omitted(model_id, lvl, provider=provider_name) is True
+            # Every declared level goes out verbatim, `max` included.
+            for lvl in ("low", "medium", "high", "max"):
+                assert resolve_effort(model_id, lvl, provider=provider_name) == lvl
+                assert is_omitted(model_id, lvl, provider=provider_name) is False
+
+    # `xhigh` asks for the top tier, exactly like the core's declared override.
+    assert resolve_effort("deepseek/deepseek-v4.1-flash", "xhigh", provider="commandcode") == "max"
+    assert is_omitted("deepseek/deepseek-v4.1-flash", "xhigh", provider="commandcode") is False
+
+    # No invented vocabulary and no clamp: anything the policy does not declare is omitted.
+    for lvl in ("minimal", "none", "bogus", "ultra", ""):
+        assert resolve_effort("deepseek/deepseek-v4.1-flash", lvl, provider="commandcode") is None
+        assert is_omitted("deepseek/deepseek-v4.1-flash", lvl, provider="commandcode") is True
 
     # An out-of-catalog model on this route is omitted too, never guessed from another wire.
     outsider = model_reasoning_policy("kimi-k3", provider="commandcode")

@@ -1310,8 +1310,8 @@ def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_ca
 
     Effective configuration only — no grid is injected — so this is what an operator gets:
     the opt-in CommandCode route is capped to ``deepseek/deepseek-v4.1-flash``, the decider is
-    still Console SystemOne, and ``reasoning_effort`` never reaches this wire (the provider
-    profile owns the native DeepSeek ``thinking`` knob instead).
+    still Console SystemOne, and the decided level reaches this wire as the top-level
+    ``reasoning_effort`` (the toggle the provider profile derives stays untouched).
     """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
     resp_payload = decision_payload(
@@ -1366,13 +1366,13 @@ def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_ca
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
     # Only the namespaced id was offered: the decider saw a one-option model question.
     assert list(transport.calls[0]["json"]["questions"]["model_route"]["criteria"]) == ["1"]
-    # No reasoning field: the native DeepSeek thinking knob is the provider layer's contract.
-    assert "reasoning_effort" not in result["request"]
+    # The level Jev decided is on the wire as the top-level field this endpoint accepts.
+    assert result["request"]["reasoning_effort"] == "high"
     record = router.tail(settings, limit=1)[0]
     assert record["event"] == "route"
     assert record["model"] == "deepseek/deepseek-v4.1-flash"
     assert record["effort_requested"] == "high"
-    assert record["effort"] is None
+    assert record["effort"] == "high"
     assert record["alternatives"] is None
     # Neither payload was mutated in place, and the pre-middleware payload is intact.
     assert json.dumps(request, sort_keys=True) == request_before
@@ -1390,20 +1390,21 @@ def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_ca
     )
     assert replayed is not None
     assert replayed["request"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert replayed["request"]["reasoning_effort"] == "high"
     assert transport.call_count == 1
 
 
-def test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_effort(
+def test_commandcode_lands_the_jev_level_beside_the_profile_thinking_toggle(
     tmp_path, monkeypatch
 ):
     """The real profile shape for this id: ``extra_body.thinking`` **and** ``reasoning_effort``.
 
     CommandCode's profile delegates ``deepseek/*`` to the DeepSeek profile, whose
-    ``thinking_toggle_extras(..., always_emit_toggle=True)`` emits both halves from the params-level
-    ``reasoning_config``. The transport merges the routed payload *after* those profile extras, so a
-    pre-existing top-level ``reasoning_effort`` would override the profile's own derivation and claim
-    a level CommandCode never confirmed it grades. The plugin therefore removes it, leaves both
-    profile-owned inputs untouched, and replay reproduces the same payload byte for byte.
+    ``thinking_toggle_extras(..., always_emit_toggle=True)`` emits the toggle **and** its own
+    top-level ``reasoning_effort`` derived from the params-level ``reasoning_config``. The
+    transport builds that payload before the middleware and the routed payload replaces it, so
+    the plugin's level lands *after* the profile's derivation: it overrides the level the
+    profile would have sent and leaves the toggle alone. Both then coexist on the wire.
     """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     resp_payload = decision_payload(
@@ -1422,11 +1423,11 @@ def test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
 
     request = ollama_request(
-        model="deepseek/deepseek-v4.1-flash", reasoning_config={"effort": "high"}
+        model="deepseek/deepseek-v4.1-flash", reasoning_config={"effort": "low"}
     )
     # Exactly what the provider profile puts on this wire for this id, derived from that config.
     request["extra_body"] = {"thinking": {"type": "enabled"}}
-    request["reasoning_effort"] = "high"
+    request["reasoning_effort"] = "low"
     request_before = json.dumps(request, sort_keys=True)
     original = copy.deepcopy(request)
     original_before = json.dumps(original, sort_keys=True)
@@ -1447,16 +1448,17 @@ def test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_
 
     assert result is not None
     routed = result["request"]
-    # The plugin's own choice is never put on this wire: the pre-existing effort is removed...
-    assert "reasoning_effort" not in routed
-    # ...while both components owned by the provider layer survive untouched.
+    # The Jev level replaces the profile-derived one (low -> high), which is the documented
+    # precedence: the middleware payload is what the call is made with.
+    assert routed["reasoning_effort"] == "high"
+    # The toggle and the params-level input owned by the provider layer survive untouched.
     assert routed["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert routed["reasoning_config"] == {"effort": "high"}
+    assert routed["reasoning_config"] == {"effort": "low"}
     assert routed["model"] == "deepseek/deepseek-v4.1-flash"
     record = router.tail(settings, limit=1)[0]
     assert record["event"] == "route"
     assert record["effort_requested"] == "high"
-    assert record["effort"] is None
+    assert record["effort"] == "high"
     # Neither input payload was mutated in place.
     assert json.dumps(request, sort_keys=True) == request_before
     assert json.dumps(original, sort_keys=True) == original_before
@@ -1476,6 +1478,40 @@ def test_commandcode_keeps_the_profile_native_controls_and_drops_a_pre_existing_
     )
     assert replayed is not None
     assert json.dumps(replayed["request"], sort_keys=True) == json.dumps(routed, sort_keys=True)
+    assert transport.call_count == 1
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_commandcode_route_lands_every_decidable_level_on_the_wire(tmp_path, monkeypatch, level):
+    """Each level Jev can decide goes out verbatim as reasoning_effort, and is audited as sent."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    resp_payload = decision_payload(effort_choice=level, effort_confidence=0.9, grid_size=1)
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={"decider": "jev_console", "routable_providers": ["commandcode"]},
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = route(
+        router,
+        provider="commandcode",
+        model="deepseek/deepseek-v4.1-flash",
+        base_url="https://api.commandcode.ai/provider/v1",
+        turn_id=f"cclevel-{level}",
+        session_id="cclevel",
+    )
+
+    assert result is not None
+    assert result["request"]["reasoning_effort"] == level
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["provider"] == "commandcode"
+    assert record["decider"] == "jev_console"
+    assert record["effort_requested"] == level
+    assert record["effort"] == level
+    assert record["fallback_reasons"] == []
     assert transport.call_count == 1
 
 

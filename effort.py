@@ -261,45 +261,62 @@ OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 
 #: Explicit reasoning policies for the opt-in ``commandcode`` generation model.
 #:
-#: This route's contract is *not* the OpenCode one, and it has **two** components — both owned by
-#: the provider layer. CommandCode's ``build_api_kwargs_extras`` delegates ``deepseek/*`` ids to the
-#: DeepSeek profile, which calls ``thinking_toggle_extras(..., always_emit_toggle=True)`` and so
-#: emits ``extra_body.thinking`` **and** a top-level ``reasoning_effort`` carrying the level clamped
-#: to DeepSeek's V4 vocabulary (low/medium/high/max, xhigh->max). Both are derived from the
-#: params-level ``reasoning_config``; the profile is their only author.
+#: The wire carries **two** reasoning components, and they now have two different authors. The
+#: ``extra_body.thinking`` toggle belongs to the provider layer: CommandCode's
+#: ``build_api_kwargs_extras`` delegates ``deepseek/*`` ids to the DeepSeek profile, which calls
+#: ``thinking_toggle_extras(..., always_emit_toggle=True)`` and so emits the toggle from the
+#: params-level ``reasoning_config``. The **top-level ``reasoning_effort`` is the plugin's**, with
+#: the level Jev decided on this turn.
 #:
-#: The plugin omits *its own* effort on purpose. It builds the payload from the pre-middleware
-#: request, and a top-level ``reasoning_effort`` left there would be merged by the transport *after*
-#: the profile extras, so it could override or contradict the profile's derivation; ``_apply``
-#: therefore drops it. What stands unconfirmed is whether the CommandCode endpoint grades a
-#: Jev-chosen level at all: the profile proves Hermes sends the field, not that this provider
-#: honours it, and no paid probe was run. The Jev choice is recorded in ``effort_requested`` and
-#: never claimed on the wire; support is never inferred from the OpenCode routes.
+#: That split is what the transport's order allows, traced in ``agent/turn_api_request.py``
+#: (``build_api_request``): ``api_kwargs`` is built from the provider profile first, the
+#: ``llm_request`` middleware runs on that payload, and its result **replaces** the payload the
+#: call is made with. The routed payload is built from the pre-middleware ``original_request``
+#: (which already carries the profile's ``extra_body.thinking``) and only rewrites ``model`` and
+#: ``EFFORT_WIRE_KEY``, so the plugin's level lands **after** the profile's derivation: it
+#: overrides the effort the profile would have sent from the session's ``reasoning_config`` and
+#: leaves the toggle untouched. The wire therefore carries ``thinking: {"type": "enabled"}``
+#: **plus** ``reasoning_effort: <level chosen by Jev>``, not one at the expense of the other.
+#:
+#: Probed on 2026-10-20 against ``POST https://api.commandcode.ai/provider/v1/chat/completions``
+#: with ``deepseek/deepseek-v4.1-flash``: ``reasoning_effort=low``, ``=medium``, ``=high``,
+#: ``=xhigh`` and ``=max`` all returned HTTP 200. The vocabulary is the DeepSeek V4 one the core
+#: already declares (``DEEPSEEK_V4_EFFORTS``/``DEEPSEEK_V4_OVERRIDES``), so ``xhigh`` maps onto
+#: ``max`` by the same declared override rather than by a guess.
 COMMANDCODE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     model_id: ModelReasoningPolicy(
         provider="commandcode",
         model_id=model_id,
-        wire_parameter=None,
-        accepted_levels=(),
+        wire_parameter="reasoning_effort",
+        accepted_levels=("low", "medium", "high", "max"),
         evidence=(
-            "Two-component contract, traced offline: CommandCode's build_api_kwargs_extras delegates "
-            "deepseek/* ids to the DeepSeek profile, whose thinking_toggle_extras(..., "
-            "always_emit_toggle=True) emits BOTH extra_body.thinking and a top-level reasoning_effort "
-            "clamped to DeepSeek's V4 vocabulary (low/medium/high/max, xhigh->max). The plugin drops a "
-            "pre-existing top-level reasoning_effort so it cannot override the profile's derivation, and "
-            "does not claim the endpoint grades a Jev-chosen level: unconfirmed, never inferred from OpenCode."
+            "Probe-confirmed on 2026-10-20 against POST https://api.commandcode.ai/provider/v1/chat/"
+            "completions for deepseek/deepseek-v4.1-flash: reasoning_effort=low, reasoning_effort=medium, "
+            "reasoning_effort=high, reasoning_effort=xhigh and reasoning_effort=max all returned HTTP 200. "
+            "The route's reasoning contract has two components with two authors, traced in "
+            "agent/turn_api_request.py::build_api_request: api_kwargs is built from the provider profile "
+            "first (CommandCode delegates deepseek/* to the DeepSeek profile, whose "
+            "thinking_toggle_extras(..., always_emit_toggle=True) emits extra_body.thinking and its own "
+            "top-level reasoning_effort from the session reasoning_config), and the llm_request middleware "
+            "payload replaces that payload afterwards. Building the routed request from the pre-middleware "
+            "original_request therefore keeps extra_body.thinking intact while the plugin's top-level "
+            "reasoning_effort wins over the profile's derivation. The accepted set is the core's DeepSeek V4 "
+            "contract (DEEPSEEK_V4_EFFORTS = low, medium, high, max with DEEPSEEK_V4_OVERRIDES = {xhigh: "
+            "max}), which is the vocabulary this endpoint accepts. A 200 proves the field is accepted, not "
+            "that the level is graded or calibrated to a measured reasoning depth."
         ),
-        omitted=True,
+        omitted=False,
         decision=(
-            f"Deliberate omission of the plugin's own field: on commandcode the native reasoning controls for "
-            f"{model_id} belong to the provider profile (extra_body.thinking plus its own top-level "
-            "reasoning_effort derived from reasoning_config). A pre-existing top-level reasoning_effort is "
-            "removed; extra_body.thinking and reasoning_config are left untouched. Stated uncertainty: the "
-            "profile proves Hermes sends reasoning_effort on this wire, but whether CommandCode honours a "
-            "Jev-chosen level is unconfirmed (no documented contract, no probe, no paid call). The Jev logical "
-            "effort stays in effort_requested, wire effort stays null, and no claim is made that the model "
-            "executed at that effort."
+            f"The level chosen by Jev is written to the wire as the top-level reasoning_effort for "
+            f"{model_id}: low/medium/high/max verbatim and xhigh mapped to max by the declared override, "
+            "the same mapping the core applies to DeepSeek V4 ids. Anything else (minimal, none, an unknown "
+            "string) is omitted, never invented and never clamped. extra_body.thinking and reasoning_config "
+            "are left exactly as the provider profile built them, so the toggle and the level coexist on the "
+            "wire instead of one replacing the other. The audit records the level as sent (effort) and keeps "
+            "effort_requested as the Jev choice; the probe shows the endpoint accepts the parameter, not that "
+            "it honours a depth."
         ),
+        overrides={"xhigh": "max"},
     )
     for model_id in ("deepseek/deepseek-v4.1-flash",)
 }

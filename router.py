@@ -485,6 +485,10 @@ class Router:
             "effort": decision.effort,
             "effort_requested": decision.effort_requested,
             "model_choice": decision.model_choice,
+            # The route the decision was applied to. Skip records already name it; a route record
+            # that omitted it could not be told apart from one written for another provider
+            # (``opencode-go`` and ``commandcode`` now both send ``reasoning_effort``).
+            "provider": where.provider,
             # ``effort_choice`` is a string on a fresh decision; a replay carries "" meaning
             # "not measured at replay", which the audit surfaces as null.
             "effort_choice": decision.effort_choice if decision.effort_choice else None,
