@@ -137,6 +137,34 @@ def ollama_request(
     return request
 
 
+def codex_request(
+    *,
+    model: str = "gpt-6-luna",
+    input_items: Optional[List[Dict[str, Any]]] = None,
+    effort: str = "medium",
+) -> Dict[str, Any]:
+    """A Responses API body, as ``codex_responses`` hands it to the ``llm_request`` middleware.
+
+    The transport has already consumed the params-level ``reasoning_config`` into the
+    ``reasoning`` object and rendered the conversation into ``input``; there is no ``messages``
+    key and no top-level ``reasoning_effort`` — this is the body the SDK call is made with.
+    """
+    return {
+        "model": model,
+        "instructions": "you are a test",
+        "input": input_items
+        if input_items is not None
+        else [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        ],
+        "store": False,
+        "tools": [],
+        "reasoning": {"effort": effort, "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": "pck_test",
+    }
+
+
 class Registration:
     def __init__(self, kind: str, name: str) -> None:
         self.kind = kind

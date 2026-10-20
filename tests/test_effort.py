@@ -333,6 +333,58 @@ def test_commandcode_explicit_reasoning_policy():
     assert resolve_effort("deepseek/deepseek-v4.1-flash", "high", provider="ollama-cloud") == "high"
 
 
+def test_codex_policies_split_the_two_family_vocabularies():
+    """Luna keeps the full ``none..max`` set; the Sol family's ladder has no ``none`` at all.
+
+    Both vocabularies are the core's own declarations (``CODEX_GPT56_EFFORTS`` and
+    ``CODEX_ASTRA_EFFORTS`` via ``codex_supported_efforts``), and the wire they ride is the
+    Responses body, where the level goes in ``reasoning.effort`` — not a ``reasoning_effort``
+    top-level kwarg.
+    """
+    luna = ("gpt-6-luna", "gpt-6-luna-900k")
+    sol = ("gpt-6.1-sol", "gpt-6.1-sol-900k")
+
+    for provider_name in ("openai-codex", "codex", "openai_codex"):
+        for model_id in luna:
+            pol = model_reasoning_policy(model_id, provider=provider_name)
+            assert pol.provider == "openai-codex"
+            assert pol.wire_parameter == "reasoning"
+            assert pol.accepted_levels == ("none", "low", "medium", "high", "xhigh", "max")
+            assert pol.omitted is False
+            assert "CODEX_GPT56_EFFORTS" in pol.evidence
+            assert "reasoning.effort" in pol.evidence
+            assert "HERMES_DUMP_REQUESTS" in pol.evidence
+            assert "2026-10-20" in pol.evidence
+            assert "unconfirmed" not in pol.evidence
+            for level in ("none", "low", "medium", "high", "xhigh", "max"):
+                assert resolve_effort(model_id, level, provider=provider_name) == level
+
+        for model_id in sol:
+            pol = model_reasoning_policy(model_id, provider=provider_name)
+            assert pol.provider == "openai-codex"
+            assert pol.wire_parameter == "reasoning"
+            assert pol.accepted_levels == ("low", "medium", "high", "xhigh", "max")
+            assert pol.omitted is False
+            assert "CODEX_ASTRA_EFFORTS" in pol.evidence
+            # ``none`` is not a level on this route and would 400: it is omitted, never sent.
+            assert resolve_effort(model_id, "none", provider=provider_name) is None
+            assert is_omitted(model_id, "none", provider=provider_name) is True
+            for level in ("low", "medium", "high", "xhigh", "max"):
+                assert resolve_effort(model_id, level, provider=provider_name) == level
+
+    # No invented vocabulary and no clamp onto an Ollama rung the route never declared.
+    for model_id in (*luna, *sol):
+        for level in ("minimal", "ultra", "bogus", ""):
+            assert resolve_effort(model_id, level, provider="openai-codex") is None
+
+    # An out-of-catalog model on this route is omitted, never guessed from another wire.
+    assert model_reasoning_policy("gpt-6-astra", provider="openai-codex").omitted is True
+    assert resolve_effort("gpt-6-astra", "high", provider="openai-codex") is None
+
+    # The same slug on ollama-cloud is a different contract and still resolves.
+    assert resolve_effort("gpt-6-luna", "high", provider="ollama-cloud") == "high"
+
+
 def test_opencode_console_effort_cannot_be_inferred_from_other_providers():
     # deepseek-v4.1-flash on ollama-cloud resolves reasoning_effort
     assert resolve_effort("deepseek-v4.1-flash", "high", provider="ollama-cloud") == "high"
@@ -361,14 +413,26 @@ def test_opencode_console_custom_effort_map_overrides_omission():
 #: the entry would shadow the built-in contract (``low``/``medium``/``high``/``max``, ``xhigh`` →
 #: ``max``, everything else omitted). The ``opencode-go`` map stays — it is that route's declared
 #: operator vocabulary and keeps the §8 semantics, including its documented clamp.
+#:
+#: ``openai-codex`` carries the three ids this account's ChatGPT catalog actually serves. The
+#: fourth id the routing card names, ``gpt-6.1-sol-900k``, is not in that catalog (a live turn
+#: against ``--provider openai-codex -m gpt-6.1-sol-900k`` returns HTTP 400 "model entitlement"
+#: and Hermes falls back to another model), so pointing the operator grid at it would buy a
+#: silent fallback and an audit record for a route that never happened.
 DELIVERED_CODE_PROFILE_SETTINGS = {
     "enabled": True,
     "decider": "jev_console",
-    "routable_providers": ["opencode-go", "commandcode"],
+    "routable_providers": ["opencode-go", "commandcode", "openai-codex"],
     "grids": {
         "opencode-go": ["deepseek-v4.1-flash: general work, explanation, ordinary coding and tool use"],
         "commandcode": [
             "deepseek/deepseek-v4.1-flash: general work, explanation, ordinary coding and tool use"
+        ],
+        "openai-codex": [
+            "gpt-6-luna: general work, coding, explanation and tool use",
+            "gpt-6-luna-900k: general work and coding over a 900k context window "
+            "(large repos, long documents)",
+            "gpt-6.1-sol: harder reasoning, architecture, planning and long-context analysis",
         ],
     },
     "effort_maps": {
@@ -377,6 +441,33 @@ DELIVERED_CODE_PROFILE_SETTINGS = {
 }
 
 COMMANDCODE_MODEL = "deepseek/deepseek-v4.1-flash"
+
+CODEX_DELIVERED_MODELS = ("gpt-6-luna", "gpt-6-luna-900k", "gpt-6.1-sol")
+
+
+def _assert_codex_contract(settings) -> None:
+    """The Codex route's contract, resolved from the delivered settings.
+
+    No ``effort_maps`` entry shadows it, so the built-in per-family policy is what runs: Luna
+    takes the full ``none..max`` set, Sol has no ``none`` and omits it rather than sending one.
+    """
+    assert "openai-codex" not in settings.effort_maps
+    assert [entry.model_id for entry in settings.grid_for("openai-codex")] == list(
+        CODEX_DELIVERED_MODELS
+    )
+    for provider_name in ("openai-codex", "codex", "openai_codex"):
+        for level in ("low", "medium", "high", "xhigh", "max"):
+            for model_id in CODEX_DELIVERED_MODELS:
+                assert (
+                    resolve_effort(
+                        model_id, level, provider=provider_name, effort_maps=settings.effort_maps
+                    )
+                    == level
+                )
+        # ``none`` is a Luna level and not a Sol one.
+        assert resolve_effort("gpt-6-luna", "none", provider=provider_name) == "none"
+        assert resolve_effort("gpt-6-luna-900k", "none", provider=provider_name) == "none"
+        assert resolve_effort("gpt-6.1-sol", "none", provider=provider_name) is None
 
 
 def _assert_commandcode_contract(settings) -> None:
@@ -409,6 +500,8 @@ def test_the_delivered_code_profile_config_holds_the_commandcode_contract():
     # The route is configured with the namespaced model and nothing else.
     assert [entry.model_id for entry in settings.grid_for("commandcode")] == [COMMANDCODE_MODEL]
     _assert_commandcode_contract(settings)
+    # The Codex route rides the same delivered block with its own two vocabularies.
+    _assert_codex_contract(settings)
     # The other live route keeps its own operator semantics: this fix changes nothing there.
     assert (
         resolve_effort("deepseek-v4.1-flash", "max", provider="opencode-go", effort_maps=settings.effort_maps)
@@ -433,5 +526,6 @@ def test_the_live_code_profile_config_holds_the_same_commandcode_contract():
     block = yaml.safe_load(Path(raw_path).read_text(encoding="utf-8"))["plugins"]["entries"][
         "jev-effort-router"
     ]["settings"]
-    _assert_commandcode_contract(load_settings(lambda key, default=None: block.get(key, default)))
-
+    settings = load_settings(lambda key, default=None: block.get(key, default))
+    _assert_commandcode_contract(settings)
+    _assert_codex_contract(settings)

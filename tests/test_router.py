@@ -13,7 +13,16 @@ import pytest
 
 from client import JevClient
 from decider import REASON_LOW_CONFIDENCE
-from stubs import ReadTimeout, StubContext, StubResponse, StubState, StubTransport, decision_payload, ollama_request
+from stubs import (
+    ReadTimeout,
+    StubContext,
+    StubResponse,
+    StubState,
+    StubTransport,
+    codex_request,
+    decision_payload,
+    ollama_request,
+)
 from config import load_settings
 from router import Router
 
@@ -2051,4 +2060,229 @@ def test_middleware_fail_open_both_models_fail(tmp_path, monkeypatch, caplog):
     assert secret_key not in audit_text
     assert secret_key not in caplog.text
     assert "[REDACTED]" in caplog.text
+
+
+# -- the Codex Responses route -------------------------------------------------------
+
+
+CODEX_CONFIG = {"decider": "jev_console", "routable_providers": ["openai-codex"]}
+
+
+def codex_route(router, request=None, **overrides):
+    """``route`` with the Codex route's payload shape and provider."""
+    kwargs = dict(
+        model="gpt-6-luna",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses",
+    )
+    kwargs.update(overrides)
+    return route(router, request if request is not None else codex_request(), **kwargs)
+
+
+def test_codex_route_is_not_skipped_and_lands_the_level_under_reasoning(tmp_path, monkeypatch):
+    """The Responses body gets ``reasoning.effort``; a top-level ``reasoning_effort`` never appears.
+
+    That key is not a Responses field at all — the SDK call would raise ``TypeError`` before a
+    byte was sent — so the router must write the nested one and leave nothing at the top level.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=4))]
+    )
+    router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = codex_route(router, turn_id="codex-1", session_id="codex")
+
+    assert result is not None
+    routed = result["request"]
+    assert routed["model"] == "gpt-6.1-sol"
+    assert routed["reasoning"] == {"effort": "high", "summary": "auto"}
+    # ``include``/``store``/``instructions`` are the transport's and survive untouched.
+    assert routed["include"] == ["reasoning.encrypted_content"]
+    assert routed["store"] is False
+    assert routed["instructions"] == "you are a test"
+    assert "reasoning_effort" not in routed
+    # The params-level input the transport already consumed is not resurrected either.
+    assert "reasoning_config" not in routed
+
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["provider"] == "openai-codex"
+    assert record["model"] == "gpt-6.1-sol"
+    assert record["effort"] == "high"
+    assert record["effort_requested"] == "high"
+    assert record["fallback_reasons"] == []
+    assert transport.call_count == 1
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+@pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6.1-sol"])
+def test_codex_route_lands_every_decidable_level_on_the_wire(tmp_path, monkeypatch, level, model):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, level, 0.9, grid_size=4))]
+    )
+    router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = codex_route(
+        router,
+        codex_request(model=model),
+        model=model,
+        turn_id=f"codex-{model}-{level}",
+        session_id=f"codex-{model}-{level}",
+    )
+
+    assert result is not None
+    assert result["request"]["model"] == "gpt-6-luna"
+    assert result["request"]["reasoning"]["effort"] == level
+    record = router.tail(settings, limit=1)[0]
+    assert record["effort"] == level
+    assert record["effort_requested"] == level
+
+
+def test_codex_picker_alias_never_reaches_the_wire(tmp_path, monkeypatch):
+    """Jev may pick ``gpt-6-luna-900k``; the wire id is the base slug the backend serves.
+
+    The transport strips the suffix while *building* the body, before this middleware runs, so a
+    router that wrote the picker id back would send a model the endpoint does not know. The audit
+    still records the id Jev chose, because that is the decision that was made.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("2", 0.95, "medium", 0.9, grid_size=4))]
+    )
+    router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = codex_route(router, turn_id="codex-alias", session_id="codex-alias")
+
+    assert result is not None
+    assert result["request"]["model"] == "gpt-6-luna"
+    assert router.tail(settings, limit=1)[0]["model"] == "gpt-6-luna-900k"
+
+    # ``gpt-6.1-sol-900k`` is not an eligible alias in the core's table, so it has no wire id:
+    # the router keeps it verbatim and lets the API reject it instead of running another model.
+    transport = StubTransport(
+        [StubResponse(decision_payload("4", 0.95, "medium", 0.9, grid_size=4))]
+    )
+    router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+    assert (
+        codex_route(router, turn_id="codex-sol", session_id="codex-sol")["request"]["model"]
+        == "gpt-6.1-sol-900k"
+    )
+
+
+def test_codex_reads_the_conversation_from_input_not_messages(tmp_path, monkeypatch):
+    """A Responses body has no ``messages``: the state must be built from ``input``."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, "medium", 0.9, grid_size=4))]
+    )
+    router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    request = codex_request(
+        input_items=[
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "an answer"}],
+            },
+            {"type": "function_call", "name": "read_file", "arguments": "{}", "call_id": "c1"},
+            {"type": "function_call_output", "call_id": "c1", "output": "file body"},
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "refactor the parser"}],
+            },
+        ]
+    )
+
+    result = codex_route(router, request, turn_id="codex-input", session_id="codex-input")
+
+    assert result is not None
+    state = transport.last_payload["state"]
+    assert state["user_message"] == "refactor the parser"
+    # Tool items carry no role and stay out of the routing state, exactly as on chat_completions.
+    assert "read_file" not in state["recent_context"]
+    assert "file body" not in state["recent_context"]
+    assert "assistant: an answer" in state["recent_context"]
+    assert state["provider"] == "openai-codex"
+
+
+def test_codex_payload_without_a_reasoning_object_keeps_the_audit_honest(tmp_path, monkeypatch):
+    """The transport decides whether a route takes a reasoning field; the router never invents one.
+
+    A route it judged field-less has no ``reasoning`` key, and adding one is the 400 class that
+    guard exists to avoid — so the level is simply not sent, and the audit says so.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, "high", 0.9, grid_size=4))]
+    )
+    router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    request = codex_request()
+    del request["reasoning"]
+
+    result = codex_route(router, request, turn_id="codex-noreason", session_id="codex-noreason")
+
+    assert result is not None
+    assert "reasoning" not in result["request"]
+    record = router.tail(settings, limit=1)[0]
+    # The wire carried no level; ``effort_requested`` still names Jev's choice.
+    assert record["effort"] is None
+    assert record["effort_requested"] == "high"
+
+
+def test_codex_route_replays_the_same_body_without_a_second_decision(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=4))]
+    )
+    router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    request = codex_request()
+    first = codex_route(router, request, turn_id="codex-replay", session_id="codex-replay")
+    second = codex_route(
+        router, request, turn_id="codex-replay", session_id="codex-replay", api_call_count=1
+    )
+
+    assert first is not None and second is not None
+    assert json.dumps(second["request"], sort_keys=True) == json.dumps(first["request"], sort_keys=True)
+    assert transport.call_count == 1
+
+
+def test_codex_alias_provider_names_the_same_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, "low", 0.9, grid_size=4))]
+    )
+    router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
+
+    result = codex_route(
+        router, provider="codex", turn_id="codex-alias-provider", session_id="codex-alias-provider"
+    )
+
+    assert result is not None
+    assert result["request"]["reasoning"]["effort"] == "low"
+
+
+def test_chat_completions_still_writes_the_top_level_field_only(tmp_path):
+    """The widened api-mode gate must not change the chat-completions payload shape."""
+    transport = StubTransport([StubResponse(decision_payload("2", 0.9, "high", 0.8))])
+    router, _ = build(tmp_path, transport)
+
+    result = route(router)
+
+    assert result is not None
+    assert result["request"]["reasoning_effort"] == "high"
+    assert "reasoning" not in result["request"]
 

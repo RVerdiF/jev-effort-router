@@ -30,11 +30,24 @@ class Entry:
     model_id: str
     #: Human-readable profile line, sent to Jev as the criterion description.
     description: str
+    #: The id the provider's endpoint actually knows, when it differs from ``model_id``.
+    #:
+    #: Empty means "the same id". A picker alias is the one case that needs it: the Codex
+    #: ``-900k`` variants are Hermes-side ids whose suffix is stripped before the wire
+    #: (``agent/transports/codex.py``), and that stripping happens while the transport *builds*
+    #: the payload — before the middleware the router runs in. A router that rewrote ``model``
+    #: back to the picker id would therefore send an id the backend does not serve.
+    wire_id: str = ""
 
     @property
     def criterion(self) -> str:
         """The exact string Jev sees for this option."""
         return f"{self.model_id}: {self.description}" if self.description else self.model_id
+
+    @property
+    def wire_model(self) -> str:
+        """The id to put in the provider's ``model`` field."""
+        return self.wire_id or self.model_id
 
 
 #: The six benchmarked Ollama:cloud models, in the order they are offered to Jev.
@@ -113,6 +126,39 @@ COMMANDCODE_GRID: Tuple[Entry, ...] = (
         "deepseek/deepseek-v4.1-flash",
         "the usual choice for general work: everyday writing, explanation, summarising, "
         "ordinary coding and tool use; 1M context",
+    ),
+)
+
+
+#: The generation catalog of the ``openai-codex`` route (ChatGPT OAuth, Codex Responses API).
+#:
+#: Two model families, four picker ids. The families differ in what they are good at *and* in
+#: the effort vocabulary their route accepts (Luna takes ``none``, Sol does not — see
+#: :data:`effort.CODEX_REASONING_POLICIES`), so they are genuinely different options.
+#:
+#: ``-900k`` is a Hermes-side picker suffix, not a backend id: the transport strips it before
+#: the request goes out (``strip_codex_context_variant_suffix``), and the large window it opts
+#: into is resolved from ``agent.model`` when the session is built. ``wire_id`` records the base
+#: slug the endpoint actually serves. Only ``gpt-6-luna`` is in the core's ``-900k`` eligible
+#: bases (``is_codex_900k_base``); ``gpt-6.1-sol-900k`` is *not* an id this backend lists, so it
+#: carries no ``wire_id`` and fails honestly instead of running as another model.
+CODEX_GRID: Tuple[Entry, ...] = (
+    Entry(
+        "gpt-6-luna",
+        "general work, coding, explanation and tool use",
+    ),
+    Entry(
+        "gpt-6-luna-900k",
+        "general work and coding over a 900k context window (large repos, long documents)",
+        wire_id="gpt-6-luna",
+    ),
+    Entry(
+        "gpt-6.1-sol",
+        "harder reasoning, architecture, planning and long-context analysis",
+    ),
+    Entry(
+        "gpt-6.1-sol-900k",
+        "harder reasoning and long-context analysis over a 900k context window",
     ),
 )
 

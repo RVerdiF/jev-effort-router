@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from .grid import (
+    CODEX_GRID,
     COMMANDCODE_GRID,
     DEFAULT_GRID,
     OPENCODE_CONSOLE_GRID,
@@ -41,6 +42,12 @@ OPENCODE_GO_PROVIDER_ALIASES = ("opencode_go",)
 COMMANDCODE_PROVIDER = "commandcode"
 COMMANDCODE_PROVIDER_ALIASES = ("commandcode-chat", "commandcode_chat")
 
+#: OpenAI Codex provider and aliases: the OAuth-authenticated Responses-API route. Its payload
+#: shape is ``codex_responses``, not ``chat_completions``, so the router has to know both the
+#: route and the mode it speaks.
+CODEX_PROVIDER = "openai-codex"
+CODEX_PROVIDER_ALIASES = ("codex", "openai_codex")
+
 #: Console serves generation for the one normal (non-free) id its public model list carries.
 #: The free variant was refused by the owner and is absent from every catalog.
 OPENCODE_CONSOLE_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash",)
@@ -59,6 +66,12 @@ OPENCODE_GO_ALLOWLIST = frozenset(OPENCODE_GO_MODELS)
 COMMANDCODE_MODELS: Tuple[str, ...] = ("deepseek/deepseek-v4.1-flash",)
 COMMANDCODE_ALLOWLIST = frozenset(COMMANDCODE_MODELS)
 
+#: The ``openai-codex`` route's catalog: the ids its Responses API serves, taken from the route's
+#: own grid so the cap and the built-in catalog cannot drift apart. The ids are bare (no
+#: ``vendor/`` prefix) — that is how this provider's model cache lists them.
+CODEX_MODELS: Tuple[str, ...] = tuple(entry.model_id for entry in CODEX_GRID)
+CODEX_ALLOWLIST = frozenset(CODEX_MODELS)
+
 #: The provider/alias pairs an operator grid may be declared under. The same table drives the
 #: alias normalisation in :meth:`Settings.is_provider_routable`, so a route cannot be known to
 #: the grid lookups while its aliases are forgotten by the routable check.
@@ -67,11 +80,18 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (OPENCODE_CONSOLE_PROVIDER, OPENCODE_CONSOLE_PROVIDER_ALIASES),
     (OPENCODE_GO_PROVIDER, OPENCODE_GO_PROVIDER_ALIASES),
     (COMMANDCODE_PROVIDER, COMMANDCODE_PROVIDER_ALIASES),
+    (CODEX_PROVIDER, CODEX_PROVIDER_ALIASES),
 )
 
-#: API modes this router understands. The Ollama:cloud profile is chat_completions;
-#: a Responses or Anthropic-Messages route builds its payload elsewhere and is left alone.
-ROUTED_API_MODES = ("chat_completions",)
+#: API modes this router understands, keyed by the payload shape each one hands the middleware.
+#:
+#: ``chat_completions`` builds a ``messages`` payload that takes a top-level ``reasoning_effort``.
+#: ``codex_responses`` is the OpenAI Responses shape: the transport has already turned the
+#: params-level ``reasoning_config`` into ``reasoning: {effort, summary}`` and the conversation
+#: into ``input``, so the router reads and writes a different payload (see
+#: ``router.conversation_messages`` / ``router.RESPONSES_REASONING_KEY``). Any other mode
+#: (Anthropic Messages, Bedrock Converse) builds somewhere else and is left alone.
+ROUTED_API_MODES = ("chat_completions", "codex_responses")
 
 EFFORT_LEVELS: Tuple[str, ...] = ("low", "medium", "high")
 
@@ -198,9 +218,9 @@ def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
     """The allowlist that pins ``provider``'s catalog, or ``None`` when it has none.
 
     ``opencode-console`` is pinned at all times: its models are the Console's own. The
-    ``opencode-go`` and ``commandcode`` caps are **opt-in** — they are in force only while the
-    ``jev_console`` decider is active, so a legacy ``jev``/``openai_compatible`` setup keeps
-    whatever grid the operator configured, unchanged.
+    ``opencode-go``, ``commandcode`` and ``openai-codex`` caps are **opt-in** — they are in force
+    only while the ``jev_console`` decider is active, so a legacy ``jev``/``openai_compatible``
+    setup keeps whatever grid the operator configured, unchanged.
     """
     key = (provider or "").strip().lower()
     if key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
@@ -209,6 +229,8 @@ def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
         return OPENCODE_GO_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
     if key in (COMMANDCODE_PROVIDER, *COMMANDCODE_PROVIDER_ALIASES):
         return COMMANDCODE_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
+    if key in (CODEX_PROVIDER, *CODEX_PROVIDER_ALIASES):
+        return CODEX_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
     return None
 
 
@@ -221,6 +243,8 @@ def route_catalog(provider: str) -> Optional[Tuple[Entry, ...]]:
         return OPENCODE_GO_GRID
     if key in (COMMANDCODE_PROVIDER, *COMMANDCODE_PROVIDER_ALIASES):
         return COMMANDCODE_GRID
+    if key in (CODEX_PROVIDER, *CODEX_PROVIDER_ALIASES):
+        return CODEX_GRID
     return None
 
 

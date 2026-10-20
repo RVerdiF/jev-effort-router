@@ -322,6 +322,68 @@ COMMANDCODE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 }
 
 
+#: GPT-6 Luna's ladder on the Codex Responses route, and GPT-6.1 Sol's. Both are the core's own
+#: declarations, not this plugin's guesses: ``CODEX_GPT56_EFFORTS`` (the GPT-6 tier, which the
+#: ``-900k`` picker aliases inherit through the same slug prefix) carries the full ``none..max``
+#: set, while ``CODEX_ASTRA_EFFORTS`` — reached for the ``gpt-6.1-sol`` family through
+#: ``NO_DISABLE_TIER_PREFIXES`` — has **no** ``none``: that route rejects a disable with a 400,
+#: so a level it does not declare is omitted rather than sent.
+CODEX_LUNA_EFFORTS: Tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
+CODEX_SOL_EFFORTS: Tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+#: ``(model id, accepted levels)`` for the four ids the Codex route serves. A model's family
+#: decides its vocabulary, so the two Sol ids share one set and the two Luna ids share another.
+CODEX_MODEL_LEVELS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("gpt-6-luna", CODEX_LUNA_EFFORTS),
+    ("gpt-6-luna-900k", CODEX_LUNA_EFFORTS),
+    ("gpt-6.1-sol", CODEX_SOL_EFFORTS),
+    ("gpt-6.1-sol-900k", CODEX_SOL_EFFORTS),
+)
+
+#: Explicit reasoning policies for the ``openai-codex`` route (ChatGPT OAuth, Responses API).
+#:
+#: ``wire_parameter`` names the field the level rides in. On this route that is the ``reasoning``
+#: object, not a top-level kwarg: the transport decodes the params-level ``reasoning_config`` into
+#: ``reasoning: {"effort": …}`` while it *builds* the payload
+#: (``agent/transports/codex.py::_reasoning_fields``), and the ``llm_request`` middleware runs
+#: after that build. A top-level ``reasoning_effort`` in a Responses body is not a Responses field
+#: at all — the SDK call raises ``TypeError: unexpected keyword argument`` before a byte is sent —
+#: which is why the router writes ``reasoning.effort`` for this mode and nothing else.
+#:
+#: Captured live on 2026-10-20 (``HERMES_DUMP_REQUESTS=1``, ``--provider openai-codex -m
+#: gpt-6-luna``): the request body carried ``"reasoning": {"effort": "high", "summary": "auto"}``
+#: and ``"include": ["reasoning.encrypted_content"]``, with no ``reasoning_effort`` key anywhere.
+#: Turn-level validation on the three ids this account serves returned HTTP 200 with no model
+#: fallback; ``gpt-6.1-sol-900k`` is **not** served (HTTP 400 "model entitlement").
+CODEX_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
+    model_id: ModelReasoningPolicy(
+        provider="openai-codex",
+        model_id=model_id,
+        wire_parameter="reasoning",
+        accepted_levels=levels,
+        evidence=(
+            f"Declared by the Hermes core for the Responses route: "
+            f"{'CODEX_GPT56_EFFORTS (none, low, medium, high, xhigh, max)' if levels == CODEX_LUNA_EFFORTS else 'CODEX_ASTRA_EFFORTS (low, medium, high, xhigh, max — no none)'} "
+            f"in agent/reasoning_effort.py, selected per model by codex_supported_efforts (the "
+            f"-900k picker aliases share their family prefix). The wire contract was captured live "
+            f"on 2026-10-20 with HERMES_DUMP_REQUESTS=1 for --provider openai-codex: the body "
+            f"carries reasoning.effort, reasoning.summary and include=[reasoning.encrypted_content], "
+            f"and no top-level reasoning_effort."
+        ),
+        omitted=False,
+        decision=(
+            f"The level chosen by Jev is written as reasoning.effort on the Responses body for "
+            f"{model_id}: {'none/low/medium/high/xhigh/max verbatim' if levels == CODEX_LUNA_EFFORTS else 'low/medium/high/xhigh/max verbatim, while none is omitted (that route has no disable level and 400s on it)'}. "
+            "Anything else (minimal, an unknown string) is omitted, never invented and never "
+            "clamped onto another rung. The reasoning object itself is the transport's: its "
+            "summary/include fields and a route the transport judged as taking no reasoning field "
+            "are left exactly as built, so the plugin can add a level but never a field."
+        ),
+    )
+    for model_id, levels in CODEX_MODEL_LEVELS
+}
+
+
 def model_reasoning_policy(
     model_id: Optional[str],
     *,
@@ -418,6 +480,21 @@ def model_reasoning_policy(
             decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
         )
 
+    # openai-codex built-in policy: bare slugs, Responses wire, two effort vocabularies.
+    if provider_key in ("openai-codex", "codex", "openai_codex"):
+        for k, pol in CODEX_REASONING_POLICIES.items():
+            if k == mid or k in mid:
+                return pol
+        return ModelReasoningPolicy(
+            provider=provider_key,
+            model_id=model_id or "",
+            wire_parameter=None,
+            accepted_levels=(),
+            evidence="Model not in the openai-codex catalog; unconfirmed reasoning support.",
+            omitted=True,
+            decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
+        )
+
     # ollama-cloud built-in policy
     if not provider_key or provider_key in ("ollama-cloud", "ollama_cloud"):
         fam = family_for(model_id, provider=provider_key)
@@ -456,6 +533,9 @@ BUILTIN_POLICY_PROVIDERS: tuple[str, ...] = (
     "commandcode",
     "commandcode-chat",
     "commandcode_chat",
+    "openai-codex",
+    "codex",
+    "openai_codex",
 )
 
 
@@ -470,9 +550,9 @@ def resolve_effort(
 
     When ``effort_maps`` specifies a map for ``provider``, it takes precedence and is clamped
     to its declared accepted levels. Built-in routes (opencode-console, opencode-go,
-    commandcode) pass the requested level through only when their policy declares it, or when
-    a declared override maps it onto a declared level; anything else is omitted rather than
-    guessed, clamped or escalated.
+    commandcode, openai-codex) pass the requested level through only when their policy declares
+    it, or when a declared override maps it onto a declared level; anything else is omitted
+    rather than guessed, clamped or escalated.
     """
     if not effort:
         return None

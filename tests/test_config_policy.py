@@ -452,6 +452,81 @@ def test_commandcode_grid_untouched_for_legacy_deciders():
     ]
 
 
+def test_codex_grid_is_the_four_model_catalog_under_the_console_decider():
+    settings = settings_for({"decider": "jev_console"})
+    for provider in ("openai-codex", "codex", "openai_codex"):
+        assert [e.model_id for e in settings.grid_for(provider)] == [
+            "gpt-6-luna",
+            "gpt-6-luna-900k",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-900k",
+        ]
+        effective = settings.effective(None, provider=provider)
+        assert [e.model_id for e in effective.grid] == [
+            "gpt-6-luna",
+            "gpt-6-luna-900k",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-900k",
+        ]
+        # The route's own first entry becomes the configured default, so an off-catalog
+        # ``default_model`` cannot pin a model this route does not serve.
+        assert effective.default_model == "gpt-6-luna"
+
+
+def test_codex_picker_alias_knows_the_wire_id_the_backend_serves():
+    """``-900k`` is a Hermes-side suffix; only an eligible base can carry it on the wire."""
+    settings = settings_for({"decider": "jev_console"})
+    grid = {entry.model_id: entry for entry in settings.grid_for("openai-codex")}
+    assert grid["gpt-6-luna"].wire_model == "gpt-6-luna"
+    assert grid["gpt-6-luna-900k"].wire_model == "gpt-6-luna"
+    # ``gpt-6.1-sol`` is not an eligible base in the core's alias table, so the variant stays
+    # verbatim and fails honestly at the API instead of silently running as another model.
+    assert grid["gpt-6.1-sol-900k"].wire_model == "gpt-6.1-sol-900k"
+
+
+def test_codex_grid_cap_applies_to_operator_grids_without_widening_them():
+    settings = settings_for(
+        {
+            "decider": "jev_console",
+            "grids": {
+                "openai-codex": [
+                    "gpt-6-luna: routine",
+                    "gpt-6.1-sol: hard",
+                    "gpt-6-astra: not authorized",
+                    "gpt-5.6-sol: not authorized",
+                ],
+            },
+        }
+    )
+    # The alias resolves to the same configured grid, and only catalog ids survive.
+    assert [e.model_id for e in settings.grid_for("codex")] == ["gpt-6-luna", "gpt-6.1-sol"]
+
+    # A grid with nothing authorized falls back to the built-in catalog.
+    from grid import CODEX_GRID
+
+    only_outsiders = settings_for(
+        {"decider": "jev_console", "grids": {"openai-codex": ["gpt-6-astra: invented"]}}
+    )
+    assert [e.model_id for e in only_outsiders.grid_for("openai-codex")] == [
+        entry.model_id for entry in CODEX_GRID
+    ]
+
+
+def test_codex_grid_untouched_for_legacy_deciders():
+    settings = settings_for(
+        {"grids": {"openai-codex": ["gpt-6-luna: routine", "kimi-k3: code"]}}
+    )
+    assert [e.model_id for e in settings.grid_for("openai-codex")] == [
+        "gpt-6-luna",
+        "kimi-k3",
+    ]
+    # ... and with no configured grid at all, a legacy decider keeps the global grid.
+    bare = settings_for({})
+    assert [e.model_id for e in bare.grid_for("openai-codex")] == [
+        e.model_id for e in bare.grid
+    ]
+
+
 def test_is_provider_routable_normalises_every_route_alias():
     """A canonical name and any alias of the same route match in both directions."""
     pairs = (
@@ -464,6 +539,10 @@ def test_is_provider_routable_normalises_every_route_alias():
         ("commandcode", "commandcode-chat"),
         ("commandcode", "commandcode_chat"),
         ("commandcode-chat", "commandcode"),
+        ("openai-codex", "codex"),
+        ("openai-codex", "openai_codex"),
+        ("codex", "openai-codex"),
+        ("openai_codex", "codex"),
     )
     for declared, queried in pairs:
         assert settings_for({"routable_providers": [declared]}).is_provider_routable(

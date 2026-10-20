@@ -47,8 +47,47 @@ from .state import last_user_message
 
 logger = logging.getLogger(__name__)
 
-#: Where the routing decision puts the effort on the wire.
+#: Where the routing decision puts the effort, per payload shape (see ``config.ROUTED_API_MODES``).
+#:
+#: ``chat_completions`` takes the level as the top-level ``reasoning_effort``. The Codex Responses
+#: route (``codex_responses``) takes it nested under ``reasoning``: the transport decodes the
+#: params-level ``reasoning_config`` into ``reasoning: {"effort": ...}`` while it *builds* the
+#: body (``agent/transports/codex.py::_reasoning_fields``), and the middleware runs after that
+#: build, so the payload here is already the Responses body. A top-level ``reasoning_effort`` in
+#: it is not a Responses field at all — the SDK call raises ``TypeError: unexpected keyword
+#: argument 'reasoning_effort'`` before a request is sent.
 EFFORT_WIRE_KEY = "reasoning_effort"
+RESPONSES_API_MODE = "codex_responses"
+RESPONSES_REASONING_KEY = "reasoning"
+
+
+def conversation_messages(payload: Any) -> List[Dict[str, Any]]:
+    """The conversation a payload carries, in the chat shape the state builder reads.
+
+    ``chat_completions`` hands the middleware ``messages``. A Responses payload has no
+    ``messages`` at all: the conversation is ``input``, a list of items where a turn is
+    ``{"type": "message", "role": ..., "content": [...]}`` and everything else
+    (``function_call``, ``function_call_output``, ``reasoning``) is a tool or reasoning item with
+    no role. Only role-bearing items are conversation — the same set ``recent_context`` keeps on
+    the chat shape, so tool payloads stay out of the routing state on both wires.
+    """
+    if not isinstance(payload, dict):
+        return []
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        return messages
+    items = payload.get("input")
+    if not isinstance(items, list):
+        return []
+    conversation: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if not role:
+            continue
+        conversation.append({"role": role, "content": item.get("content")})
+    return conversation
 
 
 class Router:
@@ -362,7 +401,17 @@ class Router:
                     self._memo.put_session(session_id, memo)
 
             assert decision is not None
-            routed = self._apply(original_request, decision)
+            # The grid entry knows the id the endpoint actually serves: a picker alias (the Codex
+            # ``-900k`` variants) is stripped by the transport at build time, before this
+            # middleware runs, so writing the alias back would send an id the backend rejects.
+            entry = effective.entry_for(decision.model)
+            routed = self._apply(
+                original_request,
+                decision,
+                api_mode=api_mode,
+                wire_model=entry.wire_model if entry is not None else "",
+            )
+            decision = self._applied_decision(decision, routed, api_mode)
             self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed)
             return {"request": routed, "source": "jev-effort-router", "reason": decision.model}
         except Exception as exc:  # noqa: BLE001 - a router must never break a turn
@@ -415,8 +464,8 @@ class Router:
     def _decide(
         self, settings: Settings, effective: EffectiveSettings, request: Dict[str, Any], where: "_Where"
     ) -> Optional[Decision]:
-        messages = request.get("messages")
-        if not isinstance(messages, list) or not messages or not last_user_message(messages).strip():
+        messages = conversation_messages(request)
+        if not messages or not last_user_message(messages).strip():
             self._record_skip(settings, REASON_SKIPPED_NO_MESSAGE, where)
             return None
 
@@ -440,28 +489,77 @@ class Router:
             return None
         return decision
 
-    def _apply(self, original_request: Dict[str, Any], decision: Decision) -> Dict[str, Any]:
+    def _apply(
+        self,
+        original_request: Dict[str, Any],
+        decision: Decision,
+        *,
+        api_mode: str = "",
+        wire_model: str = "",
+    ) -> Dict[str, Any]:
         """Build the rewritten request from the pre-middleware payload.
 
         Working from ``original_request`` keeps this router idempotent when more than one
         middleware rewrites the same call, and makes "the request is unchanged" literally true
         on the no-route path.
 
-        Only the top-level ``reasoning_effort`` is written. ``reasoning_config`` is a
-        *params-level* input that the provider profile consumes to derive that top-level field
-        (``agent/transports/chat_completions.py::_build_kwargs_from_profile``, then
-        ``plugins/model-providers/ollama-cloud/__init__.py`` which returns only
-        ``reasoning_effort``). It is never a wire kwarg, and leaving it in the final payload
-        makes Ollama reject the entire call with "Completions.create() got an unexpected keyword
-        argument 'reasoning_config'" — a hard turn failure, not a degraded route.
+        On ``chat_completions`` only the top-level ``reasoning_effort`` is written.
+        ``reasoning_config`` is a *params-level* input that the provider profile consumes to
+        derive that top-level field (``agent/transports/chat_completions.py::
+        _build_kwargs_from_profile``, then ``plugins/model-providers/ollama-cloud/__init__.py``
+        which returns only ``reasoning_effort``). It is never a wire kwarg, and leaving it in the
+        final payload makes Ollama reject the entire call with "Completions.create() got an
+        unexpected keyword argument 'reasoning_config'" — a hard turn failure, not a degraded
+        route.
+
+        On ``codex_responses`` the field is nested instead — see :meth:`_apply_responses_reasoning`.
         """
         routed = dict(original_request)
-        routed["model"] = decision.model
+        routed["model"] = wire_model or decision.model
+        if api_mode == RESPONSES_API_MODE:
+            return self._apply_responses_reasoning(routed, decision.effort)
         if decision.effort:
             routed[EFFORT_WIRE_KEY] = decision.effort
         else:
             routed.pop(EFFORT_WIRE_KEY, None)
         return routed
+
+    @staticmethod
+    def _apply_responses_reasoning(routed: Dict[str, Any], effort: Optional[str]) -> Dict[str, Any]:
+        """Rewrite ``reasoning.effort`` on an already-built Responses body.
+
+        The transport decides whether this route takes a reasoning field at all, and emits the
+        object from the session's ``reasoning_config``; a route it judged field-less carries no
+        ``reasoning`` key, and adding one is exactly the 400 class that guard exists to avoid. So
+        the level lands inside an existing object only, and an omitted level removes just the
+        ``effort`` — ``summary``/``include`` are the transport's, not this router's.
+        """
+        reasoning = routed.get(RESPONSES_REASONING_KEY)
+        if not isinstance(reasoning, dict):
+            return routed
+        updated = dict(reasoning)
+        if effort:
+            updated["effort"] = effort
+        else:
+            updated.pop("effort", None)
+        routed[RESPONSES_REASONING_KEY] = updated
+        return routed
+
+    @staticmethod
+    def _applied_decision(decision: Decision, routed: Dict[str, Any], api_mode: str) -> Decision:
+        """The decision as it actually reached the payload.
+
+        A Responses route the transport judged as taking no reasoning field carries no
+        ``reasoning`` object, and this router will not invent one. The audit then reports the
+        level as *not* sent (``effort: null``) while ``effort_requested`` keeps Jev's choice — a
+        null effort is a statement about the wire, never about what the model executed.
+        """
+        if api_mode != RESPONSES_API_MODE or not decision.effort:
+            return decision
+        reasoning = routed.get(RESPONSES_REASONING_KEY)
+        if isinstance(reasoning, dict) and reasoning.get("effort") == decision.effort:
+            return decision
+        return replace(decision, effort=None)
 
     # -- audit -------------------------------------------------------------------
 
