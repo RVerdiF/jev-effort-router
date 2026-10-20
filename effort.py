@@ -12,7 +12,7 @@ reference implementation of the clamping rule ("nearest weaker level, never stro
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 #: Hermes' ladder, low to high. Used only for nearest-weaker arithmetic.
@@ -192,6 +192,10 @@ class ModelReasoningPolicy:
     evidence: str
     omitted: bool
     decision: str
+    #: Declared vendor mapping consulted before the exact-membership test, mirroring the core's
+    #: `DEEPSEEK_V4_OVERRIDES` (``{"xhigh": "max"}``). Only a target that is itself an accepted
+    #: level is honoured; the mapping never adds a level the policy did not declare.
+    overrides: Mapping[str, str] = field(default_factory=dict)
 
 
 #: Explicit reasoning policies for the opt-in OpenCode routes. Support on one provider is never
@@ -222,28 +226,36 @@ OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 #:
 #: Probed on 2026-10-20 against ``POST https://opencode.ai/zen/go/v1/chat/completions`` (the
 #: ``x-opencode-session`` header is mandatory) with ``deepseek-v4.1-flash``: the top-level
-#: ``reasoning_effort`` is the knob this route accepts, and its vocabulary stops at ``high``.
+#: ``reasoning_effort`` is the knob this route accepts, and its vocabulary is the DeepSeek V4 one
+#: the core already drives on this same wire (``low``/``medium``/``high``/``max``, ``xhigh``→``max``).
 OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     "deepseek-v4.1-flash": ModelReasoningPolicy(
         provider="opencode-go",
         model_id="deepseek-v4.1-flash",
         wire_parameter="reasoning_effort",
-        accepted_levels=("low", "medium", "high"),
+        accepted_levels=("low", "medium", "high", "max"),
         evidence=(
             "Probe-confirmed on 2026-10-20 against POST https://opencode.ai/zen/go/v1/chat/completions "
-            "(mandatory x-opencode-session header) for deepseek-v4.1-flash: reasoning_effort=high and "
-            "reasoning_effort=low both returned HTTP 200, and the responses carried reasoning_content plus "
-            "usage.completion_tokens_details.reasoning_tokens. thinking=high returned HTTP 400 because this "
-            "route requires thinking to be an object, so the parameter used is the top-level reasoning_effort. "
-            "This route's vocabulary for the router is low|medium|high: nothing above high is invented or sent."
+            "(mandatory x-opencode-session header) for deepseek-v4.1-flash: reasoning_effort=low, "
+            "reasoning_effort=medium, reasoning_effort=high, reasoning_effort=xhigh and "
+            "reasoning_effort=max all returned HTTP 200, and the accepted responses carried reasoning_content "
+            "plus usage.completion_tokens_details.reasoning_tokens. thinking=high returned HTTP 400 because "
+            "this route requires thinking to be an object, so the parameter used is the top-level "
+            "reasoning_effort. The vocabulary mirrors the core's DeepSeek V4 contract, which "
+            "core/plugins/model-providers/opencode-zen already applies to deepseek-v4* ids on this same "
+            "wire: DEEPSEEK_V4_EFFORTS = (low, medium, high, max) with DEEPSEEK_V4_OVERRIDES = {xhigh: max}. "
+            "An out-of-vocabulary value also returns HTTP 200, so the route does not validate the value: "
+            "the accepted set is the contract, not a 400 boundary."
         ),
         omitted=False,
         decision=(
-            "The level chosen by Jev is written to the wire as reasoning_effort, and only ever within "
-            "low|medium|high: an out-of-vocabulary level (max, xhigh, minimal or anything else) is omitted, "
-            "never invented and never escalated. The probe proves the route accepts the parameter (HTTP 200), "
-            "not that the level is calibrated to a measured reasoning depth."
+            "The level chosen by Jev is written to the wire as reasoning_effort: low/medium/high verbatim, "
+            "max verbatim, and xhigh mapped to max by the declared override — the same mapping the core "
+            "applies on this route. Anything else (minimal, none, an unknown string) is omitted, never "
+            "invented and never clamped. The probe proves the route accepts the parameter (HTTP 200, for an "
+            "invalid level too), not that the level is graded or calibrated to a measured reasoning depth."
         ),
+        overrides={"xhigh": "max"},
     ),
 }
 
@@ -415,8 +427,10 @@ def model_reasoning_policy(
 
 
 #: Providers whose effort contract is a built-in per-model policy rather than a family table.
-#: Their vocabulary is exact: no nearest-weaker clamp, because the Go route's DeepSeek family
-#: would answer ``max`` for ``xhigh`` — a level that wire does not have.
+#: Their vocabulary is exact: the requested level goes out only when the policy declares it, or
+#: when a declared override maps it onto a declared level. No nearest-weaker clamp, because the
+#: family fallback would answer a level the route never declared (``minimal``/``ultra``/an unknown
+#: string would land on some Ollama rung).
 BUILTIN_POLICY_PROVIDERS: tuple[str, ...] = (
     "opencode-console",
     "opencode_console",
@@ -439,8 +453,9 @@ def resolve_effort(
 
     When ``effort_maps`` specifies a map for ``provider``, it takes precedence and is clamped
     to its declared accepted levels. Built-in routes (opencode-console, opencode-go,
-    commandcode) pass the requested level through only when it is one of the levels their
-    policy declares; anything else is omitted rather than guessed, clamped or escalated.
+    commandcode) pass the requested level through only when their policy declares it, or when
+    a declared override maps it onto a declared level; anything else is omitted rather than
+    guessed, clamped or escalated.
     """
     if not effort:
         return None
@@ -465,12 +480,16 @@ def resolve_effort(
             if matched_spec is not None:
                 return _resolve_custom_provider_effort(effort, matched_spec)
 
-    # Built-in opencode/commandcode policy: only an exact accepted level goes out. These wires
-    # do not share the Ollama family vocabulary, and the Go route's DeepSeek family would clamp
-    # `xhigh` up to `max`, which that route does not accept.
+    # Built-in opencode/commandcode policy: only a declared level goes out. These wires do not
+    # share the Ollama family vocabulary, so a level the policy did not declare is omitted
+    # instead of being clamped onto some family rung; a declared override (the Go route's
+    # `xhigh` -> `max`, same as the core's DEEPSEEK_V4_OVERRIDES) is honoured first.
     if provider_key in BUILTIN_POLICY_PROVIDERS:
         requested = str(effort or "").strip().lower()
-        return requested if requested in policy.accepted_levels else None
+        if requested in policy.accepted_levels:
+            return requested
+        mapped = (policy.overrides or {}).get(requested)
+        return mapped if mapped in policy.accepted_levels else None
 
     # Default built-in Ollama:cloud families
     family = family_for(model_id, provider=provider_key)

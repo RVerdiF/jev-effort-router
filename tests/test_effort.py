@@ -174,16 +174,18 @@ def test_opencode_console_explicit_reasoning_policies():
 
 
 def test_opencode_go_explicit_reasoning_policies():
-    """The Go generation model carries its probe-confirmed top-level reasoning_effort."""
+    """The Go generation model carries the core's DeepSeek V4 reasoning contract."""
     for provider_name in ("opencode-go", "opencode_go"):
         for model_id in ("deepseek-v4.1-flash",):
             pol = model_reasoning_policy(model_id, provider=provider_name)
             assert pol.provider == "opencode-go"
             assert pol.model_id == model_id
             assert pol.wire_parameter == "reasoning_effort"
-            assert pol.accepted_levels == ("low", "medium", "high")
+            # The core's DEEPSEEK_V4_EFFORTS / DEEPSEEK_V4_OVERRIDES, not a narrower guess.
+            assert pol.accepted_levels == ("low", "medium", "high", "max")
+            assert dict(pol.overrides) == {"xhigh": "max"}
             assert pol.omitted is False
-            # The evidence names the real probe, and never claims an unverified contract.
+            # The evidence names the real probe, the core contract it mirrors, and the limit of it.
             assert "POST https://opencode.ai/zen/go/v1/chat/completions" in pol.evidence
             assert "x-opencode-session" in pol.evidence
             assert "2026-10-20" in pol.evidence
@@ -192,20 +194,26 @@ def test_opencode_go_explicit_reasoning_policies():
             assert "usage.completion_tokens_details.reasoning_tokens" in pol.evidence
             assert "thinking=high" in pol.evidence
             assert "HTTP 400" in pol.evidence
-            assert "nothing above high is invented or sent" in pol.evidence
+            assert "DEEPSEEK_V4_EFFORTS" in pol.evidence
+            assert "DEEPSEEK_V4_OVERRIDES" in pol.evidence
+            assert "does not validate the value" in pol.evidence
             assert "unconfirmed" not in pol.evidence
             assert "No documented" not in pol.evidence
             assert "reasoning_effort" in pol.decision
-            assert "low|medium|high" in pol.decision
+            assert "xhigh" in pol.decision
             assert "HTTP 200" in pol.decision
 
-            # The decided level goes out verbatim; the policy accepts exactly these three.
-            for lvl in ("low", "medium", "high"):
+            # Every declared level goes out verbatim, `max` included.
+            for lvl in ("low", "medium", "high", "max"):
                 assert resolve_effort(model_id, lvl, provider=provider_name) == lvl
                 assert is_omitted(model_id, lvl, provider=provider_name) is False
 
-    # No escalation and no invented vocabulary: this route has no level above `high`.
-    for lvl in ("max", "xhigh", "minimal", "bogus"):
+    # `xhigh` asks for the top tier, exactly like the core's declared override.
+    assert resolve_effort("deepseek-v4.1-flash", "xhigh", provider="opencode-go") == "max"
+    assert is_omitted("deepseek-v4.1-flash", "xhigh", provider="opencode-go") is False
+
+    # No invented vocabulary and no clamp: anything the policy does not declare is omitted.
+    for lvl in ("minimal", "none", "bogus", "ultra", ""):
         assert resolve_effort("deepseek-v4.1-flash", lvl, provider="opencode-go") is None
         assert is_omitted("deepseek-v4.1-flash", lvl, provider="opencode-go") is True
 
@@ -213,6 +221,28 @@ def test_opencode_go_explicit_reasoning_policies():
     outsider = model_reasoning_policy("kimi-k3", provider="opencode-go")
     assert outsider.omitted is True
     assert resolve_effort("kimi-k3", "high", provider="opencode-go") is None
+
+
+def test_declared_override_cannot_invent_a_level_outside_the_policy(monkeypatch):
+    """An override maps onto a declared level; it is never a way to smuggle a new one out."""
+    import effort as effort_module
+
+    policy = ModelReasoningPolicy(
+        provider="opencode-go",
+        model_id="deepseek-v4.1-flash",
+        wire_parameter="reasoning_effort",
+        accepted_levels=("low", "medium"),
+        evidence="test fixture",
+        omitted=False,
+        decision="test fixture",
+        overrides={"xhigh": "ultra", "high": "medium"},
+    )
+    monkeypatch.setitem(effort_module.OPENCODE_GO_REASONING_POLICIES, "deepseek-v4.1-flash", policy)
+
+    # The override target is undeclared, so nothing is invented or escalated.
+    assert resolve_effort("deepseek-v4.1-flash", "xhigh", provider="opencode-go") is None
+    # A declared target is honoured, including a benign de-escalation.
+    assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-go") == "medium"
 
 
 def test_operator_effort_map_takes_precedence_over_the_go_builtin_policy():
