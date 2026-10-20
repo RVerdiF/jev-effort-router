@@ -426,7 +426,14 @@ class Router:
                 wire_model=wire_model_for(provider, effective, decision.model),
             )
             decision = self._applied_decision(decision, routed, api_mode)
-            self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed)
+            self._record_route(
+                settings,
+                decision,
+                where,
+                api_call_count=api_call_count,
+                replayed=replayed,
+                wire_model=routed.get("model") or decision.model,
+            )
             return {"request": routed, "source": "jev-effort-router", "reason": decision.model}
         except Exception as exc:  # noqa: BLE001 - a router must never break a turn
             logger.warning(
@@ -585,15 +592,22 @@ class Router:
         *,
         api_call_count: Any = 0,
         replayed: bool = False,
+        wire_model: str = "",
     ) -> None:
         # An audit record records what was measured and says ``null`` for what was not. On a
         # replayed turn the distributions, alternatives and effort-choice string were not stored,
         # so the record must present them as absent (`None`) — never as a value copied from a
         # neighbouring field. The confidences stay: they were measured as a pair and re-emitted
         # as that pair.
+        #
+        # ``model`` is the id the *decision* named and ``wire_model`` is the id that went in the
+        # provider's ``model`` field. They differ on the Codex route's ``-900k`` picker aliases,
+        # which the transport strips before the wire: a record that only carried ``model`` would
+        # claim a route that did not happen.
         record: Dict[str, Any] = {
             "event": "route",
             "model": decision.model,
+            "wire_model": wire_model or decision.model,
             "effort": decision.effort,
             "effort_requested": decision.effort_requested,
             "model_choice": decision.model_choice,

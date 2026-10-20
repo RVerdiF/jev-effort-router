@@ -12,7 +12,7 @@ import json
 import pytest
 
 from client import JevClient
-from decider import REASON_LOW_CONFIDENCE
+from decider import REASON_LOW_CONFIDENCE, REASON_SKIPPED_UNKNOWN_MODEL, Decision
 from stubs import (
     ReadTimeout,
     StubContext,
@@ -23,6 +23,7 @@ from stubs import (
     decision_payload,
     ollama_request,
 )
+from catalog import ModelCatalog
 from config import load_settings
 from router import Router
 
@@ -45,6 +46,16 @@ def build(tmp_path, transport, config=None, state=None, catalog=None):
 class _NoCatalog:
     def is_known(self, model_id, provider_prefixes=()):
         return None
+
+
+class _FixedDecision:
+    """A decider whose answer is fixed — used to aim a routing decision at one model."""
+
+    def __init__(self, decision) -> None:
+        self._decision = decision
+
+    def decide(self, messages, effective, *, platform="", provider=""):
+        return self._decision, ""
 
 
 def _ClientWith(transport, settings):
@@ -2088,7 +2099,7 @@ def test_codex_route_is_not_skipped_and_lands_the_level_under_reasoning(tmp_path
     """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=4))]
+        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=3))]
     )
     router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
@@ -2122,7 +2133,7 @@ def test_codex_route_is_not_skipped_and_lands_the_level_under_reasoning(tmp_path
 def test_codex_route_lands_every_decidable_level_on_the_wire(tmp_path, monkeypatch, level, model):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("1", 0.95, level, 0.9, grid_size=4))]
+        [StubResponse(decision_payload("1", 0.95, level, 0.9, grid_size=3))]
     )
     router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
@@ -2148,11 +2159,12 @@ def test_codex_picker_alias_never_reaches_the_wire(tmp_path, monkeypatch):
 
     The transport strips the suffix while *building* the body, before this middleware runs, so a
     router that wrote the picker id back would send a model the endpoint does not know. The audit
-    still records the id Jev chose, because that is the decision that was made.
+    keeps the two apart: ``model`` is the id Jev chose, ``wire_model`` is the id that was sent —
+    the alias buys no capability here, and the record must not imply one.
     """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("2", 0.95, "medium", 0.9, grid_size=4))]
+        [StubResponse(decision_payload("2", 0.95, "medium", 0.9, grid_size=3))]
     )
     router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
@@ -2161,19 +2173,82 @@ def test_codex_picker_alias_never_reaches_the_wire(tmp_path, monkeypatch):
 
     assert result is not None
     assert result["request"]["model"] == "gpt-6-luna"
-    assert router.tail(settings, limit=1)[0]["model"] == "gpt-6-luna-900k"
+    record = router.tail(settings, limit=1)[0]
+    assert record["model"] == "gpt-6-luna-900k"
+    assert record["wire_model"] == "gpt-6-luna"
 
-    # ``gpt-6.1-sol-900k`` is not an eligible alias in the core's table, so it has no wire id:
-    # the router keeps it verbatim and lets the API reject it instead of running another model.
-    transport = StubTransport(
-        [StubResponse(decision_payload("4", 0.95, "medium", 0.9, grid_size=4))]
-    )
-    router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
-    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+def test_codex_route_never_offers_an_id_the_backend_does_not_serve(tmp_path, monkeypatch):
+    """``gpt-6.1-sol-900k`` is not a model here, so it is not an option the route may offer.
+
+    Reproduced against the real ``Router``, ``Settings`` and ``ModelCatalog`` (no network): the
+    default catalog carries three ids, the route allowlist answers ``False`` for the dead one
+    instead of "no evidence", an operator grid naming it is capped away, and a decision that
+    names it anyway leaves the request byte-identical — an unrouted turn, not a 400.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    settings = load_settings(lambda key, default=None: CODEX_CONFIG.get(key, default))
+    catalog = ModelCatalog(cache_path=tmp_path / "absent-cache.json")
+
+    expected = ["gpt-6-luna", "gpt-6-luna-900k", "gpt-6.1-sol"]
+    assert [entry.model_id for entry in settings.grid_for("openai-codex")] == expected
     assert (
-        codex_route(router, turn_id="codex-sol", session_id="codex-sol")["request"]["model"]
-        == "gpt-6.1-sol-900k"
+        catalog.is_known("gpt-6.1-sol-900k", provider="openai-codex", decider="jev_console")
+        is False
     )
+
+    # An operator grid naming the dead id cannot reintroduce it: the allowlist cap drops it, and
+    # a grid the cap empties falls back to the route's own catalog.
+    capped = load_settings(
+        lambda key, default=None: {
+            "decider": "jev_console",
+            "routable_providers": ["openai-codex"],
+            "grids": {"openai-codex": ["gpt-6.1-sol-900k: big reasoning"]},
+        }.get(key, default)
+    )
+    assert [
+        entry.model_id for entry in capped.effective(None, provider="openai-codex").grid
+    ] == expected
+
+    # And a decision that names it anyway is refused before it can reach the provider.
+    dead = Decision(
+        model="gpt-6.1-sol-900k",
+        effort="medium",
+        effort_requested="medium",
+        model_confidence=0.99,
+        effort_confidence=0.9,
+        model_choice="4",
+        effort_choice="medium",
+    )
+    router = Router(
+        lambda: settings,
+        get_state=lambda: StubState(tmp_path),
+        client_factory=lambda _settings: _FixedDecision(dead),
+        catalog=catalog,
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+    request = codex_request(model="gpt-6-luna")
+
+    assert (
+        router.on_llm_request(
+            request,
+            dict(request),
+            turn_id="codex-dead",
+            session_id="codex-dead",
+            platform="cli",
+            model="gpt-6-luna",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+            api_call_count=0,
+            api_request_id="codex-dead:api:0",
+        )
+        is None
+    )
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "skip"
+    assert record["reason"] == REASON_SKIPPED_UNKNOWN_MODEL
+    assert record["chosen_model"] == "gpt-6.1-sol-900k"
 
 
 def test_codex_picker_alias_from_an_operator_grid_still_sends_the_base_slug(
@@ -2215,7 +2290,7 @@ def test_codex_reads_the_conversation_from_input_not_messages(tmp_path, monkeypa
     """A Responses body has no ``messages``: the state must be built from ``input``."""
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("1", 0.95, "medium", 0.9, grid_size=4))]
+        [StubResponse(decision_payload("1", 0.95, "medium", 0.9, grid_size=3))]
     )
     router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
@@ -2258,7 +2333,7 @@ def test_codex_payload_without_a_reasoning_object_keeps_the_audit_honest(tmp_pat
     """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("1", 0.95, "high", 0.9, grid_size=4))]
+        [StubResponse(decision_payload("1", 0.95, "high", 0.9, grid_size=3))]
     )
     router, settings = build(tmp_path, transport, config=CODEX_CONFIG)
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
@@ -2279,7 +2354,7 @@ def test_codex_payload_without_a_reasoning_object_keeps_the_audit_honest(tmp_pat
 def test_codex_route_replays_the_same_body_without_a_second_decision(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=4))]
+        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=3))]
     )
     router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
     monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
@@ -2298,7 +2373,7 @@ def test_codex_route_replays_the_same_body_without_a_second_decision(tmp_path, m
 def test_codex_alias_provider_names_the_same_route(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
     transport = StubTransport(
-        [StubResponse(decision_payload("1", 0.95, "low", 0.9, grid_size=4))]
+        [StubResponse(decision_payload("1", 0.95, "low", 0.9, grid_size=3))]
     )
     router, _ = build(tmp_path, transport, config=CODEX_CONFIG)
 

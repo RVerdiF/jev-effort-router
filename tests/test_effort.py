@@ -342,7 +342,7 @@ def test_codex_policies_split_the_two_family_vocabularies():
     top-level kwarg.
     """
     luna = ("gpt-6-luna", "gpt-6-luna-900k")
-    sol = ("gpt-6.1-sol", "gpt-6.1-sol-900k")
+    sol = ("gpt-6.1-sol",)
 
     for provider_name in ("openai-codex", "codex", "openai_codex"):
         for model_id in luna:

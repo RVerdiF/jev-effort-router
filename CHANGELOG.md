@@ -17,7 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `decider: jev_console`, like the Go route; legacy deciders keep the operator's grid.
 - **Opt-in `openai-codex` (ChatGPT OAuth) generation route.** A new provider (`openai-codex`, aliases
   `codex` / `openai_codex`) with its own catalog, `CODEX_GRID`: `gpt-6-luna`, `gpt-6-luna-900k`,
-  `gpt-6.1-sol`, `gpt-6.1-sol-900k`. It is the first route whose payload is a **Responses API** body
+  `gpt-6.1-sol`. It is the first route whose payload is a **Responses API** body
   (`api_mode="codex_responses"`), so `ROUTED_API_MODES` now carries that mode and the router grew the two
   functions that shape implies: `conversation_messages()` reads the conversation from `input` when there
   is no `messages`, and `_apply()` writes the level as **`reasoning.effort`** inside the `reasoning`
@@ -30,7 +30,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `_GRID_ALIASES` gives both aliases the same routability. Declared vocabularies are the core's:
   `CODEX_GPT56_EFFORTS` (`none`/`low`/`medium`/`high`/`xhigh`/`max`) for the Luna ids and
   `CODEX_ASTRA_EFFORTS` (`low`/`medium`/`high`/`xhigh`/`max`, no `none`) for the Sol ids; a `none` request
-  on Sol is omitted rather than sent, because that route rejects a disable with a 400.
+  on Sol is omitted rather than sent, because that route rejects a disable with a 400. `gpt-6.1-sol-900k`
+  is deliberately absent from that catalog: the ChatGPT backend answers HTTP 400 "model entitlement"
+  for it and the core does not treat `gpt-6.1-sol` as an eligible `-900k` base, and an option the
+  endpoint rejects is a dead turn — the exact bug a catalog exists to prevent. An operator grid naming
+  it is capped away by `CODEX_ALLOWLIST`, and a decision that names it anyway is refused with
+  `model_not_in_provider_catalog`, leaving the request untouched.
+- **`wire_model` on route audit records.** Every `event: route` record now carries `wire_model` beside
+  `model`: `model` is the id the decision chose (on the Codex route it may be a `-900k` picker alias)
+  and `wire_model` is the id that actually went into the provider's `model` field. They differ only for
+  those aliases, so a record for `gpt-6-luna-900k` can no longer be read as a 900k-capable route.
 - **`Entry.wire_id`.** The grid can now record the id the provider actually serves when it differs from
   the picker id. The Codex `-900k` variants are Hermes-side aliases whose suffix the transport strips
   while building the body, so the router must write the base slug back rather than the alias. The lookup

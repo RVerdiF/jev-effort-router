@@ -132,16 +132,22 @@ COMMANDCODE_GRID: Tuple[Entry, ...] = (
 
 #: The generation catalog of the ``openai-codex`` route (ChatGPT OAuth, Codex Responses API).
 #:
-#: Two model families, four picker ids. The families differ in what they are good at *and* in
+#: Two model families, three picker ids. The families differ in what they are good at *and* in
 #: the effort vocabulary their route accepts (Luna takes ``none``, Sol does not — see
 #: :data:`effort.CODEX_REASONING_POLICIES`), so they are genuinely different options.
 #:
 #: ``-900k`` is a Hermes-side picker suffix, not a backend id: the transport strips it before
 #: the request goes out (``strip_codex_context_variant_suffix``), and the large window it opts
-#: into is resolved from ``agent.model`` when the session is built. ``wire_id`` records the base
-#: slug the endpoint actually serves. Only ``gpt-6-luna`` is in the core's ``-900k`` eligible
-#: bases (``is_codex_900k_base``); ``gpt-6.1-sol-900k`` is *not* an id this backend lists, so it
-#: carries no ``wire_id`` and fails honestly instead of running as another model.
+#: into is resolved from ``agent.model`` when the session is built. A middleware route runs
+#: after that, so it cannot grant the window: ``gpt-6-luna-900k`` here is a label on the same
+#: wire model, documented as label-only, never as an extra capability.
+#:
+#: ``gpt-6.1-sol-900k`` is **absent on purpose**. The ChatGPT backend does not serve that id
+#: (a live turn answered ``HTTP 400: model entitlement`` and Hermes fell back to another model),
+#: and the core does not consider it a valid ``-900k`` variant either — ``is_codex_900k_base``
+#: admits ``gpt-6-luna`` but not ``gpt-6.1-sol``. An entry the endpoint rejects is the dead-turn
+#: bug this table exists to prevent (see the module docstring), so the route does not offer it
+#: and an operator grid naming it is capped away by :data:`config.CODEX_ALLOWLIST`.
 CODEX_GRID: Tuple[Entry, ...] = (
     Entry(
         "gpt-6-luna",
@@ -155,10 +161,6 @@ CODEX_GRID: Tuple[Entry, ...] = (
     Entry(
         "gpt-6.1-sol",
         "harder reasoning, architecture, planning and long-context analysis",
-    ),
-    Entry(
-        "gpt-6.1-sol-900k",
-        "harder reasoning and long-context analysis over a 900k context window",
     ),
 )
 

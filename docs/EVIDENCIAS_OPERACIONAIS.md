@@ -799,7 +799,7 @@ Declarados pelo core (`core/agent/reasoning_effort.py`), não pelo plugin:
 | Modelo | Conjunto aceito | Constante do core |
 |---|---|---|
 | `gpt-6-luna`, `gpt-6-luna-900k` | `none, low, medium, high, xhigh, max` | `CODEX_GPT56_EFFORTS` |
-| `gpt-6.1-sol`, `gpt-6.1-sol-900k` | `low, medium, high, xhigh, max` (**sem `none`**) | `CODEX_ASTRA_EFFORTS` via `NO_DISABLE_TIER_PREFIXES` |
+| `gpt-6.1-sol` | `low, medium, high, xhigh, max` (**sem `none`**) | `CODEX_ASTRA_EFFORTS` via `NO_DISABLE_TIER_PREFIXES` |
 
 Um pedido de `none` na família Sol é **omitido**, nunca enviado: aquela rota 400 num disable, e o campo
 omitido reabilita o effort default do modelo em vez de desligá-lo. `minimal`, `ultra` e string
@@ -821,6 +821,10 @@ audit `event: route, model: gpt-6-luna-900k, effort: low` e, um segundo depois,
 resolve agora contra `route_catalog(provider)` (o único lugar que sabe o que cada id significa no wire),
 com fallback para a entrada resolvida em providers sem catálogo embutido.
 
+Desde a rodada de revisão, todo registro `event: route` carrega também `wire_model` (o id enviado) ao
+lado de `model` (o id escolhido): um registro de `gpt-6-luna-900k` mostra
+`model: gpt-6-luna-900k, wire_model: gpt-6-luna` e não pode ser lido como rota com janela de 900k.
+
 ### 10.4 `gpt-6.1-sol-900k` não existe neste backend
 
 O card lista `gpt-6.1-sol-900k` como disponível no `provider_models_cache.json` de `openai-codex`. Não
@@ -835,12 +839,16 @@ Verificado ao vivo, duas vezes (com e sem o plugin instalado):
    using gpt-6-luna via openai-codex.
 ```
 
-Um turno roteado para esse id produz o pior resultado possível para a auditoria: registro
-`event: route, model: gpt-6.1-sol-900k, effort: low` seguido de `skip model_not_in_grid` do turno de
-fallback — o audit afirma uma rota que não aconteceu. O id permanece em `CODEX_GRID`/`CODEX_ALLOWLIST`
-(o card o nomeia), mas as grades entregues nos perfis `code` e `job-search` **não** o listam: uma grade
-não deve nomear modelo que o provider não serve (`catalog.py`). Decisão pendente do dono registrada no
-card.
+Antes da remoção, um turno roteado para esse id produzia o pior resultado possível para a auditoria:
+registro `event: route, model: gpt-6.1-sol-900k, effort: low` seguido de `skip model_not_in_grid` do turno
+de fallback — o audit afirmava uma rota que não aconteceu. Na rodada de revisão (P1) o id foi **removido**
+de `CODEX_GRID`/`CODEX_ALLOWLIST`: um catálogo não deve oferecer modelo que o endpoint rejeita. O
+código passa a dar três garantias: (1) a grade da rota tem três ids — `gpt-6-luna`, `gpt-6-luna-900k`,
+`gpt-6.1-sol`; (2) `ModelCatalog.is_known` responde `False` para o id morto, então ele não é "sem
+evidência"; (3) uma grade do operador que o nomeie é capada e cai de volta no catálogo da rota, e uma
+decisão que o nomeie mesmo assim é recusada com `skip model_not_in_provider_catalog`, com a request
+preservada. Antes da remoção, as grades entregues nos perfis `code` e `job-search` já **não** o
+listavam (`catalog.py`). A pendência que resta — o contrato de quatro modelos do card — está no §10.8.
 
 ### 10.5 Config dos perfis `code` e `job-search`
 
@@ -871,12 +879,18 @@ responde `xhigh` com `high`).
 - `tests/test_effort.py`: as duas famílias com seus conjuntos, `none` omitido em Sol, `minimal`/`ultra`/
   string desconhecida omitidos, modelo fora do catálogo omitido; e a config entregue (com um companion
   opt-in lendo o arquivo real via `JEV_PROFILE_CONFIG`).
-- `tests/test_config_policy.py`: catálogo de quatro ids sob `jev_console` (e pelos dois aliases), cap
+- `tests/test_config_policy.py`: catálogo de três ids sob `jev_console` (e pelos dois aliases), cap
   sobre grade do operador, `wire_id` do alias, grade intacta em decider legado, e normalização de alias
   nos dois sentidos.
+- `tests/test_router.py::test_codex_route_never_offers_an_id_the_backend_does_not_serve`: `Router`,
+  `Settings` e `ModelCatalog` reais (sem rede) — o catálogo tem três ids, `is_known` responde `False`
+  para `gpt-6.1-sol-900k`, uma grade do operador que o nomeie é capada (e cai de volta no catálogo da
+  rota), e uma decisão que o nomeie deixa a request intacta, com `skip model_not_in_provider_catalog`.
+- `tests/test_router.py::test_codex_picker_alias_never_reaches_the_wire`: o audit distingue `model`
+  (`gpt-6-luna-900k`, o id escolhido) de `wire_model` (`gpt-6-luna`, o id enviado).
 - Regressão de forma: `chat_completions` continua escrevendo só o `reasoning_effort` top-level.
 
-Suíte completa: `pytest -q tests` → 305 coletados, 296 passam, 9 pulados (os pulos são os probes
+Suíte completa: `pytest -q tests` → 306 coletados, 297 passam, 9 pulados (os pulos são os probes
 opt-in), 0 falhas.
 
 ### 10.7 Verificação end-to-end (branch instalada no perfil `job-search`)
@@ -889,7 +903,10 @@ restrita a um modelo por rodada para forçar cada id (a grade natural só é dec
 | `gpt-6-luna` (grade natural 3 modelos) | `route, model=gpt-6-luna, effort=low, effort_requested=low, model_confidence=1.0` | `model=gpt-6-luna, reasoning.effort=low` | 200 |
 | `gpt-6-luna-900k` | `route, model=gpt-6-luna-900k, effort=low` | `model=gpt-6-luna, reasoning.effort=low` | 200 |
 | `gpt-6.1-sol` | `route, model=gpt-6.1-sol, effort=low` | `model=gpt-6.1-sol, reasoning.effort=low` | 200 |
-| `gpt-6.1-sol-900k` | `route, model=gpt-6.1-sol-900k, effort=low` + `skip model_not_in_grid` | fallback: `model=gpt-6-luna, reasoning.effort=high` | **400** (model entitlement) |
+| `gpt-6.1-sol-900k` — **histórico**, rodada anterior à remoção do catálogo; não é mais opção da rota | `route, model=gpt-6.1-sol-900k, effort=low` + `skip model_not_in_grid` | fallback: `model=gpt-6-luna, reasoning.effort=high` | **400** (model entitlement) |
+
+A última linha é histórica: foi medida **antes** de o id ser removido de `CODEX_GRID`; `gpt-6.1-sol-900k`
+não é mais opção da rota (ver §10.4).
 
 Turno natural com a grade de três modelos e loop de ferramentas (`gpt-6.1-sol`, 41 s, 4 chamadas):
 
@@ -910,9 +927,10 @@ com a grade de três modelos. `hermes plugin update` pós-merge continua sendo e
 ### 10.8 Limitações e pendências
 
 - **Os `-900k` como opção de grade não mudam o wire.** Escolher `gpt-6-luna-900k` em vez de `gpt-6-luna`
-  produz o mesmo corpo; a diferença de janela é decidida em `agent.model` na construção da sessão. Como
-  opção de roteamento, os dois ids são indistinguíveis — o card os pede, a implementação os registra e o
-  audit os nomeia, mas nenhum efeito além do rótulo foi medido. Pendente de decisão do dono (com o §10.4).
+  produz o mesmo corpo; a diferença de janela é decidida em `agent.model` na construção da sessão. O
+  catálogo hoje carrega só `gpt-6-luna-900k` como rótulo (o `gpt-6.1-sol-900k` saiu por não ser
+  servido — §10.4), e o contrato de quatro modelos do card não pode ser cumprido: um id não é servido e
+  o sufixo não concede nada a partir do middleware. Pendente de decisão do dono.
 - **`none` na família Sol é contrato do core, não probe desta rodada.** O card pede que `none` nunca seja
   enviado; o teste prova que o plugin o omite. O 400 em si vem da declaração do core (`NO_DISABLE_TIER_PREFIXES`,
   live 2026-09-29) — não houve POST com `reasoning.effort: "none"` em `gpt-6.1-sol` nesta rodada.

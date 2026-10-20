@@ -452,21 +452,19 @@ def test_commandcode_grid_untouched_for_legacy_deciders():
     ]
 
 
-def test_codex_grid_is_the_four_model_catalog_under_the_console_decider():
+def test_codex_grid_is_the_three_model_catalog_under_the_console_decider():
     settings = settings_for({"decider": "jev_console"})
     for provider in ("openai-codex", "codex", "openai_codex"):
         assert [e.model_id for e in settings.grid_for(provider)] == [
             "gpt-6-luna",
             "gpt-6-luna-900k",
             "gpt-6.1-sol",
-            "gpt-6.1-sol-900k",
         ]
         effective = settings.effective(None, provider=provider)
         assert [e.model_id for e in effective.grid] == [
             "gpt-6-luna",
             "gpt-6-luna-900k",
             "gpt-6.1-sol",
-            "gpt-6.1-sol-900k",
         ]
         # The route's own first entry becomes the configured default, so an off-catalog
         # ``default_model`` cannot pin a model this route does not serve.
@@ -479,9 +477,10 @@ def test_codex_picker_alias_knows_the_wire_id_the_backend_serves():
     grid = {entry.model_id: entry for entry in settings.grid_for("openai-codex")}
     assert grid["gpt-6-luna"].wire_model == "gpt-6-luna"
     assert grid["gpt-6-luna-900k"].wire_model == "gpt-6-luna"
-    # ``gpt-6.1-sol`` is not an eligible base in the core's alias table, so the variant stays
-    # verbatim and fails honestly at the API instead of silently running as another model.
-    assert grid["gpt-6.1-sol-900k"].wire_model == "gpt-6.1-sol-900k"
+    # ``gpt-6.1-sol-900k`` is not a variant this backend serves (HTTP 400 "model entitlement")
+    # and not an eligible base in the core's alias table, so the route does not carry it at all:
+    # a catalog entry the endpoint rejects is the dead-turn bug the catalog exists to prevent.
+    assert "gpt-6.1-sol-900k" not in grid
 
 
 def test_codex_grid_cap_applies_to_operator_grids_without_widening_them():

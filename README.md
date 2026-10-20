@@ -95,7 +95,7 @@ Requirements: **Hermes Agent** with the `llm_request` middleware kind (0.21.4 or
 2. **`decider: jev_console` (OpenCode Console)**:
    - Uses OpenCode Console SystemOne API (`https://opencode.ai/inference/systemone/v1/systemone`) with `OPENCODE_CONSOLE_API_KEY`.
    - Decider model: primary `console_jev_model` (`jev-1.13-free`) with automatic fallback iteration to `console_jev_fallback_model` (`jev-1.13`, standard/paid Jev).
-   - Routes generation models: per the owner's route-reconciliation directive (Comment 108), Jev SystemOne operates as decider, while downstream generation of `deepseek-v4.1-flash` is routed via `opencode-go`. While this decider is active the `opencode-go` route is capped to that single model (configured grid entries outside the catalog are dropped, and no choice, fallback, alternative or replay can escape it), and the `opencode-console` route serves only `deepseek-v4.1-flash`. The same opt-in cap applies to the `commandcode` route, whose catalog is the one namespaced id `deepseek/deepseek-v4.1-flash`, and to `openai-codex`, whose catalog is the four `gpt-6*` picker ids. Those three OpenCode/CommandCode catalogs name a single model, so the model question is degenerate there and the decider effectively chooses only the reasoning level; the Codex catalog carries two families with different effort ladders. See `docs/routing-grid.md` and `docs/EVIDENCIAS_OPERACIONAIS.md` for details.
+   - Routes generation models: per the owner's route-reconciliation directive (Comment 108), Jev SystemOne operates as decider, while downstream generation of `deepseek-v4.1-flash` is routed via `opencode-go`. While this decider is active the `opencode-go` route is capped to that single model (configured grid entries outside the catalog are dropped, and no choice, fallback, alternative or replay can escape it), and the `opencode-console` route serves only `deepseek-v4.1-flash`. The same opt-in cap applies to the `commandcode` route, whose catalog is the one namespaced id `deepseek/deepseek-v4.1-flash`, and to `openai-codex`, whose catalog is the three `gpt-6*` picker ids. Those three OpenCode/CommandCode catalogs name a single model, so the model question is degenerate there and the decider effectively chooses only the reasoning level; the Codex catalog carries two families with different effort ladders. See `docs/routing-grid.md` and `docs/EVIDENCIAS_OPERACIONAIS.md` for details.
 3. **`decider: openai_compatible` (OpenCode Go / Generic)**:
    - Uses OpenAI-compatible chat completions (`https://opencode.ai/zen/go/v1/chat/completions`) with `OPENCODE_GO_API_KEY`.
    - Decider model: `decider_model` (e.g. `deepseek-v4.1-flash`).
@@ -207,7 +207,7 @@ plugins:
               - "gpt-6-luna-900k: general work and coding over a 900k context window (large repos, long documents)"
               - "gpt-6.1-sol: harder reasoning, architecture, planning and long-context analysis"
   ```
-  Its catalog (`CODEX_GRID`) also lists `gpt-6.1-sol-900k`, which the reference profile grids leave out on purpose: the ChatGPT backend does not serve that id (HTTP 400 "model entitlement"), and a grid must not name a model the provider does not have. `-900k` ids are Hermes-side picker aliases — the router sends the base slug and the large window is a session-level setting, not something a middleware route can grant.
+  Its catalog (`CODEX_GRID`) carries exactly the three ids shown above. `gpt-6.1-sol-900k` is deliberately absent: the ChatGPT backend answers HTTP 400 "model entitlement" for it and the core does not treat `gpt-6.1-sol` as a valid `-900k` base, and a grid must not name a model the provider does not serve — an offering the endpoint rejects is a dead turn. An operator grid that names it is capped away by `CODEX_ALLOWLIST`, so Jev can never select it. `-900k` ids are Hermes-side picker aliases — the router sends the base slug and the large window is a session-level setting, not something a middleware route can grant. Route records now carry both `model` (the id Jev chose) and `wire_model` (the id that went into the provider's `model` field), so the audit never claims the alias ran.
 - **Authentication**: `decider_api_key_env` names the environment variable containing the key (e.g. `OPENCODE_GO_API_KEY`). The secret itself is never written to configuration files or audit logs.
 - **Confidence**: For TypeSafe Jev (`jev`), confidence reflects a mathematically calibrated probability distribution. For `openai_compatible`, confidence is an LLM self-reported heuristic score parsed from the model's JSON response, strictly validated to be a finite float in `[0.0, 1.0]`.
 - **Effort verification**: Reasoning effort levels are never guessed. Each opt-in route declares its own contract in `effort.py`: `opencode-go` and `commandcode` both send the decided level as a top-level `reasoning_effort` (`low`/`medium`/`high`/`max`, with `xhigh` mapped onto `max` by the same declared override the Hermes core uses, probe-confirmed on 2026-10-20 against `POST https://opencode.ai/zen/go/v1/chat/completions` and `POST https://api.commandcode.ai/provider/v1/chat/completions` respectively), while `opencode-console` keeps omitting the plugin's own field. On `commandcode` that level rides beside the `extra_body.thinking` toggle the provider profile derives, never instead of it. A level outside a route's declared set (`minimal`, `none`, an unknown string) is omitted rather than clamped, and an operator `effort_maps` entry still overrides the built-in policy. That override is the custom path, not a merge: it clamps to the nearest weaker accepted level, so an entry for a route whose policy already declares the contract replaces the policy's vocabulary and drops its declared override (`xhigh` would answer `high` instead of `max`, and `ultra` would be clamped instead of omitted). Add an entry only when deliberately narrowing a route; for `commandcode` the reference profile carries none.
@@ -327,6 +327,7 @@ One JSONL record per routing attempt, under `<HERMES_HOME>/plugin-data/jev-effor
   "ts": "2026-09-22T19:09:21+00:00",
   "event": "route",
   "model": "kimi-k3",
+  "wire_model": "kimi-k3",
   "effort": "high",
   "effort_requested": "high",
   "model_choice": "2",
@@ -357,6 +358,10 @@ when `decider` is `jev_console`, the OpenAI-compatible id when it is `openai_com
 unless the backend's fallback model answered, in which case it names why the primary was abandoned
 (`upstream_error`, `timeout`, `malformed_answer`). `provider` names the route the record belongs to, the
 same value a skip record carries; route and skip records are told apart by `event`, never by the shape.
+
+`model` is the id the decision chose and `wire_model` is the id actually written into the provider's
+`model` field. They differ only on the Codex `-900k` picker aliases (`model: gpt-6-luna-900k`,
+`wire_model: gpt-6-luna`), so a record can never be read as claiming the alias ran.
 
 ## Development
 

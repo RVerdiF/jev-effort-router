@@ -331,13 +331,17 @@ COMMANDCODE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 CODEX_LUNA_EFFORTS: Tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
 CODEX_SOL_EFFORTS: Tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
-#: ``(model id, accepted levels)`` for the four ids the Codex route serves. A model's family
-#: decides its vocabulary, so the two Sol ids share one set and the two Luna ids share another.
+#: ``(model id, accepted levels)`` for the ids the Codex route serves. A model's family
+#: decides its vocabulary: the Luna ids share one set, ``gpt-6.1-sol`` the other.
+#:
+#: ``gpt-6.1-sol-900k`` is deliberately absent — the backend does not serve that id (HTTP 400
+#: "model entitlement") and the core does not treat it as a valid ``-900k`` variant, so a policy
+#: for it would document a route that cannot happen. A decision naming it is refused by the
+#: catalog before any effort is resolved.
 CODEX_MODEL_LEVELS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("gpt-6-luna", CODEX_LUNA_EFFORTS),
     ("gpt-6-luna-900k", CODEX_LUNA_EFFORTS),
     ("gpt-6.1-sol", CODEX_SOL_EFFORTS),
-    ("gpt-6.1-sol-900k", CODEX_SOL_EFFORTS),
 )
 
 #: Explicit reasoning policies for the ``openai-codex`` route (ChatGPT OAuth, Responses API).
