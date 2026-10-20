@@ -216,7 +216,7 @@ Isso sustenta rigorosamente a declaração da seção "Effort-to-wire mapping (O
 
 ## 6. Implementação OpenCode Console Jev & Catálogo de 2 Modelos (`t_6ec7a94d`)
 
-> **Superado pela seção 7 (`t_14209379`)**: o catálogo Go passou a ter **um único modelo**, o MiMo foi removido de todas as grades/allowlists e a rota `commandcode` foi adicionada. As afirmações de 6.1–6.4 registram o estado entregue no card `t_6ec7a94d` e ficam mantidas como histórico; a verdade corrente está na seção 7.
+> **Superado pela seção 7 (`t_14209379`)**: o catálogo Go passou a ter **um único modelo**, o MiMo foi removido de todas as grades/allowlists e a rota `commandcode` foi adicionada. As afirmações de 6.1–6.4 registram o estado entregue no card `t_6ec7a94d` e ficam mantidas como histórico; a verdade corrente está na seção 7. A política de reasoning do Go registrada em 6.1/6.4 também foi superada, agora pela **seção 8** (`t_a0a4c186`).
 
 ### 6.1 Resumo Normativo e Decisões de Escopo
 - **Diretiva do Dono & Separação de Rotas (Console Decider / Go Geração)**: O dono do produto definiu formalmente a escolha do ID padrão `mimo-v2.6-flash` (não-free) na geração, rejeitando estritamente a variante `mimo-v2.6-flash-free` e suas condições de retenção/treinamento de dados. Conforme orientado pelo dono (Comentário 108), as fontes oficiais distinguem claramente os produtos:
@@ -303,8 +303,8 @@ Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterio
    - `test_opencode_console_distinguishes_logical_effort_from_wire`: valida que o Jev decide esforço lógico (`effort_requested='high'`), enquanto o wire payload omite `reasoning_effort` e o log de auditoria registra `effort=null`, sem alegar execução downstream.
 5. **`tests/test_effort.py`**:
    - `test_opencode_console_explicit_reasoning_policies`: valida a política explícita (`ModelReasoningPolicy`) do `deepseek-v4.1-flash` no Console, com `omitted=True`, `wire_parameter=None` e decisão registrada.
-   - `test_opencode_go_explicit_reasoning_policies`: valida a política explícita dos dois modelos Go (`omitted=True`, `wire_parameter=None`) e a omissão de um modelo fora do catálogo Go.
-   - `test_opencode_go_effort_cannot_be_inferred_from_other_providers`: comprova que o mesmo modelo honra o nível em `ollama-cloud` e continua omitido em `opencode-go`.
+   - `test_opencode_go_explicit_reasoning_policies`: (**superado pelo §8**) valida a política explícita dos dois modelos Go (`omitted=True`, `wire_parameter=None`) e a omissão de um modelo fora do catálogo Go.
+   - `test_opencode_go_effort_cannot_be_inferred_from_other_providers`: (**superado pelo §8**) comprova que o mesmo modelo honra o nível em `ollama-cloud` e continua omitido em `opencode-go`.
    - `test_opencode_console_effort_cannot_be_inferred_from_other_providers`: comprova que suporte em `ollama-cloud` ou `opencode-go` não é inferido para `opencode-console`.
    - `test_opencode_console_custom_effort_map_overrides_omission`: valida que mapeamentos explícitos em `effort_maps` pelo operador têm precedência e são honrados sem escalada.
 
@@ -313,7 +313,7 @@ Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterio
 | Provedor | Modelo | Esforço Lógico (Jev) | Parâmetro no Wire | Níveis Aceitos | Evidência / Decisão |
 |---|---|---|---|---|---|
 | `opencode-console` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: sem evidência empírica ou contrato no endpoint de geração do console. Não se infere de `opencode-go` ou `ollama-cloud`. Omitido para prevenir HTTP 400. |
-| `opencode-go` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado por modelo**: nenhum contrato documentado no endpoint de geração Go; o probe opt-in histórico (`tests/test_live_probe.py`) não é reutilizado como prova nesta entrega. Omitido, sem escalada. |
+| `opencode-go` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `reasoning_effort` | low, medium, high | **Superado pelo §8** (card `t_a0a4c186`): o probe direto de 2026-10-20 confirmou o parâmetro no endpoint Go; o nível decidido vai no wire e qualquer valor fora de `low`/`medium`/`high` é omitido. |
 | `opencode-go` | `mimo-v2.6-flash` | Sim (`low`/`medium`/`high`) | `None` (omitido) | N/A | **Não confirmado**: modelo multimodal/agentic normal, sem knob de reasoning documentado. Omitido no wire. |
 | `ollama-cloud` | `deepseek-v4.1-flash` | Sim (`low`/`medium`/`high`) | `reasoning_effort` | low, medium, high, max | **Verificado**: Contrato formal Ollama:cloud (`DEEPSEEK_V4_EFFORTS`). |
 | `ollama-cloud` | Outros (Kimi, GLM, etc.) | Sim (`low`/`medium`/`high`) | `reasoning_effort` | Por família | **Verificado**: Mapeamento e clamping estrito sem escalada. |
@@ -346,7 +346,7 @@ Todos os 255 testes offline passaram (evolução sobre os 246 da entrega anterio
 | Provedor | Modelo | Parâmetro no wire | Evidência / Decisão |
 |---|---|---|---|
 | `opencode-console` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: contrato não confirmado no endpoint de geração do Console. |
-| `opencode-go` | `deepseek-v4.1-flash` | `None` (omitido) | Inalterado: nenhum contrato documentado/sondado; nada inferido de outra rota. |
+| `opencode-go` | `deepseek-v4.1-flash` | `reasoning_effort` (`low`/`medium`/`high`) | **Superado pelo §8** (card `t_a0a4c186`): o probe direto de 2026-10-20 confirmou o parâmetro no endpoint Go. Vigente: o nível decidido vai no wire; qualquer valor fora de `low`/`medium`/`high` é omitido. |
 | `commandcode` | `deepseek/deepseek-v4.1-flash` | `None` (o plugin omite o seu) | **Contrato de dois componentes, rastreado offline** (§7.5.1): o profile do provider delega ids `deepseek/*` ao profile DeepSeek, cujo `thinking_toggle_extras(..., always_emit_toggle=True)` emite **tanto** `extra_body.thinking` **quanto** um `reasoning_effort` top-level com o nível clampado ao vocabulário V4. O plugin **remove** um `reasoning_effort` top-level preexistente (o transporte aplica o payload roteado depois dos extras do profile, então ele sobrescreveria a derivação do profile) e **não** alega nível escolhido pelo Jev: se o endpoint CommandCode gradua esse nível é **não confirmado** — o profile prova apenas que o Hermes envia o campo. `effort_requested` registra a escolha; `effort=null` no wire. A política OpenCode **não** é copiada. |
 
 #### 7.5.1 Rastreio do contrato `commandcode` (correção da revisão, rodada 1)
@@ -402,3 +402,95 @@ Testes novos/ajustados que sustentam os critérios:
 Fail-open continua byte-idêntico também fora do pytest: `scripts/verify_fail_open.py` executado com os mesmos sockets bloqueados imprime `ALL FAIL-OPEN CHECKS PASSED!` (3 casos, `res is None`, payload serializado idêntico ao `original_request`).
 
 Nenhuma alteração no core Hermes, nenhum PR upstream, nenhuma inferência paga. A única chamada de rede desta entrega foi o `GET` público e não autenticado de `/models`, usado apenas para confirmar o id.
+
+---
+
+## 8. `reasoning_effort` aplicado no wire do `opencode-go` (`t_a0a4c186`)
+
+Esta seção **supera** a política do Go registrada em 6.1/6.4 e em 7.5: o `opencode-go` deixa de omitir o campo e passa a enviar o nível decidido pelo Jev. Console e `commandcode` continuam omitindo, cada um na sua própria evidência.
+
+### 8.1 Probe que sustenta a mudança (registrado no card, 2026-10-20)
+
+`POST https://opencode.ai/zen/go/v1/chat/completions` (header `x-opencode-session` obrigatório), modelo `deepseek-v4.1-flash`:
+
+| Campo enviado | Resultado |
+|---|---|
+| nenhum | HTTP 200 |
+| `reasoning_effort=high` | HTTP 200 |
+| `reasoning_effort=low` | HTTP 200 |
+| `reasoning={"effort":"high"}` | HTTP 200 |
+| `thinking=high` | HTTP 400 (`thinking must be an object ...`) |
+
+As respostas aceitas trouxeram `reasoning_content` e `usage.completion_tokens_details.reasoning_tokens` (~25–27 tokens), ou seja, o modelo emite reasoning nesse endpoint. Esta entrega **não** executou o probe (nenhuma chamada de rede foi feita); ela consome a evidência coletada no card e a registra na política.
+
+### 8.2 Política embutida (`effort.py`)
+
+`OPENCODE_GO_REASONING_POLICIES["deepseek-v4.1-flash"]`: `wire_parameter="reasoning_effort"`, `accepted_levels=("low","medium","high")`, `omitted=False`, com `evidence` citando endpoint, data, os HTTP 200, os campos de reasoning da resposta e o HTTP 400 de `thinking`. A `decision` registra que o nível vai no wire, que nada fora de `low|medium|high` é enviado ou escalado, e que o 200 prova aceitação do parâmetro — não profundidade calibrada.
+
+### 8.3 Regra do resolvedor (`resolve_effort`)
+
+Ordem efetiva: (1) `effort_maps` do operador tem precedência e mantém o clamp existente para o nível mais fraco; (2) rotas de política embutida (`opencode-console`/`opencode_console`, `opencode-go`/`opencode_go`, `commandcode`/`commandcode-chat`/`commandcode_chat`) passam o nível **somente** se ele for membro exato de `accepted_levels`; (3) `ollama-cloud` segue intocado no `family_for` + `clamp` (Kimi `medium`→`high` continua valendo). O ramo (2) existe porque o fallback de família responderia `max` para `xhigh` — nível que o Go não oferece.
+
+### 8.4 Verificação offline do resolvedor e da config do perfil
+
+```
+$ uv run --offline --with pyyaml python <scratch>/t_a0a4c186_verify.py
+== built-in policy matrix (worktree effort.py) ==
+opencode-go       deepseek-v4.1-flash   wire='reasoning_effort'  accepted=('low', 'medium', 'high') omitted=False
+                  resolve -> {'low': 'low', 'medium': 'medium', 'high': 'high', 'max': None, 'xhigh': None, 'minimal': None, 'bogus': None}
+opencode_go       deepseek-v4.1-flash   wire='reasoning_effort'  accepted=('low', 'medium', 'high') omitted=False
+                  resolve -> {'low': 'low', 'medium': 'medium', 'high': 'high', 'max': None, 'xhigh': None, 'minimal': None, 'bogus': None}
+opencode-console  deepseek-v4.1-flash   wire=None               accepted=() omitted=True
+                  resolve -> {'low': None, 'medium': None, 'high': None, 'max': None, 'xhigh': None, 'minimal': None, 'bogus': None}
+commandcode       deepseek/deepseek-v4.1-flash  wire=None       accepted=() omitted=True
+                  resolve -> {'low': None, 'medium': None, 'high': None, 'max': None, 'xhigh': None, 'minimal': None, 'bogus': None}
+
+== live profile config: effort_maps is parsed and honoured ==
+raw effort_maps from config.yaml: {'opencode-go': {'deepseek-v4.1-flash': {'accepted': ['low', 'medium', 'high']}}}
+settings.effort_maps: {'opencode-go': {'deepseek-v4.1-flash': {'accepted': ('low', 'medium', 'high'), 'overrides': {}}}}
+  config path resolve_effort('low') -> 'low'
+  config path resolve_effort('medium') -> 'medium'
+  config path resolve_effort('high') -> 'high'
+  config path resolve_effort('max') -> 'high'
+
+== omission checks (must stay None) ==
+opencode-console high  -> None
+commandcode high       -> None
+opencode-go kimi-k3    -> None
+opencode-go no effort  -> None
+```
+
+`effort_maps.opencode-go.deepseek-v4.1-flash.accepted: [low, medium, high]` foi adicionado a `~/.hermes/profiles/code/config.yaml` (backup em `<scratch>/code-config.yaml.bak-t_a0a4c186`); o loader lê `accepted` como tupla e `overrides` vazio. Depois de merge + reinstall a entrada é **redundante** (a política embutida já é o default), e é ela que faz o plugin hoje instalado — que só conhece o caminho de `effort_maps` — já aplicar o nível. Diferença a registrar: pelo caminho de `effort_maps` um `max` hipotético desce para `high` (clamp do caminho custom), enquanto a política embutida o omite; na prática `max` não é produzível, porque as criteria do decider e `default_effort`/`max_effort` são validados contra `EFFORT_LEVELS = ("low","medium","high")`.
+
+### 8.5 Testes
+
+Novos/ajustados:
+
+- `test_opencode_go_explicit_reasoning_policies` (`tests/test_effort.py`) — política `omitted=False`, `wire_parameter='reasoning_effort'`, `accepted_levels=('low','medium','high')`, marcadores do probe na `evidence`, `low|medium|high` resolvidos verbatim nos dois aliases (`opencode-go`/`opencode_go`), `max`/`xhigh`/`minimal`/`bogus` → `None`, e modelo fora do catálogo Go continua omitido.
+- `test_operator_effort_map_takes_precedence_over_the_go_builtin_policy` — map do operador vence a política embutida e mantém o clamp (`high` → `low` com `accepted: [low]`).
+- `test_unmapped_provider_defaults_to_omitting_effort` — substitui o teste antigo que afirmava omissão no Go; usa `openrouter` como provider sem política.
+- `test_jev_console_decider_generation_route_go_uses_the_single_model_catalog` (`tests/test_router.py`) — agora exige `request["reasoning_effort"] == "high"`, `record["effort"] == "high"`, `effort_requested == "high"` e `fallback_reasons == []`, preservando uma única chamada ao SystemOne, ausência de mutação in-place e replay sem segunda chamada.
+- `test_opencode_go_route_lands_every_decidable_level_on_the_wire` — parametrizado `low`/`medium`/`high` com `decider: jev_console` + `routable_providers: [opencode-go]`: o campo vai no request e o audit registra o mesmo nível (nunca `null`).
+
+Não regredidos: `test_opencode_console_*` e `test_commandcode_explicit_reasoning_policy` seguem exigindo omissão explícita, e `test_opencode_go_effort_cannot_be_inferred_from_other_providers` continua comprovando que o Go não herda a família Ollama para um modelo fora do catálogo.
+
+### 8.6 Suíte
+
+```text
+$ cd .worktrees/t_a0a4c186
+$ uv sync --offline --extra dev
+$ uv run --offline --extra dev pytest -q
+272 passed, 8 skipped in 0.99s
+
+$ uv run --offline --extra dev pytest -q tests/test_effort.py tests/test_router.py -k "opencode_go or go_route or route_go" -v
+8 passed, 104 deselected in 0.06s
+```
+
+Os 8 skips são os mesmos de sempre (5 do live probe sem `JEV_LIVE_PROBE=1` e 3 de `test_registration.py` condicionados a PyYAML).
+
+### 8.7 Limitações e pendências
+
+- **HTTP 200 não gradua nada:** o próprio §5.3 registra que o endpoint respondeu 200 também para `max`/`xhigh`, e 422 para um nível inválido com a mensagem de upstream indisponível. Logo o 200 prova que o campo é aceito, não que o nível mude a profundidade do raciocínio. Por isso a política envia só os três níveis que o decider oferece e omite o resto.
+- **`thinking` não é usado:** o Go exige objeto (`{type: enabled|disabled}`) e rejeita escalar; o parâmetro aplicado é o top-level `reasoning_effort`.
+- **Verificação end-to-end pós-merge** (plugin reinstalado + turno real com `"effort": "<nível>"` no audit e `reasoning_effort` no request) fica para o dono, porque o merge é dele: nenhum turno real foi executado nesta entrega e nenhuma chamada de rede foi feita.
+

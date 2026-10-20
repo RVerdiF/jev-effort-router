@@ -194,10 +194,10 @@ class ModelReasoningPolicy:
     decision: str
 
 
-#: Explicit reasoning policies for the opt-in OpenCode routes. No model in either catalog has a
-#: documented or probe-confirmed reasoning parameter on its generation endpoint, so the field is
-#: omitted rather than guessed. Support on one provider is never inferred from another: the
-#: Console, Go and Ollama:cloud wires are different contracts.
+#: Explicit reasoning policies for the opt-in OpenCode routes. Support on one provider is never
+#: inferred from another: the Console, Go and Ollama:cloud wires are different contracts, so the
+#: Console model still omits the field while the Go model carries the probe-confirmed top-level
+#: ``reasoning_effort``.
 OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     "deepseek-v4.1-flash": ModelReasoningPolicy(
         provider="opencode-console",
@@ -219,24 +219,32 @@ OPENCODE_CONSOLE_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 }
 
 #: Explicit reasoning policies for the ``opencode-go`` generation model.
+#:
+#: Probed on 2026-10-20 against ``POST https://opencode.ai/zen/go/v1/chat/completions`` (the
+#: ``x-opencode-session`` header is mandatory) with ``deepseek-v4.1-flash``: the top-level
+#: ``reasoning_effort`` is the knob this route accepts, and its vocabulary stops at ``high``.
 OPENCODE_GO_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
-    model_id: ModelReasoningPolicy(
+    "deepseek-v4.1-flash": ModelReasoningPolicy(
         provider="opencode-go",
-        model_id=model_id,
-        wire_parameter=None,
-        accepted_levels=(),
+        model_id="deepseek-v4.1-flash",
+        wire_parameter="reasoning_effort",
+        accepted_levels=("low", "medium", "high"),
         evidence=(
-            "No documented or probe-confirmed reasoning parameter on the opencode-go generation "
-            "endpoint. Support on ollama-cloud or opencode-console cannot be inferred."
+            "Probe-confirmed on 2026-10-20 against POST https://opencode.ai/zen/go/v1/chat/completions "
+            "(mandatory x-opencode-session header) for deepseek-v4.1-flash: reasoning_effort=high and "
+            "reasoning_effort=low both returned HTTP 200, and the responses carried reasoning_content plus "
+            "usage.completion_tokens_details.reasoning_tokens. thinking=high returned HTTP 400 because this "
+            "route requires thinking to be an object, so the parameter used is the top-level reasoning_effort. "
+            "This route's vocabulary for the router is low|medium|high: nothing above high is invented or sent."
         ),
-        omitted=True,
+        omitted=False,
         decision=(
-            f"Explicit omission: neither documentation nor offline probe evidence confirms a reasoning knob for "
-            f"{model_id} on opencode-go. The Jev logical effort stays in effort_requested; the wire field is omitted "
-            f"rather than guessed, and no claim is made that the model executed at that effort."
+            "The level chosen by Jev is written to the wire as reasoning_effort, and only ever within "
+            "low|medium|high: an out-of-vocabulary level (max, xhigh, minimal or anything else) is omitted, "
+            "never invented and never escalated. The probe proves the route accepts the parameter (HTTP 200), "
+            "not that the level is calibrated to a measured reasoning depth."
         ),
-    )
-    for model_id in ("deepseek-v4.1-flash",)
+    ),
 }
 
 #: Explicit reasoning policies for the opt-in ``commandcode`` generation model.
@@ -406,6 +414,20 @@ def model_reasoning_policy(
     )
 
 
+#: Providers whose effort contract is a built-in per-model policy rather than a family table.
+#: Their vocabulary is exact: no nearest-weaker clamp, because the Go route's DeepSeek family
+#: would answer ``max`` for ``xhigh`` — a level that wire does not have.
+BUILTIN_POLICY_PROVIDERS: tuple[str, ...] = (
+    "opencode-console",
+    "opencode_console",
+    "opencode-go",
+    "opencode_go",
+    "commandcode",
+    "commandcode-chat",
+    "commandcode_chat",
+)
+
+
 def resolve_effort(
     model_id: Optional[str],
     effort: Optional[str],
@@ -415,9 +437,10 @@ def resolve_effort(
 ) -> Optional[str]:
     """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field.
 
-    When ``effort_maps`` specifies a map for ``provider``, it takes precedence.
-    For opencode-console and other unmapped providers without verified contracts,
-    reasoning effort is unverified and explicitly omitted (never guessed or escalated).
+    When ``effort_maps`` specifies a map for ``provider``, it takes precedence and is clamped
+    to its declared accepted levels. Built-in routes (opencode-console, opencode-go,
+    commandcode) pass the requested level through only when it is one of the levels their
+    policy declares; anything else is omitted rather than guessed, clamped or escalated.
     """
     if not effort:
         return None
@@ -441,6 +464,13 @@ def resolve_effort(
                     break
             if matched_spec is not None:
                 return _resolve_custom_provider_effort(effort, matched_spec)
+
+    # Built-in opencode/commandcode policy: only an exact accepted level goes out. These wires
+    # do not share the Ollama family vocabulary, and the Go route's DeepSeek family would clamp
+    # `xhigh` up to `max`, which that route does not accept.
+    if provider_key in BUILTIN_POLICY_PROVIDERS:
+        requested = str(effort or "").strip().lower()
+        return requested if requested in policy.accepted_levels else None
 
     # Default built-in Ollama:cloud families
     family = family_for(model_id, provider=provider_key)

@@ -22,6 +22,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **`opencode-go` now applies the decided level as `reasoning_effort`.** The built-in policy for
+  `deepseek-v4.1-flash` on that route stops claiming "no confirmed contract": a probe of
+  `POST https://opencode.ai/zen/go/v1/chat/completions` (mandatory `x-opencode-session` header) on
+  2026-10-20 returned HTTP 200 for `reasoning_effort=high` and `reasoning_effort=low`, with
+  `reasoning_content` and `usage.completion_tokens_details.reasoning_tokens` in the response, while
+  `thinking=high` returned HTTP 400 (`thinking must be an object`). The policy declares
+  `wire_parameter="reasoning_effort"`, `accepted_levels=("low","medium","high")` and `omitted=False`,
+  and `resolve_effort` matches those levels exactly — `max`, `xhigh` or an unknown value is omitted
+  instead of being clamped, because the DeepSeek family fallback would have answered `max` for a route
+  that never offers it. Wire `effort` is no longer `null` on this route; `effort_requested` keeps
+  recording the Jev choice. `opencode-console` and `commandcode` keep omitting the plugin's own field,
+  and an operator `effort_maps` entry still takes precedence. What the probe proves is acceptance
+  (HTTP 200), not calibrated depth — the audit claim stays at "the field was sent".
 - **Every generation catalog now names a single model.** `OPENCODE_GO_MODELS` is
   `("deepseek-v4.1-flash",)`; `mimo-v2.6-flash` was removed from all grids, allowlists and catalogs.
   With one model per route the model question is degenerate by construction and the decider

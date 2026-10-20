@@ -88,10 +88,10 @@ def test_empty_effort_means_omit():
     assert not is_omitted("deepseek-v4.1-flash", "medium")
 
 
-def test_non_ollama_provider_defaults_to_omitting_effort():
-    # For unmapped providers (like opencode-go), effort is omitted (never escalated or guessed)
-    assert resolve_effort("deepseek-v4.1-flash", "medium", provider="opencode-go") is None
-    assert is_omitted("deepseek-v4.1-flash", "medium", provider="opencode-go")
+def test_unmapped_provider_defaults_to_omitting_effort():
+    # A provider with no policy and no operator map never gets a guessed field.
+    assert resolve_effort("deepseek-v4.1-flash", "medium", provider="openrouter") is None
+    assert is_omitted("deepseek-v4.1-flash", "medium", provider="openrouter")
 
 
 def test_per_provider_effort_maps_honoured():
@@ -174,26 +174,60 @@ def test_opencode_console_explicit_reasoning_policies():
 
 
 def test_opencode_go_explicit_reasoning_policies():
-    # The Go generation model declares omission explicitly rather than inheriting a guess.
+    """The Go generation model carries its probe-confirmed top-level reasoning_effort."""
     for provider_name in ("opencode-go", "opencode_go"):
         for model_id in ("deepseek-v4.1-flash",):
             pol = model_reasoning_policy(model_id, provider=provider_name)
             assert pol.provider == "opencode-go"
             assert pol.model_id == model_id
-            assert pol.wire_parameter is None
-            assert pol.accepted_levels == ()
-            assert pol.omitted is True
-            assert "cannot be inferred" in pol.evidence
-            assert "Explicit omission" in pol.decision
-            assert "effort_requested" in pol.decision
+            assert pol.wire_parameter == "reasoning_effort"
+            assert pol.accepted_levels == ("low", "medium", "high")
+            assert pol.omitted is False
+            # The evidence names the real probe, and never claims an unverified contract.
+            assert "POST https://opencode.ai/zen/go/v1/chat/completions" in pol.evidence
+            assert "x-opencode-session" in pol.evidence
+            assert "2026-10-20" in pol.evidence
+            assert "HTTP 200" in pol.evidence
+            assert "reasoning_content" in pol.evidence
+            assert "usage.completion_tokens_details.reasoning_tokens" in pol.evidence
+            assert "thinking=high" in pol.evidence
+            assert "HTTP 400" in pol.evidence
+            assert "nothing above high is invented or sent" in pol.evidence
+            assert "unconfirmed" not in pol.evidence
+            assert "No documented" not in pol.evidence
+            assert "reasoning_effort" in pol.decision
+            assert "low|medium|high" in pol.decision
+            assert "HTTP 200" in pol.decision
+
+            # The decided level goes out verbatim; the policy accepts exactly these three.
             for lvl in ("low", "medium", "high"):
-                assert resolve_effort(model_id, lvl, provider=provider_name) is None
-                assert is_omitted(model_id, lvl, provider=provider_name) is True
+                assert resolve_effort(model_id, lvl, provider=provider_name) == lvl
+                assert is_omitted(model_id, lvl, provider=provider_name) is False
+
+    # No escalation and no invented vocabulary: this route has no level above `high`.
+    for lvl in ("max", "xhigh", "minimal", "bogus"):
+        assert resolve_effort("deepseek-v4.1-flash", lvl, provider="opencode-go") is None
+        assert is_omitted("deepseek-v4.1-flash", lvl, provider="opencode-go") is True
 
     # A model outside the Go catalog is omitted too, never guessed from its Ollama family.
     outsider = model_reasoning_policy("kimi-k3", provider="opencode-go")
     assert outsider.omitted is True
     assert resolve_effort("kimi-k3", "high", provider="opencode-go") is None
+
+
+def test_operator_effort_map_takes_precedence_over_the_go_builtin_policy():
+    """An operator map still wins, and keeps its existing nearest-weaker clamp."""
+    maps = {"opencode-go": {"deepseek-v4.1-flash": {"accepted": ["low"]}}}
+    pol = model_reasoning_policy("deepseek-v4.1-flash", provider="opencode-go", effort_maps=maps)
+    assert pol.wire_parameter == "reasoning_effort"
+    assert pol.omitted is False
+    assert pol.accepted_levels == ("low",)
+    assert "operator" in pol.evidence.lower()
+    # `high` cannot be sent to a route that only declared `low`: clamp down, never escalate.
+    assert (
+        resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-go", effort_maps=maps)
+        == "low"
+    )
 
 
 def test_opencode_go_effort_cannot_be_inferred_from_other_providers():

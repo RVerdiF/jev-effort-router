@@ -199,7 +199,7 @@ plugins:
 - **Route catalogs under `jev_console`**: the example above uses the legacy `openai_compatible` decider, so its `grids.opencode-go` is taken verbatim. With `decider: jev_console` the same route is capped to `deepseek-v4.1-flash`, and the opt-in `commandcode` route is capped to `deepseek/deepseek-v4.1-flash`; any other entry is dropped rather than offered to the decider.
 - **Authentication**: `decider_api_key_env` names the environment variable containing the key (e.g. `OPENCODE_GO_API_KEY`). The secret itself is never written to configuration files or audit logs.
 - **Confidence**: For TypeSafe Jev (`jev`), confidence reflects a mathematically calibrated probability distribution. For `openai_compatible`, confidence is an LLM self-reported heuristic score parsed from the model's JSON response, strictly validated to be a finite float in `[0.0, 1.0]`.
-- **Effort verification**: Reasoning effort levels for custom providers must never be guessed or escalated. If unverified or empty, the router safely omits `reasoning_effort` rather than risking HTTP 400 errors. Verified levels for `deepseek-v4.1-flash` were empirically confirmed via the opt-in probe (`tests/test_live_probe.py`).
+- **Effort verification**: Reasoning effort levels are never guessed or escalated. Each opt-in route declares its own contract in `effort.py`: `opencode-go` now sends the decided level as a top-level `reasoning_effort` (`low`/`medium`/`high`, probe-confirmed on 2026-10-20 against `POST https://opencode.ai/zen/go/v1/chat/completions`), while `opencode-console` and `commandcode` keep omitting the plugin's own field. A level outside a route's declared set (`max`, `xhigh`, anything else) is omitted rather than clamped, and an operator `effort_maps` entry still overrides the built-in policy.
 
 ### Per-surface routing policy (`platform_overrides`)
 
@@ -291,6 +291,12 @@ Model families do not accept the same effort vocabulary, so the plugin carries a
 than sending a generic parameter. It never escalates a level, never invents one, and omits the field rather
 than risk a 400. The notable mapping: Kimi K3's documented set is `low | high | max`, so a `medium` request
 lands on `high`.
+
+The opt-in OpenCode/CommandCode routes do not use that family table: each one has an explicit per-model
+policy, and its declared set is matched exactly (no nearest-weaker clamp, because the Go wire's DeepSeek
+family would otherwise answer `max` for a level the route never offers). `opencode-go` sends the level as
+`reasoning_effort`; `opencode-console` and `commandcode` omit the plugin's own field for the reasons stated
+in [`docs/routing-grid.md`](docs/routing-grid.md).
 
 ## Audit trail
 

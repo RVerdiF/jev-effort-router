@@ -1204,13 +1204,14 @@ def test_jev_console_decider_generation_route_go_uses_the_single_model_catalog(t
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
     # Only one model was ever offered to the decider, so no alternative can exist.
     assert list(transport.calls[0]["json"]["questions"]["model_route"]["criteria"]) == ["1"]
-    # No reasoning field on the Go wire (contract unconfirmed); the logical choice is audited.
-    assert "reasoning_effort" not in result["request"]
+    # The probe-confirmed top-level reasoning_effort carries the decided level on the Go wire.
+    assert result["request"]["reasoning_effort"] == "high"
     record = router.tail(settings, limit=1)[0]
     assert record["event"] == "route"
     assert record["model"] == "deepseek-v4.1-flash"
     assert record["effort_requested"] == "high"
-    assert record["effort"] is None
+    assert record["effort"] == "high"
+    assert record["fallback_reasons"] == []
     assert record["alternatives"] is None
     # Neither payload was mutated in place, and the pre-middleware payload is intact.
     assert json.dumps(request, sort_keys=True) == request_before
@@ -1228,6 +1229,37 @@ def test_jev_console_decider_generation_route_go_uses_the_single_model_catalog(t
     )
     assert replayed is not None
     assert replayed["request"]["model"] == "deepseek-v4.1-flash"
+    assert transport.call_count == 1
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_opencode_go_route_lands_every_decidable_level_on_the_wire(tmp_path, monkeypatch, level):
+    """Each level Jev can decide goes out verbatim as reasoning_effort, and is audited as sent."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    resp_payload = decision_payload(effort_choice=level, effort_confidence=0.9, grid_size=1)
+    transport = StubTransport([StubResponse(resp_payload)])
+    router, settings = build(
+        tmp_path,
+        transport,
+        config={"decider": "jev_console", "routable_providers": ["opencode-go"]},
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = route(
+        router,
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+        base_url="https://opencode.ai/zen/go/v1",
+        turn_id=f"golevel-{level}",
+        session_id="golevel",
+    )
+
+    assert result is not None
+    assert result["request"]["reasoning_effort"] == level
+    record = router.tail(settings, limit=1)[0]
+    assert record["effort_requested"] == level
+    assert record["effort"] == level
+    assert record["fallback_reasons"] == []
     assert transport.call_count == 1
 
 
