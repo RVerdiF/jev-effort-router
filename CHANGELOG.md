@@ -64,6 +64,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **A profile entry for a route that already has a built-in policy no longer hides its contract.**
+  `resolve_effort` resolves a provider that appears in `effort_maps` through the custom path, which
+  takes precedence over the built-in policy and clamps to the nearest weaker accepted level. A
+  `commandcode` entry declaring `accepted: [low, medium, high, max]` therefore answered `xhigh` with
+  `high` (the declared `xhigh`→`max` override was rejected as an escalation) and `ultra` with `max`
+  instead of omitting it, so the delivered configuration contradicted the policy it was meant to
+  enable. The reference profile now declares only `routable_providers` and `grids` for that route — the
+  built-in policy is its single authority — while operator maps of other routes keep their existing
+  clamp semantics. Regression: `test_the_delivered_code_profile_config_holds_the_commandcode_contract`
+  loads the profile settings through `load_settings` and asserts `low`/`medium`/`high`/`max` verbatim,
+  `xhigh`→`max`, omit for `minimal`/`none`/`bogus`/`ultra`/empty, and the untouched `opencode-go`
+  semantics; an opt-in companion test reads a real profile file via `JEV_PROFILE_CONFIG`.
 - **Route audit records name their `provider`.** A `route` record carried the model, the effort and the
   decider but not the route the decision was applied to, while a `skip` record always named it. With
   `opencode-go` and `commandcode` both sending `reasoning_effort` and both serving

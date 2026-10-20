@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+import pytest
+
+from config import load_settings
 from effort import (
     ModelReasoningPolicy,
     OPENCODE_CONSOLE_REASONING_POLICIES,
@@ -346,4 +352,86 @@ def test_opencode_console_custom_effort_map_overrides_omission():
     assert pol.accepted_levels == ("low", "medium")
     assert resolve_effort("deepseek-v4.1-flash", "low", provider="opencode-console", effort_maps=maps) == "low"
     assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-console", effort_maps=maps) == "medium"
+
+
+#: The settings block the ``code`` profile runs
+#: (``plugins.entries.jev-effort-router.settings`` in its ``config.yaml``). ``commandcode``
+#: deliberately carries **no** ``effort_maps`` entry: an operator map is resolved by the custom
+#: path, whose nearest-weaker clamp answers ``xhigh`` with ``high`` and ``ultra`` with ``max``, so
+#: the entry would shadow the built-in contract (``low``/``medium``/``high``/``max``, ``xhigh`` →
+#: ``max``, everything else omitted). The ``opencode-go`` map stays — it is that route's declared
+#: operator vocabulary and keeps the §8 semantics, including its documented clamp.
+DELIVERED_CODE_PROFILE_SETTINGS = {
+    "enabled": True,
+    "decider": "jev_console",
+    "routable_providers": ["opencode-go", "commandcode"],
+    "grids": {
+        "opencode-go": ["deepseek-v4.1-flash: general work, explanation, ordinary coding and tool use"],
+        "commandcode": [
+            "deepseek/deepseek-v4.1-flash: general work, explanation, ordinary coding and tool use"
+        ],
+    },
+    "effort_maps": {
+        "opencode-go": {"deepseek-v4.1-flash": {"accepted": ["low", "medium", "high", "max"]}},
+    },
+}
+
+COMMANDCODE_MODEL = "deepseek/deepseek-v4.1-flash"
+
+
+def _assert_commandcode_contract(settings) -> None:
+    """The route's contract, resolved through the operator's own ``effort_maps``."""
+    maps = settings.effort_maps
+    # Nothing shadows the policy: the built-in contract is the one in force on this route.
+    assert "commandcode" not in maps
+    for level in ("low", "medium", "high", "max"):
+        assert resolve_effort(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) == level
+        assert is_omitted(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) is False
+    # The core's declared override — not the custom path's anti-escalation clamp, which would
+    # answer `high` here.
+    assert resolve_effort(COMMANDCODE_MODEL, "xhigh", provider="commandcode", effort_maps=maps) == "max"
+    # Nothing undeclared is invented, clamped or escalated: the field is omitted.
+    for level in ("minimal", "none", "bogus", "ultra", ""):
+        assert resolve_effort(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) is None
+        assert is_omitted(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) is True
+
+
+def test_the_delivered_code_profile_config_holds_the_commandcode_contract():
+    """Regression for the delivered configuration, not just the bare policy.
+
+    The earlier round proved the contract with the built-in policy alone while the profile also
+    carried an ``effort_maps`` entry for the same route; the entry took precedence and answered
+    ``xhigh`` with ``high`` and ``ultra`` with ``max``. This test loads the settings the profile
+    actually runs, so a shadowing entry fails here.
+    """
+    settings = load_settings(lambda key, default=None: DELIVERED_CODE_PROFILE_SETTINGS.get(key, default))
+
+    # The route is configured with the namespaced model and nothing else.
+    assert [entry.model_id for entry in settings.grid_for("commandcode")] == [COMMANDCODE_MODEL]
+    _assert_commandcode_contract(settings)
+    # The other live route keeps its own operator semantics: this fix changes nothing there.
+    assert (
+        resolve_effort("deepseek-v4.1-flash", "max", provider="opencode-go", effort_maps=settings.effort_maps)
+        == "max"
+    )
+    assert (
+        resolve_effort("deepseek-v4.1-flash", "xhigh", provider="opencode-go", effort_maps=settings.effort_maps)
+        == "high"
+    )
+
+
+def test_the_live_code_profile_config_holds_the_same_commandcode_contract():
+    """Same contract, read from the operator's real profile file when the run points at it.
+
+    Opt-in so the suite stays hermetic: a checkout without that file has nothing to read.
+    ``JEV_PROFILE_CONFIG=/path/to/config.yaml`` enables the check.
+    """
+    raw_path = os.environ.get("JEV_PROFILE_CONFIG", "")
+    if not raw_path or not Path(raw_path).is_file():
+        pytest.skip("JEV_PROFILE_CONFIG not set to a readable profile config")
+    yaml = pytest.importorskip("yaml")
+    block = yaml.safe_load(Path(raw_path).read_text(encoding="utf-8"))["plugins"]["entries"][
+        "jev-effort-router"
+    ]["settings"]
+    _assert_commandcode_contract(load_settings(lambda key, default=None: block.get(key, default)))
 

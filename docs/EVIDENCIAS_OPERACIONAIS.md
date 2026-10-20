@@ -562,7 +562,7 @@ O registro `event: route` não nomeava a rota (só o `skip` nomeava). Com duas r
 
 ### 9.5 Config do perfil `code` (aplicada nesta rodada)
 
-`/home/rafael/hermes/home/profiles/code/config.yaml` (backup em `<scratch>/config.yaml.bak-t_1906910b`, permissões `600` preservadas):
+`/home/rafael/hermes/home/profiles/code/config.yaml` (backup em `<scratch>/live-settings-r2.tgz`, permissões `600` preservadas):
 
 ```yaml
         routable_providers:
@@ -577,41 +577,45 @@ O registro `event: route` não nomeava a rota (só o `skip` nomeava). Com duas r
           opencode-go:
             deepseek-v4.1-flash:
               accepted: [low, medium, high, max]
-          commandcode:
-            deepseek/deepseek-v4.1-flash:
-              accepted: [low, medium, high, max]
 ```
 
-Leitura da config real pelo próprio `load_settings` do worktree:
+**`commandcode` não tem entrada em `effort_maps`** — isso é a correção da revisão, não um esquecimento. `effort.py::resolve_effort` resolve um provider que aparece em `effort_maps` pelo caminho custom (`_resolve_custom_provider_effort`), que **precede** a política embutida (`effort.py:486-498`) e aplica a regra anti-escalada do clamp (`effort.py:125-181`). Com a entrada `accepted: [low, medium, high, max]` que a rodada anterior deixou na config, o contrato efetivo da rota era outro: `xhigh` descia para `high` (na escada `LADDER`, `max` é "mais forte" que `xhigh`, então a override declarada era rejeitada como escalada) e `ultra` descia para `max` em vez de ser omitido. A política embutida é a única autoridade do vocabulário da rota; a config só declara que a rota existe e qual modelo ela serve. O mapa do `opencode-go` fica intocado: é o vocabulário declarado daquela rota (§8), com a semântica de clamp documentada em §8.4 — esta correção não altera override de operador de nenhuma outra rota.
+
+Leitura da config real pelo `load_settings` do worktree (`<scratch>/verify_settings.py`; imprime só chaves de roteamento/effort):
 
 ```text
-$ uv run --offline --with pyyaml python <scratch>/t_1906910b_verify_settings.py
+$ cd .worktrees/t_1906910b && uv run --offline --with pyyaml python <scratch>/verify_settings.py
 routable_providers: ('opencode-go', 'commandcode')
 commandcode routable: True
-commandcode-chat routable: True
-opencode-go routable: True
 commandcode grid: ['deepseek/deepseek-v4.1-flash']
-commandcode effective default_model: deepseek/deepseek-v4.1-flash
+effort_maps providers: ['opencode-go']
+raw effort_maps: {'opencode-go': {'deepseek-v4.1-flash': {'accepted': ['low', 'medium', 'high', 'max']}}}
 
-== effort_maps path (o que a config viva declara) ==
-  commandcode/low: resolve='low'      omitted=False
-  commandcode/medium: resolve='medium' omitted=False
-  commandcode/high: resolve='high'    omitted=False
-  commandcode/max: resolve='max'      omitted=False
-  commandcode/xhigh: resolve='high'   omitted=False
-  commandcode/minimal|none|bogus|<empty>: resolve=None omitted=True
-  commandcode/ultra: resolve='max'    omitted=False
+== policy actually in force for commandcode (with the live effort_maps) ==
+  wire='reasoning_effort' accepted=('low', 'medium', 'high', 'max') overrides={'xhigh': 'max'} omitted=False
+  commandcode/'low'    -> 'low'
+  commandcode/'medium' -> 'medium'
+  commandcode/'high'   -> 'high'
+  commandcode/'max'    -> 'max'
+  commandcode/'xhigh'  -> 'max'
+  commandcode/'ultra'  -> None
+  commandcode/'minimal' -> None
+  commandcode/'none'   -> None
+  commandcode/'bogus'  -> None
+  commandcode/''       -> None
 
-== built-in policy path (sem effort_maps: o que o plugin mergeado responde) ==
-  policy: wire='reasoning_effort' accepted=('low','medium','high','max') overrides={'xhigh':'max'} omitted=False
-  low/medium/high/max -> verbatim; xhigh -> 'max'; minimal/none/bogus/ultra/'' -> None
-
-== sem regressão nas rotas já vivas ==
-  opencode-go/deepseek-v4.1-flash: {'low':'low','medium':'medium','high':'high','max':'max','xhigh':'high'}
-  opencode-console/deepseek-v4.1-flash: todos None
+== sem regressão nas outras rotas ==
+  opencode-go/'low'    -> 'low'
+  opencode-go/'medium' -> 'medium'
+  opencode-go/'high'   -> 'high'
+  opencode-go/'max'    -> 'max'
+  opencode-go/'xhigh'  -> 'high'
+  opencode-go/'ultra'  -> 'max'
+  opencode-console/'low'    -> None
+  opencode-console/'high'   -> None
 ```
 
-A entrada em `effort_maps` tem a mesma função dupla da rodada do Go (§8.4): faz o plugin **hoje instalado** (que só conhece o caminho de `effort_maps`) já honrar a rota, e mantém o perfil explícito. Divergências conhecidas entre os dois caminhos, ambas **inalcançáveis** pelo decider atual (`EFFORT_LEVELS = ("low","medium","high")` valida criteria, `default_effort` e `max_effort`): `xhigh` → `max` pela política embutida e `high` pelo caminho `effort_maps` (regra anti-escalada do caminho custom); `ultra` → omitido pela política embutida e `max` pelo `effort_maps`.
+Ou seja: com a config **e** o código desta branch, `resolve_effort("deepseek/deepseek-v4.1-flash", nível, provider="commandcode")` devolve `low`/`medium`/`high`/`max` verbatim, `xhigh`→`max`, e omite `ultra`/`minimal`/`none`/string desconhecida/vazio. Rollback: restaurar `<scratch>/live-settings-r2.tgz` sobre o arquivo (as permissões `600` viajam no tar).
 
 ### 9.6 Testes
 
@@ -621,6 +625,8 @@ Novos/reescritos:
 - `test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_catalog` (`tests/test_router.py`) — passa a exigir `request["reasoning_effort"] == "high"` e `record["effort"] == "high"` (antes `None`), mantendo grade de um modelo, pergunta de um critério, decider no SystemOne, ausência de mutação in-place e replay sem segunda chamada.
 - `test_commandcode_lands_the_jev_level_beside_the_profile_thinking_toggle` — a regressão do §9.2: payload no formato real do profile, nível do Jev vencendo o derivado (`low`→`high`), `extra_body.thinking` e `reasoning_config` intactos, snapshots byte-idênticos, replay estável.
 - `test_commandcode_route_lands_every_decidable_level_on_the_wire` — parametrizado `low`/`medium`/`high`: o campo vai no request e o audit registra `event=route`, `provider=commandcode`, `decider=jev_console`, `effort` igual ao escolhido.
+- `test_the_delivered_code_profile_config_holds_the_commandcode_contract` (`tests/test_effort.py`) — a regressão que a rodada 1 da revisão exigiu: monta o bloco de settings que o perfil `code` roda (`routable_providers` + `grids`, `effort_maps` só com `opencode-go`), passa pelo `load_settings` e resolve **através desses `effort_maps`**. Exige `low`/`medium`/`high`/`max` verbatim, `xhigh`→`max`, `minimal`/`none`/`bogus`/`ultra`/vazio → omitido, `commandcode` ausente do mapa (nenhum caminho custom sombreando a política), a grade da rota com o id namespaced, e — na mesma config — `opencode-go` preservando a semântica do mapa de operador (`max` verbatim, `xhigh`→`high`). Non-vacuidade verificada: reintroduzindo a entrada `commandcode` no dicionário de settings, o teste falha em `assert "commandcode" not in maps`.
+- `test_the_live_code_profile_config_holds_the_same_commandcode_contract` (`tests/test_effort.py`) — mesma verificação lida do arquivo real do perfil, via `JEV_PROFILE_CONFIG=/caminho/config.yaml` (skip quando não apontado, para a suíte continuar hermética). Executado nesta rodada com `uv run --offline --extra dev --with pyyaml pytest tests/test_effort.py -k "delivered_code_profile or live_code_profile"` → `2 passed`.
 
 ### 9.7 Suíte
 
@@ -628,10 +634,10 @@ Novos/reescritos:
 $ cd .worktrees/t_1906910b
 $ uv sync --offline --extra dev
 $ uv run --offline --extra dev pytest -q
-276 passed, 8 skipped in 0.76s
+277 passed, 9 skipped in 0.87s
 ```
 
-Os 8 skips são os mesmos de sempre (5 do live probe sem `JEV_LIVE_PROBE=1` e 3 de `test_registration.py` condicionados a PyYAML). A linha de base desta branch era `273 passed, 8 skipped`; o delta são os três casos parametrizados novos.
+Os 9 skips são os 8 de sempre (5 do live probe sem `JEV_LIVE_PROBE=1` e 3 de `test_registration.py` condicionados a PyYAML) mais o novo check opt-in do config vivo (`JEV_PROFILE_CONFIG`). A linha de base desta branch era `273 passed, 8 skipped`; o delta são os três casos parametrizados da entrega original mais a regressão de config (+1 passed, +1 skip).
 
 ### 9.8 Verificação end-to-end com o plugin reinstalado
 
@@ -676,20 +682,80 @@ top-level keys: ['extra_body', 'model', 'reasoning_effort']
 
 Esse é o critério "`thinking` + `reasoning_effort` coexistem no wire sem 400" verificado no corpo real, não no duble de teste: o endpoint respondeu 200 com os dois campos presentes, e o nível no wire é o do Jev (`low`) — a sessão do perfil `code` tem `agent.reasoning_effort: xhigh`, que o profile traduziria para um nível mais alto, então o valor observado comprova a precedência do §9.2 em produção. `reasoning_config` não vaza para o wire.
 
-Depois da verificação o clone instalado voltou ao pin (`git checkout main`, HEAD `375d180`, árvore limpa), porque o merge ainda é do dono. Um turno com o plugin **antigo** e a config nova confirma que a transição não quebra nada:
+Depois da verificação o clone instalado voltou ao pin (`git checkout main`, HEAD `375d180`, árvore limpa), porque o merge ainda é do dono.
+
+#### 9.8.1 Janela pré-merge (config corrigida, plugin ainda no pin)
+
+Com a entrada `effort_maps.commandcode` removida (§9.5), o plugin **instalado** (`main`, `375d180`) ainda aplica a política antiga da rota, que a omite (`omitted=True`); e `router.py::_apply` remove o `reasoning_effort` do payload quando a decisão não traz nível. Medido, não inferido — turno real com a config nova e o plugin velho:
+
+```text
+$ hermes -p code --provider commandcode -m deepseek/deepseek-v4.1-flash chat -q "Reply with only: ok"
+ok  (session 20261020_101510_4401ee)
+```
 
 ```json
-{"ts": "2026-10-20T13:05:42+00:00", "event": "route", "model": "deepseek/deepseek-v4.1-flash",
- "effort": "low", "effort_requested": "low", "decider": "jev_console", "replayed": false,
+{"ts": "2026-10-20T13:15:13+00:00", "event": "route", "model": "deepseek/deepseek-v4.1-flash",
+ "effort": null, "effort_requested": "low", "decider": "jev_console", "replayed": false,
+ "turn_id": "20261020_101510_4401ee:20261020_101510_4401ee:5466ae08",
  "platform": "cli", "api_call_count": 1}
 ```
 
-Ou seja: enquanto o merge não acontece a rota funciona pelo caminho `effort_maps` (sem a chave `provider`, que chega com a política embutida). Após o merge + `hermes plugin update`, a política embutida assume e a entrada em `effort_maps` passa a ser redundante (mas inofensiva).
+Corpo enviado (`HERMES_DUMP_REQUESTS=1`, session `20261020_101541_42895e`):
+
+```text
+url: https://api.commandcode.ai/provider/v1/chat/completions
+model: deepseek/deepseek-v4.1-flash
+reasoning_effort: <absent>
+extra_body: {"thinking": {"type": "enabled"}}
+reasoning_config present: False
+top-level keys: ['extra_body', 'model']
+```
+
+O turno continua válido (HTTP 200, `thinking` presente), mas sem nível no wire: é o custo explícito de retirar o mapa que sombreava o contrato, e ele só existe enquanto o merge não acontece. A janela fecha com o merge + `hermes plugin update`; o rollback (§9.5) restaura o tar e, com ele, o nível `low` pelo caminho custom.
+
+#### 9.8.2 Com o código da branch instalado e a config corrigida
+
+O mesmo clone foi apontado para o commit da branch (`git fetch <worktree> wt/t_1906910b`, `git checkout -B check-t_1906910b FETCH_HEAD`, head `34132ad`) e o turno repetido:
+
+```text
+$ HERMES_DUMP_REQUESTS=1 hermes -p code --provider commandcode -m deepseek/deepseek-v4.1-flash chat -q "Reply with only: ok"
+ok  (session 20261020_101657_2a77f0)
+```
+
+Audit (registro integral, conteúdo de mensagem ausente por padrão):
+
+```json
+{"ts": "2026-10-20T13:17:01+00:00", "event": "route", "model": "deepseek/deepseek-v4.1-flash",
+ "effort": "low", "effort_requested": "low", "model_choice": "1", "provider": "commandcode",
+ "effort_choice": "low", "model_confidence": 1.0, "effort_confidence": 1.0,
+ "model_probabilities": {"1": 1.0}, "effort_probabilities": {"low": 1.0, "medium": 0.0, "high": 0.0},
+ "alternatives": null, "latency_ms": 666, "fallback_reasons": [], "jev_model": "jev-1.13-free",
+ "decider_fallback_reason": null, "decider": "jev_console", "replayed": false,
+ "turn_id": "20261020_101657_2a77f0:20261020_101657_2a77f0:a3a333d6",
+ "session_id": "20261020_101657_2a77f0",
+ "api_request_id": "20261020_101657_2a77f0:20261020_101657_2a77f0:a3a333d6:api:1",
+ "platform": "cli", "api_call_count": 1}
+```
+
+Corpo de fato enviado:
+
+```text
+url: https://api.commandcode.ai/provider/v1/chat/completions
+model: deepseek/deepseek-v4.1-flash
+reasoning_effort: low
+extra_body: {"thinking": {"type": "enabled"}}
+reasoning_config present: False
+top-level keys: ['extra_body', 'model', 'reasoning_effort']
+```
+
+Com a config corrigida o nível vem da **política embutida** — não existe mais mapa desta rota no caminho custom —, continua sendo o nível do Jev (`low`, e não o derivado da sessão, que tem `agent.reasoning_effort: xhigh`) e coexiste com o `thinking` do profile. O clone voltou ao pin (`git checkout main`, `375d180`, árvore limpa; a branch temporária saiu com `git update-ref -d refs/heads/check-t_1906910b`).
 
 ### 9.9 Limitações e pendências
 
 - **HTTP 200 não gradua nada:** o probe prova que o campo é aceito, não que o nível mude a profundidade do raciocínio. O audit segue afirmando apenas "o campo foi enviado".
 - **`thinking` explícito desabilitado pelo usuário não é reinterpretado:** quando o `reasoning_config` da sessão tem `enabled: false`, o profile emite `thinking: {"type": "disabled"}` e nenhum `reasoning_effort`; o plugin ainda aplica o nível do Jev nesse caso, exatamente como já fazia no `opencode-go` desde o §8 (o plugin é dono do nível, o profile é dono do toggle). Nenhum turno real dessa forma foi executado; o comportamento é o mesmo das duas rotas, não uma divergência nova.
 - **`max` e `xhigh` são contrato, não caminho de produção:** o decider só oferece `low`/`medium`/`high`.
+- **A rota `commandcode` não tem — e não deve ganhar — entrada em `effort_maps`:** qualquer entrada para o provider faz `resolve_effort` resolver pelo caminho custom, cujo clamp anti-escalada responde `xhigh` com `high` e `ultra` com `max`. O vocabulário da rota é a política embutida; a config só declara `routable_providers` e `grids`. A regressão `test_the_delivered_code_profile_config_holds_the_commandcode_contract` falha se a entrada voltar.
+- **A validação estritamente pós-merge/pós-update continua pendente do dono:** o merge e o `hermes plugin update` são dele. O §9.8.2 foi medido com o clone instalado apontado para a branch; repetir o turno depois do update é a única etapa que falta, e até lá o estado vivo é o do §9.8.1 (rota válida, sem nível no wire).
 - **Sessões de cron com `provider: commandcode` deixam de ser puladas:** as 61 ocorrências de `provider_not_routed` no audit do perfil `code` incluem turnos de `platform: cron`, que passam a ser roteados por esta config. É o efeito pedido pelo card (a rota precisava estar em `routable_providers`), registrado aqui porque o alcance não é só o CLI.
 
