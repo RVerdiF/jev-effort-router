@@ -672,6 +672,8 @@ def test_jev_console_decider_happy_path(monkeypatch):
     assert decision.decider == "jev_console"
     assert decision.model == "deepseek-v4.1-flash"
     assert decision.model_confidence == 0.9
+    assert decision.decider_model == "jev-1.13-free"
+    assert decision.decider_fallback_reason is None
 
     assert len(transport.calls) == 1
     call = transport.calls[0]
@@ -708,6 +710,9 @@ def test_jev_console_decider_fallback_to_paid_jev(monkeypatch):
     assert len(transport.calls) == 2
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
     assert transport.calls[1]["json"]["model"] == "jev-1.13"
+    # Provenance: the fallback answered, and the decision says so instead of claiming the primary.
+    assert decision.decider_model == "jev-1.13"
+    assert decision.decider_fallback_reason == "upstream_error"
 
 
 def test_jev_console_decider_missing_api_key(monkeypatch):

@@ -12,6 +12,7 @@ The contract is narrow on purpose:
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from .audit import AuditLog
@@ -309,21 +310,7 @@ class Router:
                 )
                 decision = _decision_from_memo(memo, effort=re_effort)
                 if req_effort != memo.effort_requested:
-                    decision = Decision(
-                        model=decision.model,
-                        effort=decision.effort,
-                        effort_requested=req_effort,
-                        model_confidence=decision.model_confidence,
-                        effort_confidence=decision.effort_confidence,
-                        model_choice=decision.model_choice,
-                        effort_choice=decision.effort_choice,
-                        model_probabilities=decision.model_probabilities,
-                        effort_probabilities=decision.effort_probabilities,
-                        alternatives=decision.alternatives,
-                        latency_ms=decision.latency_ms,
-                        fallback_reasons=decision.fallback_reasons,
-                        decider=decision.decider,
-                    )
+                    decision = replace(decision, effort_requested=req_effort)
             else:
                 fetched = self._decide(settings, effective, request, where)
                 if fetched is None:
@@ -354,6 +341,8 @@ class Router:
                     session_id=session_id,
                     decider_endpoint=settings.base_url_for(decision.decider),
                     decider_model=settings.decider_model_for(decision.decider),
+                    decider_model_used=decision.decider_model,
+                    decider_fallback_reason=decision.decider_fallback_reason,
                     confidence_threshold=effective.confidence_threshold,
                     max_effort=effective.max_effort,
                     decider_fallback_model=(settings.console_jev_fallback_model or "").strip() if decision.decider == "jev_console" else "",
@@ -506,7 +495,12 @@ class Router:
             "alternatives": list(decision.alternatives) if decision.alternatives else None,
             "latency_ms": decision.latency_ms,
             "fallback_reasons": list(decision.fallback_reasons),
-            "jev_model": settings.jev_model,
+            # The decider model that actually produced this decision. Reading it from the decision
+            # (not from ``settings.jev_model``, the legacy OpenRouter id) is what keeps a
+            # ``decider: jev_console`` record from naming a model that was never consulted;
+            # ``decider_fallback_reason`` names why the Console fallback answered when it did.
+            "jev_model": decision.decider_model or settings.decider_model_for(decision.decider),
+            "decider_fallback_reason": decision.decider_fallback_reason,
             "decider": getattr(decision, "decider", settings.decider),
             "replayed": bool(replayed),
         }
@@ -629,5 +623,9 @@ def _decision_from_memo(memo: Memo, effort: Any = _UNSET) -> Decision:
         latency_ms=0,
         fallback_reasons=memo.fallback_reasons,
         decider=getattr(memo, "decider", "jev") or "jev",
+        # Provenance of the replayed decision: the model that answered when the memo was written,
+        # never the currently configured primary (which this replay did not consult).
+        decider_model=memo.decider_model_used or memo.decider_model,
+        decider_fallback_reason=memo.decider_fallback_reason,
         has_effort_confidence=bool(getattr(memo, "has_effort_confidence", False)),
     )

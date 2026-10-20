@@ -311,6 +311,8 @@ One JSONL record per routing attempt, under `<HERMES_HOME>/plugin-data/jev-effor
   "latency_ms": 271,
   "fallback_reasons": [],
   "jev_model": "typesafe/jev-1.13",
+  "decider": "jev",
+  "decider_fallback_reason": null,
   "replayed": false,
   "turn_id": "turn-1",
   "session_id": "s",
@@ -321,6 +323,12 @@ One JSONL record per routing attempt, under `<HERMES_HOME>/plugin-data/jev-effor
 The file is the point: it is what lets you judge over weeks whether the grid routes well, without
 re-running benchmarks by hand. Skipped turns (`event: "skip"`, with a `reason`) are recorded too. The API
 key is never written and the user message only when `include_user_message_in_audit` is explicitly on.
+
+`jev_model` names the decider model that actually produced the record — the Console id (`jev-1.13-free`)
+when `decider` is `jev_console`, the OpenAI-compatible id when it is `openai_compatible` — never the legacy
+`typesafe/jev-1.13`, which only appears on `decider: jev` records. `decider_fallback_reason` is `null`
+unless the backend's fallback model answered, in which case it names why the primary was abandoned
+(`upstream_error`, `timeout`, `malformed_answer`).
 
 ## Development
 

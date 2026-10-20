@@ -83,6 +83,15 @@ class Decision:
     latency_ms: int = 0
     fallback_reasons: Tuple[str, ...] = ()
     decider: str = "jev"
+    #: The decider model that actually produced this decision: the configured primary, or the
+    #: backend's fallback model when the primary failed over. Empty means the backend reported no
+    #: provenance, and a caller must resolve it from the active decider's settings rather than
+    #: assume a model id that was never consulted.
+    decider_model: str = ""
+    #: Why the decider's *fallback model* answered, when it did (``None`` when the primary
+    #: answered, or the backend has no fallback). Kept apart from ``fallback_reasons``, which
+    #: explains a degraded *answer*, not a degraded *backend call*.
+    decider_fallback_reason: Optional[str] = None
     has_effort_confidence: bool = False
 
     @property
@@ -347,6 +356,7 @@ class JevDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=tuple(reasons),
                 decider="jev",
+                decider_model=self._settings.jev_model,
                 has_effort_confidence=answered,
             ),
             None,
@@ -615,6 +625,7 @@ class OpenAICompatibleDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=(),
                 decider="openai_compatible",
+                decider_model=self._settings.decider_model_for(),
                 has_effort_confidence=True,
             ),
             None,
@@ -728,7 +739,15 @@ class JevConsoleDecider(BaseDecider):
                 last_reason = REASON_MALFORMED
                 continue
 
-            dec, reason = self._interpret(data, effective, latency_ms=latency_ms, provider=provider)
+            fallback_answered = bool(fallback_model) and model_name == fallback_model and model_name != primary_model
+            dec, reason = self._interpret(
+                data,
+                effective,
+                latency_ms=latency_ms,
+                provider=provider,
+                decider_model=model_name,
+                fallback_reason=last_reason if fallback_answered else None,
+            )
             if dec is not None:
                 return dec, None
             if reason:
@@ -738,7 +757,14 @@ class JevConsoleDecider(BaseDecider):
         return None, last_reason
 
     def _interpret(
-        self, data: Any, effective: EffectiveSettings, *, latency_ms: int, provider: str = ""
+        self,
+        data: Any,
+        effective: EffectiveSettings,
+        *,
+        latency_ms: int,
+        provider: str = "",
+        decider_model: str = "",
+        fallback_reason: Optional[str] = None,
     ) -> Tuple[Optional[Decision], Optional[str]]:
         if not isinstance(data, dict):
             return None, REASON_MALFORMED
@@ -916,6 +942,8 @@ class JevConsoleDecider(BaseDecider):
                 latency_ms=latency_ms,
                 fallback_reasons=(),
                 decider="jev_console",
+                decider_model=decider_model,
+                decider_fallback_reason=fallback_reason,
                 has_effort_confidence=has_effort,
             ),
             None,

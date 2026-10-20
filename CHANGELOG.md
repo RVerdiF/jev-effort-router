@@ -34,6 +34,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   grades a Jev-chosen level remains unconfirmed (no probe, no paid call), so wire `effort` stays `null`
   while `effort_requested` records the Jev choice. The OpenCode policy is not reused.
 
+### Fixed
+
+- **The audit record names the decider model that actually answered.** `router.py` stamped every route
+  with `settings.jev_model`, the legacy OpenRouter id (`typesafe/jev-1.13`), so a `decider: jev_console`
+  turn — which is answered by `console_jev_model` (`jev-1.13-free`) — was recorded as a model that was
+  never consulted. The record now carries the decision's own `decider_model`, and the new
+  `decider_fallback_reason` names why the Console fallback (`console_jev_fallback_model`) answered when
+  the primary failed over. Provenance survives a memo replay: it is stored with the memo instead of being
+  re-derived from the (unconsulted) active configuration.
+
 ## [0.4.0] - 2026-10-15
 
 ### Added

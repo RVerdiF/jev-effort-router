@@ -46,6 +46,11 @@ class Memo:
     session_id: str = ""
     decider_endpoint: str = ""
     decider_model: str = ""
+    #: The decider model that actually answered, and why the backend's fallback answered when it
+    #: did. Stored so a replayed record keeps the provenance of the turn it replays instead of
+    #: re-reporting the configured primary as if it had been consulted again.
+    decider_model_used: str = ""
+    decider_fallback_reason: Optional[str] = None
     confidence_threshold: float = 0.0
     max_effort: Optional[str] = None
     decider_fallback_model: str = ""
