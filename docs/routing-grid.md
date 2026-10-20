@@ -134,7 +134,8 @@ Rules that follow from the table:
    dropped, and the request goes out with no `reasoning_effort` field at all rather than a 400.
 3. **`none` is a disable, not a rung.** The plugin never routes to a reasoning-off state.
 4. **`max` is not reachable by Jev's three-level question.** It is a valid target only as an override
-   destination (`medium → high` for Kimi K3 is; `xhigh → max` is not reachable at all).
+   destination (`medium → high` for Kimi K3 is; `xhigh → max` is not reachable at all here, and where a
+   route declares it — as the `opencode-go` policy does — only a direct API call can ask for `xhigh`).
 
 This table is the record of what has been verified. A family added later gets its row filled in from a
 live probe before it joins the grid; until then the generic clamp applies and the audit record marks the
