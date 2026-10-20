@@ -62,6 +62,7 @@ In v0.4.0+, the router supports multiple providers declared under `routable_prov
 - **OpenCode Console (`opencode-console`)**: Pinned to its own catalog (`OPENCODE_CONSOLE_GRID`): the one normal generation id the Console list carries, `deepseek-v4.1-flash`.
 - **OpenCode Go generation (`opencode-go`)**: While `decider: jev_console` is active, the route is capped to its one-model catalog (`OPENCODE_GO_GRID`: `deepseek-v4.1-flash`). With a legacy decider (`jev`, `openai_compatible`) the route keeps whatever `grids.<provider>` the operator declared, exactly as before.
 - **CommandCode (`commandcode`)**: Opt-in OpenAI-compatible route with its own one-model catalog (`COMMANDCODE_GRID`: `deepseek/deepseek-v4.1-flash`, the provider's namespaced id). Capped the same way — only while `decider: jev_console` is active; a legacy decider keeps the operator's grid.
+- **OpenAI Codex (`openai-codex`, aliases `codex` / `openai_codex`)**: The ChatGPT OAuth route, which speaks `codex_responses` (the Responses API) rather than `chat_completions`. Its catalog is `CODEX_GRID`, four picker ids across two families. Same opt-in cap as Go and CommandCode.
 
 ### OpenCode Console catalog (`opencode-console`)
 
@@ -69,9 +70,10 @@ In v0.4.0+, the router supports multiple providers declared under `routable_prov
 |---|---|---|---|
 | 1 | `deepseek-v4.1-flash` | the usual choice for general work: everyday writing, explanation, summarising, ordinary coding and tool use; 1M context | The Console's own generation id |
 
-Every generation catalog in this plugin now names **one** model. A decision naming any other model on
-`opencode-console` fails open — the request keeps the model the operator configured — and the same holds
-for the opt-in Go and CommandCode routes below.
+Every OpenCode/CommandCode generation catalog in this plugin names **one** model. A decision naming any
+other model on `opencode-console` fails open — the request keeps the model the operator configured — and
+the same holds for the opt-in Go and CommandCode routes below. The Codex route below is the exception: it
+carries two families, whose own ladders differ.
 
 ### OpenCode Go generation catalog (`opencode-go`, opt-in)
 
@@ -95,6 +97,45 @@ bare `deepseek-v4.1-flash` used by the OpenCode routes is a different one. Neith
 alternative or replayed on this route. The cap mechanics are identical to Go: configured entries outside
 the allowlist are dropped from the effective grid, and a surface policy grid cannot widen it.
 
+### OpenAI Codex generation catalog (`openai-codex`, opt-in)
+
+| # | Model id | Profile line sent to Jev | Scope / Notes |
+|---|---|---|---|
+| 1 | `gpt-6-luna` | general work, coding, explanation and tool use | GPT-6 Luna; ladder `none..max` |
+| 2 | `gpt-6-luna-900k` | general work and coding over a 900k context window (large repos, long documents) | Picker alias of `gpt-6-luna`; wire id is the base slug |
+| 3 | `gpt-6.1-sol` | harder reasoning, architecture, planning and long-context analysis | GPT-6.1 Sol; ladder `low..max` (no `none`) |
+| 4 | `gpt-6.1-sol-900k` | harder reasoning and long-context analysis over a 900k context window | **Not served by this backend** — see below |
+
+Two things about this catalog are easy to get wrong, and both are enforced in code rather than assumed:
+
+- **`-900k` is a Hermes-side picker suffix, not a backend id.** The transport strips it while *building*
+  the body (`agent/transports/codex.py`, `strip_codex_context_variant_suffix`), and the large window it
+  opts into is resolved from `agent.model` when the session is built — a middleware-time route cannot
+  grant it. So `Entry.wire_id` records the id the endpoint actually serves and the router writes **that**,
+  never the alias; an operator `grids.openai-codex` entry carries a description only, which is why the
+  lookup is answered by the catalog (`router.wire_model_for`) and not by the configured grid entry. A grid
+  pinned to `gpt-6-luna-900k` therefore sends `model: gpt-6-luna` — verified live.
+- **`gpt-6.1-sol-900k` is not an id this backend lists.** It is absent from the account's model cache
+  (`provider_models_cache.json` → `openai-codex`) and from the core's `-900k` eligible bases
+  (`agent/model_metadata.py::_CODEX_900K_ELIGIBLE_BASES`, which lists `gpt-6-luna`, `gpt-6-sol`,
+  `gpt-6-astra`, the `gpt-5.6-*` tier bases, `gpt-5.4` and `gpt-daybreak-blue-latest` — not `gpt-6.1-sol`).
+  A live turn against it returns HTTP 400 "model entitlement" and Hermes falls back to another model, so
+  the route is recorded in the audit while the request that answered belonged to a different model. It is
+  in `CODEX_GRID`/`CODEX_ALLOWLIST` because the routing card names it, but the delivered profile grids
+  leave it out: a grid must not name a model the provider does not serve.
+
+Two families, two effort vocabularies:
+
+| Model | Accepted levels | Source |
+|---|---|---|
+| `gpt-6-luna`, `gpt-6-luna-900k` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `CODEX_GPT56_EFFORTS` (`agent/reasoning_effort.py`) |
+| `gpt-6.1-sol`, `gpt-6.1-sol-900k` | `low`, `medium`, `high`, `xhigh`, `max` — **no `none`** | `CODEX_ASTRA_EFFORTS`, reached through `NO_DISABLE_TIER_PREFIXES` |
+
+A `none` request on the Sol family is **omitted**, never sent: that route rejects a disable with a 400, and
+an omitted `reasoning` field re-enables the model's default effort instead of switching it off. This is the
+same rule the rest of this plugin follows — only a declared level goes out, and nothing is invented or
+clamped onto another rung.
+
 #### Gate & Privacy Decision (Owner Directive)
 - **Owner Directive & Separation of Routes**: The owner's route-reconciliation directive (Comment 108) separated the products and endpoints: Jev SystemOne decides, and generation runs on a dedicated provider. The later single-model directive removed the normal MiMo variant from every generation catalog — no route serves MiMo, and `mimo-v2.6-flash-free` is never substituted. As clarified by official documentation and the owner orientation:
   - **Decider Route**: Jev Console operates via SystemOne (`https://opencode.ai/inference/systemone/v1/systemone`) using primary `jev-1.13-free` with automatic fallback to paid `jev-1.13`.
@@ -104,7 +145,8 @@ the allowlist are dropped from the effective grid, and a surface policy grid can
   - `opencode-console` / `deepseek-v4.1-flash`: unconfirmed on the Console generation endpoint. Support on OpenCode Go (`/zen/go/v1`) or Ollama:cloud cannot be inferred.
   - `opencode-go` / `deepseek-v4.1-flash`: **sends** the decided level as the top-level `reasoning_effort`, on a probe of `POST https://opencode.ai/zen/go/v1/chat/completions` (the `x-opencode-session` header is mandatory) run on 2026-10-20: no field → HTTP 200, and `reasoning_effort=low`, `medium`, `high`, `xhigh` and `max` → HTTP 200, while `reasoning={"effort":"high"}` → HTTP 200 and `thinking=high` → HTTP 400 (`thinking must be an object`). Every accepted response carried `reasoning_content` and `usage.completion_tokens_details.reasoning_tokens` (~25–61 tokens across the probe calls), so the model does emit reasoning on this endpoint. The declared set is the one the Hermes core already drives on this same wire for `deepseek-v4*` ids (`core/plugins/model-providers/opencode-zen` → `DEEPSEEK_V4_EFFORTS = (low, medium, high, max)`, `DEEPSEEK_V4_OVERRIDES = {xhigh: max}`): `low`/`medium`/`high`/`max` pass verbatim, `xhigh` is mapped onto `max` by the same declared override, and anything else (`minimal`, `none`, an unknown string) is omitted instead of being clamped or invented. Two limitations stay on the record: the route does **not** validate the value at all (an out-of-vocabulary string also returned HTTP 200, and one sample per level showed no monotonic reasoning-token scaling), so acceptance is not calibration; and the `thinking` object form is not used at all, because the Go route rejects a scalar there.
   - `commandcode` / `deepseek/deepseek-v4.1-flash`: **sends** the decided level as the top-level `reasoning_effort`, on a probe of `POST https://api.commandcode.ai/provider/v1/chat/completions` run on 2026-10-20: `reasoning_effort=low`, `medium`, `high`, `xhigh` and `max` all returned HTTP 200. The route has **two** reasoning components and they now have **two** authors. The `extra_body.thinking` toggle stays with the provider layer: `build_api_kwargs_extras` (`core/plugins/model-providers/commandcode/__init__.py:42-59`) delegates `deepseek/*` ids to the DeepSeek profile (`deepseek/__init__.py:28-43`), whose `thinking_toggle_extras(..., always_emit_toggle=True)` (`core/agent/reasoning_effort.py:197-219`) emits it from the params-level `reasoning_config`. The top-level `reasoning_effort` is the **plugin's**, with the level Jev decided: the Hermes core builds `api_kwargs` from the profile *before* the `llm_request` middleware runs and then uses the middleware payload for the call (`core/agent/turn_api_request.py::build_api_request`), and the routed payload is built from the pre-middleware `original_request` and rewrites only `model` and `reasoning_effort`. The plugin's level therefore lands **after** the profile's derivation — it overrides the level the profile would have sent and leaves the toggle untouched, so the wire carries `thinking: {"type": "enabled"}` **plus** `reasoning_effort: <level chosen by Jev>`, never one at the expense of the other. The declared set is the same DeepSeek V4 contract the core declares (`low`/`medium`/`high`/`max`, `xhigh`→`max`); anything else (`minimal`, `none`, an unknown string) is omitted rather than clamped or invented. The limitation stays on the record: a 200 proves the endpoint **accepts** the field, not that it grades the level or calibrates depth to it.
-  - **Audit Semantics**: Logical effort evaluated by Jev is recorded in audit logs under `effort_requested` and `effort_choice`. Wire `effort` records the value actually put on the wire — the decided level on `opencode-go` and `commandcode`, and `null` on the routes that omit the field (`opencode-console`) — so a `null` is a statement about the wire, never about what the model executed. A route record also names its `provider`, the same key a skip record carries. On `opencode-go` and `commandcode` an HTTP 200 proves the parameter was accepted, not that the level was graded.
+  - `openai-codex` / the four `gpt-6*` ids: **sends** the decided level as **`reasoning.effort`**, not as a top-level `reasoning_effort`. This route speaks the Responses API, so the shape is the opposite of the two above: the transport decodes the params-level `reasoning_config` into `reasoning: {"effort": ..., "summary": "auto"}` **while it builds the body** (`core/agent/transports/codex.py::_reasoning_fields`, called from `build_kwargs`), and the `llm_request` middleware runs *after* that build (`core/agent/turn_api_request.py::build_api_request`) — so the payload the plugin receives is already the Responses body, and a top-level `reasoning_effort` in it is not a Responses field at all (the SDK call raises `TypeError: unexpected keyword argument` before a byte is sent). Captured live with `HERMES_DUMP_REQUESTS=1` (`--provider openai-codex`): the body carried `"reasoning": {"effort": "high", "summary": "auto"}`, `"include": ["reasoning.encrypted_content"]` and no `reasoning_effort` key. The plugin rewrites only `reasoning.effort`; `summary`, `include` and the whole object stay the transport's, and a route the transport judged as taking no reasoning field gets none invented (the audit then reports `effort: null`, with `effort_requested` keeping Jev's choice). Vocabularies are per family — `CODEX_GPT56_EFFORTS` (`none`/`low`/`medium`/`high`/`xhigh`/`max`) for the Luna ids, `CODEX_ASTRA_EFFORTS` (`low`/`medium`/`high`/`xhigh`/`max`, **no `none`**) for the Sol ids — and the two `-900k` ids inherit their base's set through the same slug prefix, exactly as the core's `codex_supported_efforts` does. A `none` request on the Sol family is omitted rather than sent: that route 400s on a disable, and an omitted field re-enables the default effort instead of switching it off.
+  - **Audit Semantics**: Logical effort evaluated by Jev is recorded in audit logs under `effort_requested` and `effort_choice`. Wire `effort` records the value actually put on the wire — the decided level on `opencode-go`, `commandcode` and `openai-codex`, and `null` on the routes that omit the field (`opencode-console`, and any Codex route the transport judged as taking no `reasoning` field) — so a `null` is a statement about the wire, never about what the model executed. A route record also names its `provider`, the same key a skip record carries. On `opencode-go`, `commandcode` and `openai-codex` an HTTP 200 proves the parameter was accepted, not that the level was graded.
   - **Custom Override**: Operators can supply custom `effort_maps` if an endpoint is verified. The map takes precedence over the built-in policy and is applied strictly without escalation. Because it *replaces* the policy's vocabulary rather than extending it, an entry for a route whose policy already declares the contract drops the policy's declared override: `xhigh` then answers with the nearest weaker accepted level instead of `max`, and `ultra` is clamped instead of omitted. Add an entry only when deliberately narrowing a route to a smaller accepted set — the reference profile's `commandcode` route has none, so its built-in policy (and its `xhigh`→`max`) is what runs.
 - **Isolation from the Ollama cache**: The Ollama catalog never inspects or filters models of any opt-in route; and no opt-in route can inherit an Ollama grid entry.
 

@@ -15,6 +15,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   OpenCode id of the same model is a different contract and is rejected on this route. The cap is
   applied by the existing `route_allowlist` / `route_catalog` mechanism and is opt-in under
   `decider: jev_console`, like the Go route; legacy deciders keep the operator's grid.
+- **Opt-in `openai-codex` (ChatGPT OAuth) generation route.** A new provider (`openai-codex`, aliases
+  `codex` / `openai_codex`) with its own catalog, `CODEX_GRID`: `gpt-6-luna`, `gpt-6-luna-900k`,
+  `gpt-6.1-sol`, `gpt-6.1-sol-900k`. It is the first route whose payload is a **Responses API** body
+  (`api_mode="codex_responses"`), so `ROUTED_API_MODES` now carries that mode and the router grew the two
+  functions that shape implies: `conversation_messages()` reads the conversation from `input` when there
+  is no `messages`, and `_apply()` writes the level as **`reasoning.effort`** inside the `reasoning`
+  object the transport built — a top-level `reasoning_effort` is not a Responses field at all, so the SDK
+  call would raise `TypeError: unexpected keyword argument` before a byte was sent. Only `effort` is
+  rewritten; `summary`/`include` stay the transport's, and a route the transport judged as taking no
+  reasoning field gets no object invented (the audit then reports `effort: null` and keeps
+  `effort_requested`, because a null effort is a statement about the wire). The cap is the same opt-in
+  mechanism as Go and CommandCode: `route_allowlist` / `route_catalog` under `decider: jev_console`, and
+  `_GRID_ALIASES` gives both aliases the same routability. Declared vocabularies are the core's:
+  `CODEX_GPT56_EFFORTS` (`none`/`low`/`medium`/`high`/`xhigh`/`max`) for the Luna ids and
+  `CODEX_ASTRA_EFFORTS` (`low`/`medium`/`high`/`xhigh`/`max`, no `none`) for the Sol ids; a `none` request
+  on Sol is omitted rather than sent, because that route rejects a disable with a 400.
+- **`Entry.wire_id`.** The grid can now record the id the provider actually serves when it differs from
+  the picker id. The Codex `-900k` variants are Hermes-side aliases whose suffix the transport strips
+  while building the body, so the router must write the base slug back rather than the alias. The lookup
+  is answered by the route catalog (`router.wire_model_for`) — an operator `grids.<provider>` entry
+  carries a description only, and trusting it was a live-caught bug: a grid pinned to `gpt-6-luna-900k`
+  sent the alias, the backend answered HTTP 400 "model entitlement", and Hermes fell back to another
+  model after the audit had already recorded the route.
 - **Provider alias normalisation in `is_provider_routable`.** One table (`_GRID_ALIASES`) now drives
   both the grid lookups and the routable check, so a canonical name and any alias of the same route
   match in both directions. This also fixes a pre-existing asymmetry: a declared `opencode-go` never

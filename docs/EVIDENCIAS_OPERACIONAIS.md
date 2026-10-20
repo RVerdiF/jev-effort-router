@@ -759,3 +759,166 @@ Com a config corrigida o nível vem da **política embutida** — não existe ma
 - **A validação estritamente pós-merge/pós-update continua pendente do dono:** o merge e o `hermes plugin update` são dele. O §9.8.2 foi medido com o clone instalado apontado para a branch; repetir o turno depois do update é a única etapa que falta, e até lá o estado vivo é o do §9.8.1 (rota válida, sem nível no wire).
 - **Sessões de cron com `provider: commandcode` deixam de ser puladas:** as 61 ocorrências de `provider_not_routed` no audit do perfil `code` incluem turnos de `platform: cron`, que passam a ser roteados por esta config. É o efeito pedido pelo card (a rota precisava estar em `routable_providers`), registrado aqui porque o alcance não é só o CLI.
 
+## 10. Rota `openai-codex` (Codex OAuth / Responses API) (`t_9087219e`)
+
+A rota `openai-codex` não é um chat-completions: o profile fala `api_mode="codex_responses"`
+(`core/plugins/model-providers/openai-codex/__init__.py`), e as duas metades do router assumiam o
+formato antigo — o portão de `api_mode` pulava a rota, o estado era lido de `messages` (o payload
+Responses carrega `input`) e o effort era escrito como `reasoning_effort` top-level, que **não é
+campo da Responses API**. Por isso a rota antiga só aparecia como `provider_not_routed` no audit
+(3 registros antes da instalação desta branch, no perfil `job-search`).
+
+### 10.1 O contrato do wire (capturado, não inferido)
+
+O transporte consome o `reasoning_config` params-level e escreve o objeto `reasoning` **enquanto
+monta o corpo** (`core/agent/transports/codex.py::_reasoning_fields`, chamado de `build_kwargs`), e o
+middleware `llm_request` roda **depois** dessa montagem (`core/agent/turn_api_request.py::build_api_request`).
+Logo o payload que o plugin vê já é o corpo da Responses API. Dump real (`HERMES_DUMP_REQUESTS=1`,
+`--provider openai-codex -m gpt-6-luna`, 2026-10-20) — os campos abaixo são os kwargs da chamada
+`responses.create(...)`, que o SDK serializa no corpo com os mesmos nomes:
+
+```text
+url: https://chatgpt.com/backend-api/codex/responses   (POST)
+model: gpt-6-luna
+reasoning: {"effort": "high", "summary": "auto"}
+include: ["reasoning.encrypted_content"]
+store: false
+reasoning_effort (top-level): ausente
+```
+
+Consequência de projeto: o plugin reescreve **`reasoning.effort`** dentro de um objeto `reasoning` que
+já existe. `summary` e `include` continuam do transporte, e uma rota que ele julgou sem campo de
+reasoning (objeto ausente) não ganha um — inventar o objeto é exatamente a classe de 400 que aquele
+guard evita. Nesse caso o audit registra `effort: null` e mantém `effort_requested`, porque um `effort`
+nulo é uma afirmação sobre o wire, nunca sobre o modelo.
+
+### 10.2 Vocabulário: duas famílias, dois conjuntos
+
+Declarados pelo core (`core/agent/reasoning_effort.py`), não pelo plugin:
+
+| Modelo | Conjunto aceito | Constante do core |
+|---|---|---|
+| `gpt-6-luna`, `gpt-6-luna-900k` | `none, low, medium, high, xhigh, max` | `CODEX_GPT56_EFFORTS` |
+| `gpt-6.1-sol`, `gpt-6.1-sol-900k` | `low, medium, high, xhigh, max` (**sem `none`**) | `CODEX_ASTRA_EFFORTS` via `NO_DISABLE_TIER_PREFIXES` |
+
+Um pedido de `none` na família Sol é **omitido**, nunca enviado: aquela rota 400 num disable, e o campo
+omitido reabilita o effort default do modelo em vez de desligá-lo. `minimal`, `ultra` e string
+desconhecida também são omitidos (sem clamp), como nas demais rotas opt-in.
+
+### 10.3 `-900k` é alias de picker, não id do backend
+
+`strip_codex_context_variant_suffix` (`core/agent/model_metadata.py`) remove o sufixo antes do wire, e a
+janela grande é resolvida de `agent.model` na construção da sessão — **um roteamento no middleware não
+consegue concedê-la**. Dois turnos reais, `-m gpt-6-luna` e `-m gpt-6-luna-900k`, produzem corpos
+idênticos no que importa (`model: gpt-6-luna`, mesmo `reasoning`); só mudam `session_id`,
+`x-client-request-id`/`prompt_cache_key` e a linha `Model:` do system prompt.
+
+Por isso `Entry` ganhou `wire_id`: o catálogo registra o id que o endpoint realmente serve e o router
+escreve **esse**. A primeira versão lia o `wire_id` da entrada da grade efetiva — e `grids.<provider>`
+vindo da config carrega só descrição, então o alias ia inteiro para o wire. O turno real pegou o erro:
+audit `event: route, model: gpt-6-luna-900k, effort: low` e, um segundo depois,
+`⚠️ Model fallback: gpt-6-luna-900k via openai-codex unavailable (model entitlement)`. `wire_model_for()`
+resolve agora contra `route_catalog(provider)` (o único lugar que sabe o que cada id significa no wire),
+com fallback para a entrada resolvida em providers sem catálogo embutido.
+
+### 10.4 `gpt-6.1-sol-900k` não existe neste backend
+
+O card lista `gpt-6.1-sol-900k` como disponível no `provider_models_cache.json` de `openai-codex`. Não
+está: o cache do perfil lista `gpt-6.1-sol` **sem** variante `-900k` (`gpt-6-astra-900k`, `gpt-6-sol-900k`,
+`gpt-6-luna-900k` e os `gpt-5.6-*` estão lá; `gpt-6.1-sol-900k` não), e o próprio core não o considera
+elegível para o sufixo (`_CODEX_900K_ELIGIBLE_BASES` não inclui `gpt-6.1-sol`).
+
+Verificado ao vivo, duas vezes (com e sem o plugin instalado):
+
+```text
+⚠️ Model fallback: gpt-6.1-sol-900k via openai-codex unavailable (model entitlement);
+   using gpt-6-luna via openai-codex.
+```
+
+Um turno roteado para esse id produz o pior resultado possível para a auditoria: registro
+`event: route, model: gpt-6.1-sol-900k, effort: low` seguido de `skip model_not_in_grid` do turno de
+fallback — o audit afirma uma rota que não aconteceu. O id permanece em `CODEX_GRID`/`CODEX_ALLOWLIST`
+(o card o nomeia), mas as grades entregues nos perfis `code` e `job-search` **não** o listam: uma grade
+não deve nomear modelo que o provider não serve (`catalog.py`). Decisão pendente do dono registrada no
+card.
+
+### 10.5 Config dos perfis `code` e `job-search`
+
+```yaml
+        routable_providers:
+          - opencode-go
+          - commandcode
+          - openai-codex
+        grids:
+          openai-codex:
+            - 'gpt-6-luna: general work, coding, explanation and tool use'
+            - 'gpt-6-luna-900k: general work and coding over a 900k context window (large repos, long documents)'
+            - 'gpt-6.1-sol: harder reasoning, architecture, planning and long-context analysis'
+```
+
+`model.provider` de cada perfil ficou como estava: a troca de provider é por sessão/perfil, e
+`routable_providers` só habilita a rota. Nenhum `effort_maps` para `openai-codex` — a política embutida é
+a autoridade da rota (uma entrada no mapa resolveria pelo caminho custom, cujo clamp anti-escalada
+responde `xhigh` com `high`).
+
+### 10.6 Testes
+
+- `tests/test_router.py`: rota não pulada e nível em `reasoning.effort` (com `reasoning_effort` ausente,
+  `include`/`store`/`instructions` intactos); cada nível decidível × luna/sol; alias de picker não chega
+  ao wire (inclusive vindo de grade do operador — a regressão do bug do §10.3); conversa lida de `input`
+  (itens sem role, como `function_call`, ficam fora do estado); payload sem objeto `reasoning` mantém
+  `effort: null` no audit; replay do corpo sem segunda decisão; alias de provider (`codex`).
+- `tests/test_effort.py`: as duas famílias com seus conjuntos, `none` omitido em Sol, `minimal`/`ultra`/
+  string desconhecida omitidos, modelo fora do catálogo omitido; e a config entregue (com um companion
+  opt-in lendo o arquivo real via `JEV_PROFILE_CONFIG`).
+- `tests/test_config_policy.py`: catálogo de quatro ids sob `jev_console` (e pelos dois aliases), cap
+  sobre grade do operador, `wire_id` do alias, grade intacta em decider legado, e normalização de alias
+  nos dois sentidos.
+- Regressão de forma: `chat_completions` continua escrevendo só o `reasoning_effort` top-level.
+
+Suíte completa: `pytest -q tests` → 305 coletados, 296 passam, 9 pulados (os pulos são os probes
+opt-in), 0 falhas.
+
+### 10.7 Verificação end-to-end (branch instalada no perfil `job-search`)
+
+Clone do perfil apontado para a branch (`4d0296e`, depois `40fa1fb`), `HERMES_DUMP_REQUESTS=1`, e a grade
+restrita a um modelo por rodada para forçar cada id (a grade natural só é decidida pelo Jev):
+
+| Modelo forçado | Audit | Corpo enviado | HTTP |
+|---|---|---|---|
+| `gpt-6-luna` (grade natural 3 modelos) | `route, model=gpt-6-luna, effort=low, effort_requested=low, model_confidence=1.0` | `model=gpt-6-luna, reasoning.effort=low` | 200 |
+| `gpt-6-luna-900k` | `route, model=gpt-6-luna-900k, effort=low` | `model=gpt-6-luna, reasoning.effort=low` | 200 |
+| `gpt-6.1-sol` | `route, model=gpt-6.1-sol, effort=low` | `model=gpt-6.1-sol, reasoning.effort=low` | 200 |
+| `gpt-6.1-sol-900k` | `route, model=gpt-6.1-sol-900k, effort=low` + `skip model_not_in_grid` | fallback: `model=gpt-6-luna, reasoning.effort=high` | **400** (model entitlement) |
+
+Turno natural com a grade de três modelos e loop de ferramentas (`gpt-6.1-sol`, 41 s, 4 chamadas):
+
+```json
+{"event":"route","model":"gpt-6.1-sol","effort":"high","effort_requested":"high",
+ "model_confidence":0.91,"effort_confidence":0.67,"provider":"openai-codex",
+ "replayed":false,"api_call_count":1}
+{"event":"route","model":"gpt-6.1-sol","effort":"high","replayed":true,"api_call_count":2}
+{"event":"route","model":"gpt-6.1-sol","effort":"high","replayed":true,"api_call_count":3}
+```
+
+Corpo correspondente: `model=gpt-6.1-sol, reasoning.effort=high`. O replay do turno reescreve o mesmo
+corpo sem nova decisão, e o nível do Jev (`high`) é o que sai — não o default da sessão.
+
+Estado vivo devolvido ao pin: o clone do perfil voltou para `9a4b919` (código revisado) e a config ficou
+com a grade de três modelos. `hermes plugin update` pós-merge continua sendo etapa do dono.
+
+### 10.8 Limitações e pendências
+
+- **Os `-900k` como opção de grade não mudam o wire.** Escolher `gpt-6-luna-900k` em vez de `gpt-6-luna`
+  produz o mesmo corpo; a diferença de janela é decidida em `agent.model` na construção da sessão. Como
+  opção de roteamento, os dois ids são indistinguíveis — o card os pede, a implementação os registra e o
+  audit os nomeia, mas nenhum efeito além do rótulo foi medido. Pendente de decisão do dono (com o §10.4).
+- **`none` na família Sol é contrato do core, não probe desta rodada.** O card pede que `none` nunca seja
+  enviado; o teste prova que o plugin o omite. O 400 em si vem da declaração do core (`NO_DISABLE_TIER_PREFIXES`,
+  live 2026-09-29) — não houve POST com `reasoning.effort: "none"` em `gpt-6.1-sol` nesta rodada.
+- **HTTP 200 não gradua nada:** os turnos provam que o campo é aceito e que o nível decidido é o que sai,
+  não que a profundidade de raciocínio mude.
+- **`max`/`xhigh` são contrato, não caminho de produção:** o decider só oferece `low`/`medium`/`high`.
+- **Turnos de cron com `provider: openai-codex` deixam de ser pulados** com esta config, exatamente como
+  no §9.9: o alcance não é só o CLI.
+
