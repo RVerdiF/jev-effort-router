@@ -2176,6 +2176,41 @@ def test_codex_picker_alias_never_reaches_the_wire(tmp_path, monkeypatch):
     )
 
 
+def test_codex_picker_alias_from_an_operator_grid_still_sends_the_base_slug(
+    tmp_path, monkeypatch
+):
+    """An operator ``grids.openai-codex`` entry carries a description, not a wire id.
+
+    Caught live: with the grid pinned to ``gpt-6-luna-900k`` the routed payload carried the
+    picker id itself, the backend answered HTTP 400 "model entitlement", and Hermes fell back to
+    another model *after* the audit had recorded the route. The catalog is what knows the id the
+    endpoint serves, so the lookup must not depend on the configured grid entry.
+    """
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")
+    config = {
+        "decider": "jev_console",
+        "routable_providers": ["openai-codex"],
+        "grids": {"openai-codex": ["gpt-6-luna-900k: big context"]},
+    }
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 1.0, "low", 1.0, grid_size=1))]
+    )
+    router, settings = build(tmp_path, transport, config=config)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = codex_route(
+        router,
+        codex_request(model="gpt-6-luna-900k"),
+        model="gpt-6-luna-900k",
+        turn_id="codex-grid-alias",
+        session_id="codex-grid-alias",
+    )
+
+    assert result is not None
+    assert router.tail(settings, limit=1)[0]["model"] == "gpt-6-luna-900k"
+    assert result["request"]["model"] == "gpt-6-luna"
+
+
 def test_codex_reads_the_conversation_from_input_not_messages(tmp_path, monkeypatch):
     """A Responses body has no ``messages``: the state must be built from ``input``."""
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key")

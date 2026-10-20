@@ -40,6 +40,7 @@ from .config import (
     EffectiveSettings,
     Settings,
     api_key,
+    route_catalog,
 )
 from .effort import resolve_effort
 from .memo import Memo, TurnMemo
@@ -88,6 +89,23 @@ def conversation_messages(payload: Any) -> List[Dict[str, Any]]:
             continue
         conversation.append({"role": role, "content": item.get("content")})
     return conversation
+
+
+def wire_model_for(provider: str, effective: EffectiveSettings, model_id: str) -> str:
+    """The id to put in the provider's ``model`` field for the routed choice.
+
+    Read from the route's **built-in catalog** first. A picker alias (the Codex ``-900k``
+    variants) is stripped by the transport while it *builds* the body — before the middleware
+    this router runs in — so writing the alias back would send an id the backend does not serve.
+    The operator's ``grids.<provider>`` is the *choice* set, not the record of what each id means
+    on the wire: a grid parsed from config carries descriptions only, so it cannot answer this
+    question and must not be trusted to.
+    """
+    for entry in route_catalog(provider) or ():
+        if entry.model_id == model_id:
+            return entry.wire_model
+    resolved = effective.entry_for(model_id)
+    return resolved.wire_model if resolved is not None else model_id
 
 
 class Router:
@@ -401,15 +419,11 @@ class Router:
                     self._memo.put_session(session_id, memo)
 
             assert decision is not None
-            # The grid entry knows the id the endpoint actually serves: a picker alias (the Codex
-            # ``-900k`` variants) is stripped by the transport at build time, before this
-            # middleware runs, so writing the alias back would send an id the backend rejects.
-            entry = effective.entry_for(decision.model)
             routed = self._apply(
                 original_request,
                 decision,
                 api_mode=api_mode,
-                wire_model=entry.wire_model if entry is not None else "",
+                wire_model=wire_model_for(provider, effective, decision.model),
             )
             decision = self._applied_decision(decision, routed, api_mode)
             self._record_route(settings, decision, where, api_call_count=api_call_count, replayed=replayed)
