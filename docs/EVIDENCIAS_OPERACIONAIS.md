@@ -633,9 +633,63 @@ $ uv run --offline --extra dev pytest -q
 
 Os 8 skips são os mesmos de sempre (5 do live probe sem `JEV_LIVE_PROBE=1` e 3 de `test_registration.py` condicionados a PyYAML). A linha de base desta branch era `273 passed, 8 skipped`; o delta são os três casos parametrizados novos.
 
-### 9.8 Limitações e pendências
+### 9.8 Verificação end-to-end com o plugin reinstalado
+
+O plugin da instalação viva (`/home/rafael/hermes/home/profiles/code/plugins/jev-effort-router`, pin `375d180`) foi apontado para o commit desta branch sem rede (`git fetch <worktree> wt/t_1906910b`, `git checkout -B check-t_1906910b FETCH_HEAD`) e o turno real do card foi executado:
+
+```text
+$ hermes -p code --provider commandcode -m deepseek/deepseek-v4.1-flash chat -q "Reply with only: ok"
+ok
+Session:        20261020_100410_2be7c9
+Duration:       7s
+```
+
+Registro de audit correspondente (campos integrais, mensagem livre de conteúdo):
+
+```json
+{"ts": "2026-10-20T13:04:14+00:00", "event": "route", "model": "deepseek/deepseek-v4.1-flash",
+ "effort": "low", "effort_requested": "low", "model_choice": "1", "provider": "commandcode",
+ "effort_choice": "low", "model_confidence": 1.0, "effort_confidence": 1.0,
+ "model_probabilities": {"1": 1.0}, "effort_probabilities": {"low": 1.0, "medium": 0.0, "high": 0.0},
+ "latency_ms": 1213, "fallback_reasons": [], "jev_model": "jev-1.13-free",
+ "decider_fallback_reason": null, "decider": "jev_console", "replayed": false,
+ "turn_id": "20261020_100410_2be7c9:20261020_100410_2be7c9:d4df5a48",
+ "platform": "cli", "api_call_count": 1}
+```
+
+`event: route` (não `skip`), `provider: commandcode`, `decider: jev_console`, `effort: "low"` não-nulo — os quatro critérios do card no mesmo registro. O `skip`/`provider_not_routed` que motivou o card está no mesmo arquivo (61 ocorrências, a última em 2026-10-20T12:50:32Z, `platform: cli`).
+
+Segundo turno com `HERMES_DUMP_REQUESTS=1` para capturar o corpo realmente enviado (o dump mascara o header de autorização e o script abaixo imprime só as chaves de reasoning):
+
+```text
+$ HERMES_DUMP_REQUESTS=1 hermes -p code --provider commandcode -m deepseek/deepseek-v4.1-flash chat -q "Reply with only: ok"
+ok
+$ uv run --offline python <scratch>/t_1906910b_dump_fields.py <session>/request_dump_20261020_100451_fa17c1_...json
+dump: request_dump_20261020_100451_fa17c1_20261020_100454_703584.json
+url: https://api.commandcode.ai/provider/v1/chat/completions
+model: deepseek/deepseek-v4.1-flash
+reasoning_effort: low
+extra_body: {"thinking": {"type": "enabled"}}
+reasoning_config present: False
+top-level keys: ['extra_body', 'model', 'reasoning_effort']
+```
+
+Esse é o critério "`thinking` + `reasoning_effort` coexistem no wire sem 400" verificado no corpo real, não no duble de teste: o endpoint respondeu 200 com os dois campos presentes, e o nível no wire é o do Jev (`low`) — a sessão do perfil `code` tem `agent.reasoning_effort: xhigh`, que o profile traduziria para um nível mais alto, então o valor observado comprova a precedência do §9.2 em produção. `reasoning_config` não vaza para o wire.
+
+Depois da verificação o clone instalado voltou ao pin (`git checkout main`, HEAD `375d180`, árvore limpa), porque o merge ainda é do dono. Um turno com o plugin **antigo** e a config nova confirma que a transição não quebra nada:
+
+```json
+{"ts": "2026-10-20T13:05:42+00:00", "event": "route", "model": "deepseek/deepseek-v4.1-flash",
+ "effort": "low", "effort_requested": "low", "decider": "jev_console", "replayed": false,
+ "platform": "cli", "api_call_count": 1}
+```
+
+Ou seja: enquanto o merge não acontece a rota funciona pelo caminho `effort_maps` (sem a chave `provider`, que chega com a política embutida). Após o merge + `hermes plugin update`, a política embutida assume e a entrada em `effort_maps` passa a ser redundante (mas inofensiva).
+
+### 9.9 Limitações e pendências
 
 - **HTTP 200 não gradua nada:** o probe prova que o campo é aceito, não que o nível mude a profundidade do raciocínio. O audit segue afirmando apenas "o campo foi enviado".
 - **`thinking` explícito desabilitado pelo usuário não é reinterpretado:** quando o `reasoning_config` da sessão tem `enabled: false`, o profile emite `thinking: {"type": "disabled"}` e nenhum `reasoning_effort`; o plugin ainda aplica o nível do Jev nesse caso, exatamente como já fazia no `opencode-go` desde o §8 (o plugin é dono do nível, o profile é dono do toggle). Nenhum turno real dessa forma foi executado; o comportamento é o mesmo das duas rotas, não uma divergência nova.
 - **`max` e `xhigh` são contrato, não caminho de produção:** o decider só oferece `low`/`medium`/`high`.
+- **Sessões de cron com `provider: commandcode` deixam de ser puladas:** as 61 ocorrências de `provider_not_routed` no audit do perfil `code` incluem turnos de `platform: cron`, que passam a ser roteados por esta config. É o efeito pedido pelo card (a rota precisava estar em `routable_providers`), registrado aqui porque o alcance não é só o CLI.
 
