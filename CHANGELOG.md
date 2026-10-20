@@ -64,6 +64,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **The plugin is a virtual uv workspace member, so it installs in more than one profile.** With a
+  `[build-system]` block, `pm/workspace.py` kept the declared project name
+  (`hermes-plugin-jev-effort-router`) for every profile copy. Two profiles enabling the same plugin
+  then produced two workspace members with one name and `uv lock` refused the environment:
+  `Two workspace members are both named hermes-plugin-jev-effort-router`. The package builds no
+  modules (`py-modules = []`), so the build backend was removed: the member is now metadata-only and
+  uv keys it by path (`hermes-plugin-jev-effort-router-<hash>`), which is the layout the plugin
+  manager documents for virtual members. Dependencies are unchanged.
 - **A profile entry for a route that already has a built-in policy no longer hides its contract.**
   `resolve_effort` resolves a provider that appears in `effort_maps` through the custom path, which
   takes precedence over the built-in policy and clamps to the nearest weaker accepted level. A
