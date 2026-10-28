@@ -8,10 +8,12 @@ only adds coercion, validation and the "value is missing or nonsense" backstops.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from .grid import (
     CODEX_GRID,
@@ -23,6 +25,8 @@ from .grid import (
     parse_grid,
     parse_grid_strict,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Provider profile this router is benchmarked for. Anything else is skipped untouched.
 ROUTED_PROVIDER = "ollama-cloud"
@@ -106,6 +110,14 @@ DEFAULT_CONSOLE_BASE_URL = "https://opencode.ai/inference/systemone/v1/systemone
 DEFAULT_CONSOLE_JEV_MODEL = "jev-1.13-free"
 DEFAULT_CONSOLE_JEV_FALLBACK_MODEL = "jev-1.13"
 DEFAULT_CONSOLE_KEY_ENV = "OPENCODE_CONSOLE_API_KEY"
+
+#: The opt-in secondary transport for the ``jev_console`` decider: a SystemOne endpoint, a model
+#: and the name of the variable holding its key. Deliberately **no** defaults — an empty trio is
+#: how the operator says "no fallback", and every default would silently send context to a
+#: non-ZDR upstream on a deployment that never asked for it.
+COMMANDCODE_BASE_URL_SETTING = "console_jev_commandcode_base_url"
+COMMANDCODE_MODEL_SETTING = "console_jev_commandcode_model"
+COMMANDCODE_KEY_ENV_SETTING = "console_jev_commandcode_api_key_env"
 
 DEFAULT_JEV_MODEL = "typesafe/jev-1.13"
 DEFAULT_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
@@ -263,6 +275,94 @@ def _capped(
 
 
 @dataclass(frozen=True)
+class CommandCodeFallback:
+    """The opt-in SystemOne secondary transport, resolved from three operator settings.
+
+    ``configured`` and ``enabled`` are kept apart on purpose: a half-written trio is an operator
+    mistake that must disable **only** the fallback, never the legacy decider chain, and the
+    status surface has to be able to say "configured but not enabled" without guessing.
+
+    ``reason`` is a sanitized explanation naming the setting at fault — never its value. A URL
+    that carries credentials is dropped from ``url`` for the same reason: nothing that could hold
+    a secret is kept around for a status line or a log record.
+    """
+
+    url: str = ""
+    model: str = ""
+    key_env: str = ""
+    reason: str = ""
+
+    @property
+    def configured(self) -> bool:
+        """Whether the operator set any of the three settings at all."""
+        return bool(self.url or self.model or self.key_env or self.reason)
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the trio is complete and valid, so the transport may actually be consulted."""
+        return self.configured and not self.reason
+
+
+def _validated_fallback_url(raw: str) -> Tuple[str, str]:
+    """``(url, problem)`` — the endpoint a fallback may POST to, or why it is unusable.
+
+    A complete SystemOne endpoint is required, not a base URL with a suffix appended: the path is
+    the provider's contract and is not this plugin's to compose. HTTPS only, and no userinfo,
+    query or fragment — each of those would either leak a credential into an audit line or send
+    the decision to something other than the documented endpoint.
+    """
+    text = (raw or "").strip()
+    parts = urlsplit(text)
+    if parts.scheme.strip().lower() != "https":
+        return "", "must be an https:// URL"
+    if not parts.netloc.strip():
+        return "", "must name a host"
+    if parts.username or parts.password:
+        return "", "must not carry credentials"
+    if parts.query or parts.fragment:
+        return "", "must not carry a query or a fragment"
+    return text, ""
+
+
+def resolve_commandcode_fallback(*, base_url: Any, model: Any, api_key_env: Any) -> CommandCodeFallback:
+    """Resolve the secondary-transport trio. Never raises; an invalid trio is simply disabled."""
+    url = str(base_url or "").strip()
+    chosen_model = str(model or "").strip()
+    key_env = str(api_key_env or "").strip()
+    if not (url or chosen_model or key_env):
+        return CommandCodeFallback()
+
+    # The endpoint is validated (and an invalid one dropped) before anything else: a URL that
+    # embedded a credential must never survive into a status line or a log record, not even on the
+    # path that is about to be rejected for being incomplete.
+    clean_url, problem = _validated_fallback_url(url) if url else ("", "")
+    if problem:
+        return CommandCodeFallback(
+            model=chosen_model,
+            key_env=key_env,
+            reason=f"{COMMANDCODE_BASE_URL_SETTING} {problem}",
+        )
+
+    missing = [
+        setting
+        for setting, value in (
+            (COMMANDCODE_BASE_URL_SETTING, url),
+            (COMMANDCODE_MODEL_SETTING, chosen_model),
+            (COMMANDCODE_KEY_ENV_SETTING, key_env),
+        )
+        if not value
+    ]
+    if missing:
+        return CommandCodeFallback(
+            url=clean_url,
+            model=chosen_model,
+            key_env=key_env,
+            reason="incomplete (missing " + ", ".join(missing) + ")",
+        )
+    return CommandCodeFallback(url=clean_url, model=chosen_model, key_env=key_env)
+
+
+@dataclass(frozen=True)
 class PlatformPolicy:
     """One surface's routing policy, as declared under ``platform_overrides``.
 
@@ -341,6 +441,12 @@ class Settings:
     console_jev_model: str = ""
     console_jev_fallback_model: str = DEFAULT_CONSOLE_JEV_FALLBACK_MODEL
     console_api_key_env: str = ""
+    #: The opt-in SystemOne secondary transport. All three default to empty = disabled, and the
+    #: trio is only ever consulted by the ``jev_console`` decider (see
+    #: :meth:`active_commandcode_fallback`).
+    console_jev_commandcode_base_url: str = ""
+    console_jev_commandcode_api_key_env: str = ""
+    console_jev_commandcode_model: str = ""
     routable_providers: Tuple[str, ...] = DEFAULT_ROUTABLE_PROVIDERS
     grids: Mapping[str, Tuple[Entry, ...]] = field(
         default_factory=lambda: MappingProxyType({})
@@ -445,6 +551,25 @@ class Settings:
         if target == "jev_console":
             return self.console_jev_model or DEFAULT_CONSOLE_JEV_MODEL
         return self.jev_model
+
+    def commandcode_fallback(self) -> CommandCodeFallback:
+        """The configured SystemOne secondary transport, independent of the active decider."""
+        return resolve_commandcode_fallback(
+            base_url=self.console_jev_commandcode_base_url,
+            model=self.console_jev_commandcode_model,
+            api_key_env=self.console_jev_commandcode_api_key_env,
+        )
+
+    def active_commandcode_fallback(self) -> CommandCodeFallback:
+        """The secondary transport as the **active** decider may use it.
+
+        The trio belongs to ``jev_console``. Any other decider sees an empty fallback, so a legacy
+        ``jev``/``openai_compatible`` deployment keeps byte-identical payloads, audit records and
+        status output even if the three settings happen to be present in its config.
+        """
+        if (self.decider or "").strip().lower() != "jev_console":
+            return CommandCodeFallback()
+        return self.commandcode_fallback()
 
     def confidence_threshold_for(self, decider: Optional[str] = None) -> float:
         """The confidence threshold for ``decider``."""
@@ -687,6 +812,9 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         console_jev_model=console_jev_model,
         console_jev_fallback_model=console_jev_fallback,
         console_api_key_env=_as_text(read("console_api_key_env", ""), ""),
+        console_jev_commandcode_base_url=_as_text(read(COMMANDCODE_BASE_URL_SETTING, ""), ""),
+        console_jev_commandcode_api_key_env=_as_text(read(COMMANDCODE_KEY_ENV_SETTING, ""), ""),
+        console_jev_commandcode_model=_as_text(read(COMMANDCODE_MODEL_SETTING, ""), ""),
         routable_providers=routable_providers if routable_providers else DEFAULT_ROUTABLE_PROVIDERS,
         grids=parse_grids(read("grids", None)),
         effort_maps=parse_effort_maps(read("effort_maps", None)),
@@ -694,6 +822,16 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
             read("confidence_threshold_per_decider", None)
         ),
     )
+    # Sanitized on purpose: the message names the setting at fault and never its value, and it is
+    # emitted once per settings load — even when the active decider is not jev_console, because a
+    # half-written trio is an operator error worth surfacing. A broken trio disables only the
+    # fallback, so the legacy chain keeps working exactly as it does without the three keys.
+    fallback = settings.commandcode_fallback()
+    if fallback.configured and not fallback.enabled:
+        logger.warning(
+            "jev-effort-router: the console_jev_commandcode_* fallback is disabled — %s",
+            fallback.reason,
+        )
     return settings
 
 

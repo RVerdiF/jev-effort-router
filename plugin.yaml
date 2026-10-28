@@ -122,6 +122,28 @@ config_schema:
     default: ""
     label: OpenCode Console API key env var
     description: Env var name holding API key for jev_console decider (defaults to OPENCODE_CONSOLE_API_KEY).
+  console_jev_commandcode_base_url:
+    type: str
+    default: ""
+    label: CommandCode SystemOne endpoint (opt-in fallback)
+    description: >-
+      Complete HTTPS SystemOne endpoint used only after the jev_console chain fails technically,
+      e.g. https://api.commandcode.ai/provider/v1/systemone. Empty disables the fallback. This
+      upstream has no ZDR agreement — see docs/jev-decisions-api.md before enabling it.
+  console_jev_commandcode_api_key_env:
+    type: str
+    default: ""
+    label: CommandCode API key env var (opt-in fallback)
+    description: >-
+      Env var name holding the CommandCode key, e.g. COMMANDCODE_API_KEY. The value is never read
+      from config and never logged; empty disables the fallback.
+  console_jev_commandcode_model:
+    type: str
+    default: ""
+    label: CommandCode decision model (opt-in fallback)
+    description: >-
+      Decision model id the fallback asks, e.g. typesafe/jev. Empty disables the fallback. All
+      three console_jev_commandcode_* settings are required to enable it.
   routable_providers:
     type: list
     default: [ollama-cloud]

@@ -1,0 +1,663 @@
+{
+  "base_commit": "d42230b213515a825eec65748e2bbde0750eafc4",
+  "decider": {
+    "console_both_models_fail": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        },
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1149,
+          "payload_sha256": "5f671b49e7fff25898b0be4ff5c780ac5eb3d30da4c6711afc697b83d0a55a35",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": null,
+      "reason": "upstream_error"
+    },
+    "console_low_confidence": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": null,
+      "reason": "low_confidence"
+    },
+    "console_missing_key": {
+      "calls": [],
+      "decision": null,
+      "reason": "no_api_key"
+    },
+    "console_non_json_body": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": null,
+      "reason": "malformed_answer"
+    },
+    "console_paid_fallback": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        },
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1149,
+          "payload_sha256": "5f671b49e7fff25898b0be4ff5c780ac5eb3d30da4c6711afc697b83d0a55a35",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": {
+        "alternatives": [],
+        "decider": "jev_console",
+        "decider_fallback_reason": "upstream_error",
+        "decider_model": "jev-1.13",
+        "effort": null,
+        "effort_choice": "medium",
+        "effort_confidence": 0.9,
+        "effort_requested": "medium",
+        "fallback_reasons": [],
+        "has_effort_confidence": true,
+        "latency_ms": 0,
+        "model": "deepseek-v4.1-flash",
+        "model_choice": "1",
+        "model_confidence": 0.95
+      },
+      "reason": null
+    },
+    "console_primary_ok": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": {
+        "alternatives": [],
+        "decider": "jev_console",
+        "decider_fallback_reason": null,
+        "decider_model": "jev-1.13-free",
+        "effort": null,
+        "effort_choice": "medium",
+        "effort_confidence": 0.9,
+        "effort_requested": "medium",
+        "fallback_reasons": [],
+        "has_effort_confidence": true,
+        "latency_ms": 0,
+        "model": "deepseek-v4.1-flash",
+        "model_choice": "1",
+        "model_confidence": 0.95
+      },
+      "reason": null
+    },
+    "console_timeout": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": null,
+      "reason": "timeout"
+    },
+    "console_unknown_choice": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1154,
+          "payload_sha256": "78d8954bd73a6d875328e4853b25e0ce7b1b12aba605528df8f6ea39f9a780a5",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "decision": null,
+      "reason": "unknown_choice"
+    },
+    "jev_http_error": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer sk-or-test",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1874,
+          "payload_sha256": "b4fcff8b687d9ebe2c33fdbb84007702fbb44bc8a130b8d84b84824ac62b3d92",
+          "timeout": 2.0,
+          "url": "https://openrouter.ai/api/alpha/decisions"
+        }
+      ],
+      "decision": null,
+      "reason": "upstream_error"
+    },
+    "jev_success": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer sk-or-test",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1874,
+          "payload_sha256": "b4fcff8b687d9ebe2c33fdbb84007702fbb44bc8a130b8d84b84824ac62b3d92",
+          "timeout": 2.0,
+          "url": "https://openrouter.ai/api/alpha/decisions"
+        }
+      ],
+      "decision": {
+        "alternatives": [
+          "kimi-k3",
+          "glm-5.3",
+          "glm-5.3-flash",
+          "minimax-m3",
+          "nemotron-3-nano:30b"
+        ],
+        "decider": "jev",
+        "decider_fallback_reason": null,
+        "decider_model": "typesafe/jev-1.13",
+        "effort": "medium",
+        "effort_choice": "medium",
+        "effort_confidence": 0.8,
+        "effort_requested": "medium",
+        "fallback_reasons": [],
+        "has_effort_confidence": true,
+        "latency_ms": 0,
+        "model": "deepseek-v4.1-flash",
+        "model_choice": "1",
+        "model_confidence": 0.9
+      },
+      "reason": null
+    },
+    "jev_success_empty_string_config": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer sk-or-test",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1874,
+          "payload_sha256": "b4fcff8b687d9ebe2c33fdbb84007702fbb44bc8a130b8d84b84824ac62b3d92",
+          "timeout": 2.0,
+          "url": "https://openrouter.ai/api/alpha/decisions"
+        }
+      ],
+      "decision": {
+        "alternatives": [
+          "kimi-k3",
+          "glm-5.3",
+          "glm-5.3-flash",
+          "minimax-m3",
+          "nemotron-3-nano:30b"
+        ],
+        "decider": "jev",
+        "decider_fallback_reason": null,
+        "decider_model": "typesafe/jev-1.13",
+        "effort": "medium",
+        "effort_choice": "medium",
+        "effort_confidence": 0.8,
+        "effort_requested": "medium",
+        "fallback_reasons": [],
+        "has_effort_confidence": true,
+        "latency_ms": 0,
+        "model": "deepseek-v4.1-flash",
+        "model_choice": "1",
+        "model_confidence": 0.9
+      },
+      "reason": null
+    },
+    "openai_compatible_success": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer go-key",
+            "Content-Type": "application/json",
+            "User-Agent": "Hermes-Agent/0.21.4 (jev-effort-router)",
+            "x-opencode-session": "jev-1700000000"
+          },
+          "payload_length": 2100,
+          "payload_sha256": "181b8ffead9d8fefd3e260ad1de349a9dc1265238dcc89b3f03847d5f09d7e75",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/zen/go/v1/chat/completions"
+        }
+      ],
+      "decision": {
+        "alternatives": [
+          "kimi-k3",
+          "glm-5.3",
+          "glm-5.3-flash",
+          "minimax-m3",
+          "nemotron-3-nano:30b"
+        ],
+        "decider": "openai_compatible",
+        "decider_fallback_reason": null,
+        "decider_model": "deepseek-v4.1-flash",
+        "effort": "medium",
+        "effort_choice": "medium",
+        "effort_confidence": 0.92,
+        "effort_requested": "medium",
+        "fallback_reasons": [],
+        "has_effort_confidence": true,
+        "latency_ms": 0,
+        "model": "deepseek-v4.1-flash",
+        "model_choice": "deepseek-v4.1-flash",
+        "model_confidence": 0.92
+      },
+      "reason": null
+    }
+  },
+  "generated_by": "tests/legacy_fixture_scenarios.py",
+  "regenerate": "git archive <base_commit> | tar -x -C /tmp/base && python tests/legacy_fixture_scenarios.py --root /tmp/base > tests/fixtures/legacy_0_4_0.json",
+  "router": {
+    "router_console_429_then_paid": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1094,
+          "payload_sha256": "90669a3ed1dc2d1a26f8e4c2fdf3fb6eea16c93447f2b935c0c96c3b2a20f4cf",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        },
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1089,
+          "payload_sha256": "6425fbd495ddc3d7d4d7e8d79dc6656eb634826cc301029ed8a212462a9d1ec7",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "records": [
+        {
+          "alternatives": null,
+          "api_call_count": 0,
+          "api_request_id": "turn-1:api:0",
+          "decider": "jev_console",
+          "decider_fallback_reason": "upstream_error",
+          "effort": null,
+          "effort_choice": "medium",
+          "effort_confidence": 0.9,
+          "effort_probabilities": {
+            "high": 0.04999999999999999,
+            "low": 0.04999999999999999,
+            "medium": 0.9
+          },
+          "effort_requested": "medium",
+          "event": "route",
+          "fallback_reasons": [],
+          "jev_model": "jev-1.13",
+          "latency_ms": 0,
+          "model": "deepseek-v4.1-flash",
+          "model_choice": "1",
+          "model_confidence": 0.95,
+          "model_probabilities": {
+            "1": 1.0
+          },
+          "platform": "cli",
+          "provider": "opencode-console",
+          "replayed": false,
+          "session_id": "session-1",
+          "turn_id": "turn-1",
+          "wire_model": "deepseek-v4.1-flash"
+        },
+        {
+          "alternatives": null,
+          "api_call_count": 1,
+          "api_request_id": "turn-1:api:1",
+          "decider": "jev_console",
+          "decider_fallback_reason": "upstream_error",
+          "effort": null,
+          "effort_choice": null,
+          "effort_confidence": 0.9,
+          "effort_probabilities": null,
+          "effort_requested": "medium",
+          "event": "route",
+          "fallback_reasons": [],
+          "jev_model": "jev-1.13",
+          "latency_ms": 0,
+          "model": "deepseek-v4.1-flash",
+          "model_choice": "1",
+          "model_confidence": 0.95,
+          "model_probabilities": null,
+          "platform": "cli",
+          "provider": "opencode-console",
+          "replayed": true,
+          "session_id": "session-1",
+          "turn_id": "turn-1",
+          "wire_model": "deepseek-v4.1-flash"
+        }
+      ],
+      "results": [
+        {
+          "request": {
+            "max_tokens": 4096,
+            "messages": [
+              {
+                "content": "hello",
+                "role": "user"
+              }
+            ],
+            "model": "deepseek-v4.1-flash",
+            "timeout": 60,
+            "tools": []
+          },
+          "source": "jev-effort-router"
+        },
+        {
+          "request": {
+            "max_tokens": 4096,
+            "messages": [
+              {
+                "content": "hello",
+                "role": "user"
+              }
+            ],
+            "model": "deepseek-v4.1-flash",
+            "timeout": 60,
+            "tools": []
+          },
+          "source": "jev-effort-router"
+        }
+      ]
+    },
+    "router_console_low_confidence_skips": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer console-key",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1094,
+          "payload_sha256": "90669a3ed1dc2d1a26f8e4c2fdf3fb6eea16c93447f2b935c0c96c3b2a20f4cf",
+          "timeout": 2.0,
+          "url": "https://opencode.ai/inference/systemone/v1/systemone"
+        }
+      ],
+      "records": [
+        {
+          "api_request_id": "turn-1:api:0",
+          "configured_model": "deepseek-v4.1-flash",
+          "event": "skip",
+          "platform": "cli",
+          "provider": "opencode-console",
+          "reason": "low_confidence",
+          "session_id": "session-1",
+          "turn_id": "turn-1"
+        }
+      ],
+      "results": [
+        {
+          "request": null,
+          "source": null
+        }
+      ]
+    },
+    "router_console_missing_key_skips": {
+      "calls": [],
+      "records": [
+        {
+          "api_request_id": "turn-1:api:0",
+          "configured_model": "deepseek-v4.1-flash",
+          "event": "skip",
+          "platform": "cli",
+          "provider": "opencode-console",
+          "reason": "no_api_key",
+          "session_id": "session-1",
+          "turn_id": "turn-1"
+        }
+      ],
+      "results": [
+        {
+          "request": null,
+          "source": null
+        }
+      ]
+    },
+    "router_jev_route_then_replay": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer sk-or-test",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1814,
+          "payload_sha256": "6b63294679fcefc393cc8f056b0aa1b6683edab4d179cc26e47c654b032574e2",
+          "timeout": 2.0,
+          "url": "https://openrouter.ai/api/alpha/decisions"
+        }
+      ],
+      "records": [
+        {
+          "alternatives": [
+            "deepseek-v4.1-flash",
+            "glm-5.3",
+            "glm-5.3-flash",
+            "minimax-m3",
+            "nemotron-3-nano:30b"
+          ],
+          "api_call_count": 0,
+          "api_request_id": "turn-1:api:0",
+          "decider": "jev",
+          "decider_fallback_reason": null,
+          "effort": "high",
+          "effort_choice": "high",
+          "effort_confidence": 0.8,
+          "effort_probabilities": {
+            "high": 0.8,
+            "low": 0.09999999999999998,
+            "medium": 0.09999999999999998
+          },
+          "effort_requested": "high",
+          "event": "route",
+          "fallback_reasons": [],
+          "jev_model": "typesafe/jev-1.13",
+          "latency_ms": 0,
+          "model": "kimi-k3",
+          "model_choice": "2",
+          "model_confidence": 0.9,
+          "model_probabilities": {
+            "1": 0.019999999999999997,
+            "2": 0.9,
+            "3": 0.019999999999999997,
+            "4": 0.019999999999999997,
+            "5": 0.019999999999999997,
+            "6": 0.019999999999999997
+          },
+          "platform": "cli",
+          "provider": "ollama-cloud",
+          "replayed": false,
+          "session_id": "session-1",
+          "turn_id": "turn-1",
+          "wire_model": "kimi-k3"
+        },
+        {
+          "alternatives": null,
+          "api_call_count": 1,
+          "api_request_id": "turn-1:api:1",
+          "decider": "jev",
+          "decider_fallback_reason": null,
+          "effort": "high",
+          "effort_choice": null,
+          "effort_confidence": 0.8,
+          "effort_probabilities": null,
+          "effort_requested": "high",
+          "event": "route",
+          "fallback_reasons": [],
+          "jev_model": "typesafe/jev-1.13",
+          "latency_ms": 0,
+          "model": "kimi-k3",
+          "model_choice": "2",
+          "model_confidence": 0.9,
+          "model_probabilities": null,
+          "platform": "cli",
+          "provider": "ollama-cloud",
+          "replayed": true,
+          "session_id": "session-1",
+          "turn_id": "turn-1",
+          "wire_model": "kimi-k3"
+        }
+      ],
+      "results": [
+        {
+          "request": {
+            "max_tokens": 4096,
+            "messages": [
+              {
+                "content": "hello",
+                "role": "user"
+              }
+            ],
+            "model": "kimi-k3",
+            "reasoning_effort": "high",
+            "timeout": 60,
+            "tools": []
+          },
+          "source": "jev-effort-router"
+        },
+        {
+          "request": {
+            "max_tokens": 4096,
+            "messages": [
+              {
+                "content": "hello",
+                "role": "user"
+              }
+            ],
+            "model": "kimi-k3",
+            "reasoning_effort": "high",
+            "timeout": 60,
+            "tools": []
+          },
+          "source": "jev-effort-router"
+        }
+      ]
+    },
+    "router_jev_upstream_error_skips": {
+      "calls": [
+        {
+          "headers": {
+            "Authorization": "Bearer sk-or-test",
+            "Content-Type": "application/json",
+            "X-Title": "hermes-jev-effort-router"
+          },
+          "payload_length": 1814,
+          "payload_sha256": "6b63294679fcefc393cc8f056b0aa1b6683edab4d179cc26e47c654b032574e2",
+          "timeout": 2.0,
+          "url": "https://openrouter.ai/api/alpha/decisions"
+        }
+      ],
+      "records": [
+        {
+          "api_request_id": "turn-1:api:0",
+          "configured_model": "deepseek-v4.1-flash",
+          "event": "skip",
+          "platform": "cli",
+          "provider": "ollama-cloud",
+          "reason": "upstream_error",
+          "session_id": "session-1",
+          "turn_id": "turn-1"
+        }
+      ],
+      "results": [
+        {
+          "request": null,
+          "source": null
+        }
+      ]
+    },
+    "router_provider_not_routed": {
+      "calls": [],
+      "records": [
+        {
+          "api_request_id": "turn-1:api:0",
+          "configured_model": "deepseek-v4.1-flash",
+          "event": "skip",
+          "platform": "cli",
+          "provider": "commandcode",
+          "reason": "provider_not_routed",
+          "session_id": "session-1",
+          "turn_id": "turn-1"
+        }
+      ],
+      "results": [
+        {
+          "request": null,
+          "source": null
+        }
+      ]
+    }
+  }
+}

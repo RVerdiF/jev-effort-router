@@ -25,6 +25,7 @@ from .config import (
     DEFAULT_CONSOLE_JEV_MODEL,
     DEFAULT_CONSOLE_KEY_ENV,
     EFFORT_LEVELS,
+    CommandCodeFallback,
     EffectiveSettings,
     Settings,
     _as_float,
@@ -65,6 +66,53 @@ REASON_UNKNOWN_CHOICE = "unknown_choice"
 REASON_USER_DATA = "user_data"
 REASON_EXCEPTION = "exception"
 
+#: Exception class names that mean "the host did not answer in time" rather than "the host
+#: answered with a failure". Shared by every decider so the timeout branch cannot drift apart.
+TIMEOUT_EXCEPTION_TOKENS = (
+    "Timeout",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "PoolTimeout",
+    "TimeoutException",
+)
+
+#: Header names that must never reach the opt-in SystemOne fallback, matched case-insensitively.
+#: The generation provider's ``extra_headers`` are never inherited by the decision transport, so
+#: this is the backstop that keeps a chat-only marker (``x-cmd-zdr``) off a decision request even
+#: if a future caller starts assembling headers by merging.
+PROHIBITED_DECIDER_HEADERS = frozenset({"x-cmd-zdr"})
+
+#: Wire failures that justify asking a second host the same question. A *semantic* failure — a
+#: valid answer whose choice is not routable, or one below the confidence threshold — says the
+#: console is healthy and the router simply did not like the answer, so re-asking elsewhere would
+#: only add latency and cost.
+TECHNICAL_FAILURE_REASONS = frozenset({REASON_MALFORMED, REASON_TIMEOUT, REASON_UPSTREAM_ERROR, REASON_NO_API_KEY})
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    return any(token in name for token in TIMEOUT_EXCEPTION_TOKENS)
+
+
+def _secondary_headers(key: str) -> Dict[str, str]:
+    """Headers for the opt-in SystemOne fallback, built from nothing else.
+
+    Never merged with the generation provider's header set, so nothing the operator configured for
+    chats can travel with a decision request. ``User-Agent`` is deliberately absent: the HTTP
+    client's own effective value is preserved rather than overridden, exactly as on the legacy
+    console path.
+    """
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "X-Title": "hermes-jev-effort-router",
+    }
+    return {
+        name: value
+        for name, value in headers.items()
+        if name.strip().lower() not in PROHIBITED_DECIDER_HEADERS
+    }
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -88,6 +136,11 @@ class Decision:
     #: provenance, and a caller must resolve it from the active decider's settings rather than
     #: assume a model id that was never consulted.
     decider_model: str = ""
+    #: The endpoint that actually answered the call, when the backend has more than one (the
+    #: ``jev_console`` chain, or its opt-in SystemOne fallback). Empty means the backend did not
+    #: report one, and a caller resolves it from the active decider's settings. Never carries a
+    #: credential: the secondary URL is validated without userinfo before it is stored.
+    decider_endpoint: str = ""
     #: Why the decider's *fallback model* answered, when it did (``None`` when the primary
     #: answered, or the backend has no fallback). Kept apart from ``fallback_reasons``, which
     #: explains a degraded *answer*, not a degraded *backend call*.
@@ -243,8 +296,7 @@ class JevDecider(BaseDecider):
         except Exception as exc:  # noqa: BLE001
             latency_ms = int((time.monotonic() - started) * 1000)
             name = type(exc).__name__
-            timeout_types = ("Timeout", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "TimeoutException")
-            if any(token in name for token in timeout_types):
+            if _is_timeout(exc):
                 logger.warning("jev-effort-router: Jev timed out after %d ms (%s)", latency_ms, name)
                 return None, REASON_TIMEOUT
             logger.warning("jev-effort-router: Jev call failed: %s: %s", name, redact(exc, 300, env_name=key_env))
@@ -357,6 +409,7 @@ class JevDecider(BaseDecider):
                 fallback_reasons=tuple(reasons),
                 decider="jev",
                 decider_model=self._settings.jev_model,
+                decider_endpoint=self._settings.endpoint,
                 has_effort_confidence=answered,
             ),
             None,
@@ -480,8 +533,7 @@ class OpenAICompatibleDecider(BaseDecider):
         except Exception as exc:  # noqa: BLE001
             latency_ms = int((time.monotonic() - started) * 1000)
             name = type(exc).__name__
-            timeout_types = ("Timeout", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "TimeoutException")
-            if any(token in name for token in timeout_types):
+            if _is_timeout(exc):
                 logger.warning(
                     "jev-effort-router: openai_compatible decider timed out after %d ms (%s)",
                     latency_ms,
@@ -546,7 +598,7 @@ class OpenAICompatibleDecider(BaseDecider):
         if not isinstance(parsed, dict):
             return None, REASON_MALFORMED
 
-        return self._interpret(parsed, effective, latency_ms=latency_ms, provider=provider)
+        return self._interpret(parsed, effective, latency_ms=latency_ms, provider=provider, endpoint=url)
 
     def _interpret(
         self,
@@ -555,6 +607,7 @@ class OpenAICompatibleDecider(BaseDecider):
         *,
         latency_ms: int,
         provider: str = "",
+        endpoint: str = "",
     ) -> Tuple[Optional[Decision], Optional[str]]:
         if not isinstance(parsed, dict):
             return None, REASON_MALFORMED
@@ -626,6 +679,7 @@ class OpenAICompatibleDecider(BaseDecider):
                 fallback_reasons=(),
                 decider="openai_compatible",
                 decider_model=self._settings.decider_model_for(),
+                decider_endpoint=endpoint,
                 has_effort_confidence=True,
             ),
             None,
@@ -668,11 +722,65 @@ class JevConsoleDecider(BaseDecider):
         platform: str = "",
         provider: str = "",
     ) -> Tuple[Optional[Decision], Optional[str]]:
+        """Ask the console chain, then — opt-in only — the SystemOne fallback.
+
+        The order is fixed: the primary (free) console model, its paid counterpart when configured,
+        then the opt-in secondary transport at most once. The console chain runs exactly as it did
+        before the secondary transport existed; the fallback only inherits its *last* reason, and
+        only a technical failure there justifies asking a second host the same question.
+        """
+        fallback = self._settings.active_commandcode_fallback()
+        key_env = self._settings.api_key_env_for("jev_console")
+        started = time.monotonic()
+
+        if not api_key(key_env):
+            # The legacy early return, kept verbatim: without a console key not one console request
+            # is sent. A fully configured secondary transport is the only thing left that can answer.
+            decision, reason, technical = None, REASON_NO_API_KEY, True
+        else:
+            decision, reason, technical = self._decide_on_console(
+                messages,
+                effective,
+                platform=platform,
+                provider=provider,
+                started=started,
+            )
+        if decision is not None:
+            return decision, None
+
+        if not technical or not fallback.enabled:
+            # Either the console answered validly and its answer was not routable (low_confidence,
+            # unknown_choice), or no secondary transport is configured. The console's own reason is
+            # the final one in both cases — asking another host is only justified by a host failure.
+            return None, reason
+
+        return self._decide_on_commandcode(
+            messages,
+            effective,
+            fallback=fallback,
+            reason_before=reason,
+            platform=platform,
+            provider=provider,
+            started=started,
+        )
+
+    def _decide_on_console(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        effective: EffectiveSettings,
+        *,
+        platform: str,
+        provider: str,
+        started: float,
+    ) -> Tuple[Optional[Decision], str, bool]:
+        """The free-then-paid console chain, plus whether it failed technically.
+
+        Returns ``(decision, reason, technical)``. ``technical`` is what the caller needs to decide
+        whether a second host may be asked: ``False`` means the console produced a valid answer the
+        router simply could not apply, which is not a host failure.
+        """
         key_env = self._settings.api_key_env_for("jev_console")
         key = api_key(key_env)
-        if not key:
-            return None, REASON_NO_API_KEY
-
         url = self._settings.base_url_for("jev_console")
         headers = {
             "Authorization": f"Bearer {key}",
@@ -688,7 +796,6 @@ class JevConsoleDecider(BaseDecider):
             models_to_try.append(fallback_model)
 
         last_reason = REASON_UPSTREAM_ERROR
-        started = time.monotonic()
 
         for model_name in models_to_try:
             payload = build_payload(
@@ -704,8 +811,7 @@ class JevConsoleDecider(BaseDecider):
             except Exception as exc:  # noqa: BLE001
                 latency_ms = int((time.monotonic() - started) * 1000)
                 name = type(exc).__name__
-                timeout_types = ("Timeout", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "TimeoutException")
-                if any(token in name for token in timeout_types):
+                if _is_timeout(exc):
                     logger.warning("jev-effort-router: Jev Console timed out on %s after %d ms (%s)", model_name, latency_ms, name)
                     last_reason = REASON_TIMEOUT
                 else:
@@ -747,14 +853,111 @@ class JevConsoleDecider(BaseDecider):
                 provider=provider,
                 decider_model=model_name,
                 fallback_reason=last_reason if fallback_answered else None,
+                decider_endpoint=url,
             )
             if dec is not None:
-                return dec, None
+                return dec, "", False
             if reason:
                 last_reason = reason
                 continue
 
-        return None, last_reason
+        return None, last_reason, last_reason in TECHNICAL_FAILURE_REASONS
+
+    def _decide_on_commandcode(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        effective: EffectiveSettings,
+        *,
+        fallback: CommandCodeFallback,
+        reason_before: str,
+        platform: str,
+        provider: str,
+        started: float,
+    ) -> Tuple[Optional[Decision], Optional[str]]:
+        """One attempt against the opt-in SystemOne fallback, with its own reason classification.
+
+        No retries and no recursion: one request, the same per-call ``timeout_s`` as every other
+        decider call. ``latency_ms`` is measured from the start of the chain, because the cumulative
+        delay is what the turn actually pays.
+        """
+        key_env = fallback.key_env
+        key = api_key(key_env)
+        if not key:
+            # No credential for the secondary host, so not one byte goes there. The console chain's
+            # reason stays final: replacing a 429 or a timeout with "no key" would blame a fallback
+            # configuration problem for a host failure the operator has to act on.
+            logger.info(
+                "jev-effort-router: the opt-in CommandCode fallback needs %s, which is unset; "
+                "falling open with the console reason %r",
+                key_env,
+                reason_before,
+            )
+            return None, reason_before
+
+        payload = build_payload(
+            messages,
+            effective.grid,
+            jev_model=fallback.model,
+            context_turns=self._settings.context_turns,
+            platform=platform,
+            provider=provider,
+        )
+        headers = _secondary_headers(key)
+
+        try:
+            response, _ = self._post_one(fallback.url, payload, headers)
+        except Exception as exc:  # noqa: BLE001
+            latency_ms = int((time.monotonic() - started) * 1000)
+            name = type(exc).__name__
+            if _is_timeout(exc):
+                logger.warning(
+                    "jev-effort-router: CommandCode fallback timed out after %d ms (%s)",
+                    latency_ms,
+                    name,
+                )
+                return None, REASON_TIMEOUT
+            logger.warning(
+                "jev-effort-router: CommandCode fallback call failed: %s: %s",
+                name,
+                redact(exc, 300, env_name=key_env),
+            )
+            return None, REASON_UPSTREAM_ERROR
+
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if response is None:
+            logger.warning("jev-effort-router: CommandCode fallback returned no response")
+            return None, REASON_UPSTREAM_ERROR
+        status = getattr(response, "status_code", None)
+        if status is None or not (200 <= int(status) < 300):
+            # 400 (credit), 401/403 (credential), 404/422 and 429/5xx are the same class here: the
+            # host refused the call, so the turn falls open with ``upstream_error``.
+            body = redact(getattr(response, "text", ""), 300, env_name=key_env)
+            logger.warning("jev-effort-router: CommandCode fallback returned HTTP %s: %s", status, body)
+            return None, REASON_UPSTREAM_ERROR
+
+        try:
+            data = response.json()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "jev-effort-router: CommandCode fallback returned a non-JSON body: %s",
+                redact(getattr(response, "text", ""), 300, env_name=key_env),
+            )
+            return None, REASON_MALFORMED
+
+        decision, reason = self._interpret(
+            data,
+            effective,
+            latency_ms=latency_ms,
+            provider=provider,
+            decider_model=fallback.model,
+            fallback_reason=reason_before,
+            decider_endpoint=fallback.url,
+        )
+        if decision is not None:
+            return decision, None
+        # A valid answer that is not routable keeps its semantic reason (low_confidence,
+        # unknown_choice); an invalid wire keeps ``malformed_answer``.
+        return None, reason
 
     def _interpret(
         self,
@@ -765,6 +968,7 @@ class JevConsoleDecider(BaseDecider):
         provider: str = "",
         decider_model: str = "",
         fallback_reason: Optional[str] = None,
+        decider_endpoint: str = "",
     ) -> Tuple[Optional[Decision], Optional[str]]:
         if not isinstance(data, dict):
             return None, REASON_MALFORMED
@@ -943,6 +1147,7 @@ class JevConsoleDecider(BaseDecider):
                 fallback_reasons=(),
                 decider="jev_console",
                 decider_model=decider_model,
+                decider_endpoint=decider_endpoint,
                 decider_fallback_reason=fallback_reason,
                 has_effort_confidence=has_effort,
             ),
