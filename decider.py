@@ -796,6 +796,12 @@ class JevConsoleDecider(BaseDecider):
             models_to_try.append(fallback_model)
 
         last_reason = REASON_UPSTREAM_ERROR
+        # Whether the *last* console attempt failed technically — the only thing that justifies
+        # asking a second host. This is tracked apart from ``last_reason`` on purpose: a missing
+        # response carries no reason of its own, and the legacy contract keeps the previous reason
+        # in the returned value (which is what a failed primary alone has always reported). Only
+        # the second-host decision needs the distinction.
+        last_technical = True
 
         for model_name in models_to_try:
             payload = build_payload(
@@ -822,16 +828,21 @@ class JevConsoleDecider(BaseDecider):
                         redact(exc, 300, env_name=key_env),
                     )
                     last_reason = REASON_UPSTREAM_ERROR
+                last_technical = True
                 continue
 
             latency_ms = int((time.monotonic() - started) * 1000)
             if response is None:
+                # No response object at all is a technical failure of this host, even though the
+                # returned reason keeps the previous one for legacy compatibility.
+                last_technical = True
                 continue
             status = getattr(response, "status_code", None)
             if status is None or not (200 <= int(status) < 300):
                 body = redact(getattr(response, "text", ""), 300, env_name=key_env)
                 logger.warning("jev-effort-router: Jev Console returned HTTP %s on %s: %s", status, model_name, body)
                 last_reason = REASON_UPSTREAM_ERROR
+                last_technical = True
                 continue
 
             try:
@@ -843,6 +854,7 @@ class JevConsoleDecider(BaseDecider):
                     redact(getattr(response, "text", ""), 300, env_name=key_env),
                 )
                 last_reason = REASON_MALFORMED
+                last_technical = True
                 continue
 
             fallback_answered = bool(fallback_model) and model_name == fallback_model and model_name != primary_model
@@ -859,9 +871,12 @@ class JevConsoleDecider(BaseDecider):
                 return dec, "", False
             if reason:
                 last_reason = reason
+                # A semantic answer (below threshold, option outside the grid) is the console
+                # host doing its job; only a technical reason may hand the turn to another host.
+                last_technical = reason in TECHNICAL_FAILURE_REASONS
                 continue
 
-        return None, last_reason, last_reason in TECHNICAL_FAILURE_REASONS
+        return None, last_reason, last_technical
 
     def _decide_on_commandcode(
         self,

@@ -292,6 +292,12 @@ CommandCode is asked only after a **technical** failure of that chain:
 The last two are not host failures: the console answered, the router simply could not apply the
 answer, so asking a second host the same question would add latency and cost for nothing.
 
+The outcome that matters is the **last** console attempt, not the first failure: when the paid leg
+returns no response at all, the chain has failed technically even if the previous attempt's reason
+was semantic. The returned reason keeps the legacy rule — a missing response has no reason of its
+own, so the previous one stands — which is what keeps a deployment without the trio identical to
+0.4.0.
+
 ### Request shape
 
 The payload is Wire 3's, unchanged except for `model`:
@@ -371,4 +377,3 @@ There are no retries and no recursion: the same per-call `timeout_s`, one reques
 
 Empty the three settings and restart the gateway. No code change, no migration, and the legacy
 behaviour returns byte-identical — including the absence of the two extra audit columns.
-

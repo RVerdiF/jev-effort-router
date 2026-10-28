@@ -87,6 +87,9 @@ def test_any_missing_field_disables_the_fallback_and_names_it(missing_setting, k
         "https:///provider/v1/systemone",
         "api.commandcode.ai/provider/v1/systemone",
         "not a url at all",
+        # ``urlsplit`` itself raises on a bracket it cannot parse: an operator typo must still be
+        # an unusable endpoint, not an exception escaping the resolver.
+        "https://[broken/provider/v1/systemone",
     ],
 )
 def test_an_unusable_url_disables_the_fallback_without_keeping_the_value(url):
@@ -174,3 +177,50 @@ def test_a_partial_trio_warns_once_without_naming_a_value(caplog):
     assert "console_jev_commandcode" in caplog.text
     assert COMMANDCODE_MODEL_SETTING in caplog.text
     assert caplog.text.count("disabled") == 1
+
+
+# -- a URL that the parser itself rejects ---------------------------------------------
+
+# ``urlsplit`` raises ValueError on an unclosed IPv6 bracket before any of the explicit checks can
+# look at the value, so this is the case that used to escape the resolver and break the loader.
+BROKEN_URL = "https://[broken/provider/v1/systemone"
+
+
+def test_the_loader_survives_a_url_that_urlsplit_cannot_parse(caplog):
+    with caplog.at_level(logging.WARNING, logger="config"):
+        settings = settings_for(
+            {
+                "console_jev_commandcode_base_url": BROKEN_URL,
+                "console_jev_commandcode_api_key_env": CC_KEY_ENV,
+                "console_jev_commandcode_model": CC_MODEL,
+            }
+        )
+
+    fallback = settings.commandcode_fallback()
+    assert fallback.configured is True
+    assert fallback.enabled is False
+    assert fallback.url == ""
+    assert COMMANDCODE_BASE_URL_SETTING in fallback.reason
+    assert COMMANDCODE_BASE_URL_SETTING in caplog.text
+    # The raw value is echoed nowhere: not in the reason, not in the warning.
+    assert "broken" not in fallback.reason
+    assert "broken" not in caplog.text
+    # Only the fallback is affected; the rest of the snapshot is the legacy defaults.
+    assert settings.decider == "jev"
+    assert settings.active_commandcode_fallback() == CommandCodeFallback()
+
+
+def test_a_partial_trio_with_an_unparsable_url_also_loads():
+    settings = settings_for(
+        {
+            "console_jev_commandcode_base_url": BROKEN_URL,
+            "console_jev_commandcode_model": CC_MODEL,
+            "console_jev_commandcode_api_key_env": "",
+        }
+    )
+
+    fallback = settings.commandcode_fallback()
+    assert fallback.configured is True
+    assert fallback.enabled is False
+    assert fallback.url == ""
+    assert COMMANDCODE_BASE_URL_SETTING in fallback.reason

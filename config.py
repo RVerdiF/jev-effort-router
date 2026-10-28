@@ -312,7 +312,14 @@ def _validated_fallback_url(raw: str) -> Tuple[str, str]:
     the decision to something other than the documented endpoint.
     """
     text = (raw or "").strip()
-    parts = urlsplit(text)
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        # ``urlsplit`` validates the netloc itself and raises on a malformed host (an unclosed
+        # IPv6 bracket, for instance) instead of returning something inspectable. A typo in the
+        # fallback's endpoint must disable only the fallback: settings loading, the legacy chain
+        # and the status surface all keep working.
+        return "", "must be a valid https:// URL"
     if parts.scheme.strip().lower() != "https":
         return "", "must be an https:// URL"
     if not parts.netloc.strip():

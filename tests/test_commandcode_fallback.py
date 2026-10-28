@@ -309,15 +309,58 @@ def test_no_credential_reaches_the_logs_or_an_exception_message(caplog):
 # -- failure classification ---------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "primary_failure, expected_fallback_reason",
+    [
+        (StubResponse({"error": "free quota"}, status_code=400), REASON_UPSTREAM_ERROR),
+        (StubResponse({"error": "free quota"}, status_code=429), REASON_UPSTREAM_ERROR),
+        (StubResponse({"error": "free quota"}, status_code=500), REASON_UPSTREAM_ERROR),
+        (ReadTimeout("timed out"), REASON_TIMEOUT),
+        (RuntimeError("connection reset"), REASON_UPSTREAM_ERROR),
+        # No response object at all: the host failed technically, with no reason of its own.
+        (None, REASON_UPSTREAM_ERROR),
+        (StubResponse(None, status_code=200, text="<html>gateway</html>"), REASON_MALFORMED),
+        (StubResponse({"invalid": "structure"}), REASON_MALFORMED),
+    ],
+    ids=["http-400", "http-429", "http-500", "timeout", "transport", "no-response", "non-json", "wire"],
+)
+def test_every_technical_console_failure_hands_the_turn_to_the_fallback(
+    primary_failure, expected_fallback_reason
+):
+    transport = StubTransport([primary_failure, StubResponse(console_answer())])
+    client, settings = make(transport, cc_config())
+
+    decision, reason = ask(client, settings)
+
+    assert reason is None
+    assert decision is not None
+    assert decision.decider_model == CC_MODEL
+    assert decision.decider_endpoint == CC_URL
+    assert decision.decider_fallback_reason == expected_fallback_reason
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CC_URL]
+    assert [call["json"]["model"] for call in transport.calls] == [CONSOLE_PRIMARY, CC_MODEL]
+    # Both queued answers were consumed: the rescue really happened on the second host.
+    assert transport.responses == []
+
+
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422, 429, 500, 503])
 def test_every_http_failure_of_the_fallback_is_an_upstream_error(status_code):
-    transport = StubTransport([StubResponse({"error": "no"}, status_code=status_code)])
+    transport = StubTransport(
+        [
+            StubResponse({"error": "free quota"}, status_code=429),
+            StubResponse({"error": "no"}, status_code=status_code),
+        ]
+    )
     client, settings = make(transport, cc_config())
 
     decision, reason = ask(client, settings)
 
     assert decision is None
     assert reason == REASON_UPSTREAM_ERROR
+    # The status under test came from the second host, not from the console leg.
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CC_URL]
+    assert [call["json"]["model"] for call in transport.calls] == [CONSOLE_PRIMARY, CC_MODEL]
+    assert transport.responses == []
 
 
 def test_a_fallback_timeout_is_a_timeout():
@@ -357,14 +400,112 @@ def test_a_fallback_wire_failure_is_malformed():
     assert reason == REASON_MALFORMED
 
 
-def test_a_valid_but_unroutable_fallback_answer_keeps_the_semantic_reason():
-    transport = StubTransport([StubResponse(console_answer(confidence=0.2))])
+@pytest.mark.parametrize(
+    "answer, expected_reason",
+    [
+        (console_answer(confidence=0.2), REASON_LOW_CONFIDENCE),
+        (console_answer(choice="9"), REASON_UNKNOWN_CHOICE),
+    ],
+)
+def test_a_valid_but_unroutable_fallback_answer_keeps_the_semantic_reason(
+    answer, expected_reason
+):
+    transport = StubTransport([StubResponse({"error": "quota"}, status_code=429), StubResponse(answer)])
     client, settings = make(transport, cc_config())
 
     decision, reason = ask(client, settings)
 
     assert decision is None
+    assert reason == expected_reason
+    # The semantic answer was produced by the fallback, after a real console failure.
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CC_URL]
+    assert [call["json"]["model"] for call in transport.calls] == [CONSOLE_PRIMARY, CC_MODEL]
+    assert transport.responses == []
+
+
+# -- the last console attempt is what decides ---------------------------------------
+
+
+def test_a_missing_paid_answer_still_hands_the_turn_to_the_fallback():
+    # A missing response has no reason of its own, so the chain's last *reason* stays semantic —
+    # but the paid attempt failed technically, and the contract requires asking the fallback.
+    transport = StubTransport(
+        [
+            StubResponse(console_answer(confidence=0.2)),
+            None,
+            StubResponse(console_answer()),
+        ]
+    )
+    client, settings = make(transport, cc_config(console_jev_fallback_model=CONSOLE_PAID))
+
+    decision, reason = ask(client, settings)
+
+    assert reason is None
+    assert decision is not None
+    assert decision.decider_model == CC_MODEL
+    assert decision.decider_endpoint == CC_URL
+    # The reason recorded before the successful rescue is the last console reason, not the default.
+    assert decision.decider_fallback_reason == REASON_LOW_CONFIDENCE
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CONSOLE_URL, CC_URL]
+    assert [call["json"]["model"] for call in transport.calls] == [
+        CONSOLE_PRIMARY,
+        CONSOLE_PAID,
+        CC_MODEL,
+    ]
+    assert transport.responses == []
+
+
+def test_a_semantic_paid_answer_does_not_consult_the_fallback():
+    transport = StubTransport(
+        [
+            StubResponse(console_answer(confidence=0.2)),
+            StubResponse(console_answer(choice="9")),
+        ]
+    )
+    client, settings = make(transport, cc_config(console_jev_fallback_model=CONSOLE_PAID))
+
+    decision, reason = ask(client, settings)
+
+    assert decision is None
+    assert reason == REASON_UNKNOWN_CHOICE
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CONSOLE_URL]
+    assert transport.responses == []
+
+
+def test_a_missing_paid_answer_without_the_fallback_key_keeps_the_console_reason(monkeypatch):
+    monkeypatch.delenv("COMMANDCODE_API_KEY")
+    transport = StubTransport([StubResponse(console_answer(confidence=0.2)), None])
+    client, settings = make(transport, cc_config(console_jev_fallback_model=CONSOLE_PAID))
+
+    decision, reason = ask(client, settings)
+
+    assert decision is None
+    # No request goes to a host without a key, and the console chain's reason stays final.
     assert reason == REASON_LOW_CONFIDENCE
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CONSOLE_URL]
+    assert transport.responses == []
+
+
+def test_without_the_opt_in_a_missing_paid_answer_keeps_the_legacy_reason():
+    # The technical flag exists for the second-host decision only: with the trio empty the returned
+    # reason is exactly what 0.4.0 produced for the same two responses.
+    transport = StubTransport([StubResponse(console_answer(confidence=0.2)), None])
+    client, settings = make(
+        transport,
+        cc_config(
+            console_jev_fallback_model=CONSOLE_PAID,
+            console_jev_commandcode_base_url="",
+            console_jev_commandcode_api_key_env="",
+            console_jev_commandcode_model="",
+        ),
+    )
+
+    decision, reason = ask(client, settings)
+
+    assert decision is None
+    assert reason == REASON_LOW_CONFIDENCE
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CONSOLE_URL]
+    assert transport.responses == []
 
 
 @pytest.mark.parametrize(
@@ -383,6 +524,9 @@ def test_when_both_hosts_fail_the_fallback_reason_wins(second_failure, expected_
 
     assert decision is None
     assert reason == expected_reason
+    assert [call["url"] for call in transport.calls] == [CONSOLE_URL, CC_URL]
+    assert [call["json"]["model"] for call in transport.calls] == [CONSOLE_PRIMARY, CC_MODEL]
+    assert transport.responses == []
 
 
 # -- configuration ------------------------------------------------------------------
@@ -412,6 +556,9 @@ def test_a_partial_trio_disables_only_the_fallback(caplog):
         "https://api.commandcode.ai/provider/v1/systemone#frag",
         "https:///provider/v1/systemone",
         "not-a-url",
+        # ``urlsplit`` raises on this one instead of returning a bad parse: the loader must stay
+        # usable and the legacy chain must keep its single call and its reason.
+        "https://[broken/provider/v1/systemone",
     ],
 )
 def test_an_invalid_endpoint_disables_the_fallback(url):
