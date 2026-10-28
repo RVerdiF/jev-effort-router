@@ -37,6 +37,7 @@ from .config import (
     ROUTED_API_MODES,
     ROUTED_PROVIDER,
     ROUTED_PROVIDER_ALIASES,
+    CommandCodeFallback,
     EffectiveSettings,
     Settings,
     api_key,
@@ -226,6 +227,9 @@ class Router:
 
         try:
             memo, replayed = self._lookup(settings, turn_id, session_id)
+            # The opt-in SystemOne trio is part of this turn's configuration identity, both for a
+            # replayed memo and for a fresh decision, so it is resolved once here.
+            secondary = settings.active_commandcode_fallback()
 
             decision: Optional[Decision] = None
             if memo is not None:
@@ -307,7 +311,26 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
                     return None
 
-                if not api_key(curr_key_env):
+                # Secondary-transport guard: the opt-in SystemOne trio is configuration identity
+                # too. Changing its endpoint, model or key variable — or turning it on/off —
+                # invalidates the replay rather than reproducing a decision the active
+                # configuration would no longer make. An inactive trio is ("", "", ""), which is
+                # what every legacy memo carries, so the legacy path is unaffected.
+                memo_secondary = (
+                    getattr(memo, "decider_commandcode_endpoint", ""),
+                    getattr(memo, "decider_commandcode_model", ""),
+                    getattr(memo, "decider_commandcode_key_env", ""),
+                )
+                if memo_secondary != (secondary.url, secondary.model, secondary.key_env):
+                    logger.info(
+                        "jev-effort-router: memo commandcode fallback %r != active %r; failing open",
+                        memo_secondary,
+                        (secondary.url, secondary.model, secondary.key_env),
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
+                    return None
+
+                if not api_key(curr_key_env) and not _secondary_key_available(secondary):
                     logger.info(
                         "jev-effort-router: active decider key env %r has no key; failing open",
                         curr_key_env,
@@ -399,6 +422,10 @@ class Router:
                     decider_endpoint=settings.base_url_for(decision.decider),
                     decider_model=settings.decider_model_for(decision.decider),
                     decider_model_used=decision.decider_model,
+                    decider_endpoint_used=decision.decider_endpoint,
+                    decider_commandcode_endpoint=secondary.url,
+                    decider_commandcode_model=secondary.model,
+                    decider_commandcode_key_env=secondary.key_env,
                     decider_fallback_reason=decision.decider_fallback_reason,
                     confidence_threshold=effective.confidence_threshold,
                     max_effort=effective.max_effort,
@@ -634,6 +661,13 @@ class Router:
             "decider": getattr(decision, "decider", settings.decider),
             "replayed": bool(replayed),
         }
+        secondary = settings.active_commandcode_fallback()
+        if secondary.enabled:
+            # Provenance of the call that produced the decision. Only a deployment that opted into
+            # the secondary transport gains these two fields — on every other one the record keeps
+            # exactly the shape 0.4.0 wrote, so nothing downstream has to learn a new column.
+            record["decider_model"] = decision.decider_model or settings.decider_model_for(decision.decider)
+            record["decider_endpoint"] = decision.decider_endpoint or settings.base_url_for(decision.decider)
         record.update(where.fields())
         record.update({key: value for key, value in {"api_call_count": api_call_count}.items() if value not in (None, "")})
         self.audit(settings).append(record)
@@ -701,6 +735,15 @@ class Router:
         self._memo.clear()
 
 
+def _secondary_key_available(fallback: CommandCodeFallback) -> bool:
+    """Whether the opt-in secondary transport can actually be called: configured *and* keyed.
+
+    Only used to keep a memo replayable on a deployment whose primary credential is absent: a memo
+    whose decision came from the secondary transport is still this configuration's decision.
+    """
+    return bool(fallback.enabled and api_key(fallback.key_env))
+
+
 class _Where:
     """The identifiers a routing record is stamped with."""
 
@@ -756,6 +799,9 @@ def _decision_from_memo(memo: Memo, effort: Any = _UNSET) -> Decision:
         # Provenance of the replayed decision: the model that answered when the memo was written,
         # never the currently configured primary (which this replay did not consult).
         decider_model=memo.decider_model_used or memo.decider_model,
+        # The endpoint that answered when the memo was written — the secondary transport's, on a
+        # turn it rescued — falling back to the configured endpoint of a legacy memo.
+        decider_endpoint=getattr(memo, "decider_endpoint_used", "") or memo.decider_endpoint,
         decider_fallback_reason=memo.decider_fallback_reason,
         has_effort_confidence=bool(getattr(memo, "has_effort_confidence", False)),
     )

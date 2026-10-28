@@ -7,6 +7,9 @@ The plugin supports three pluggable decider backends configured via `decider`:
 2. `openai_compatible`: OpenAI-compatible Chat Completions endpoint (e.g. OpenCode Go).
 3. `jev_console`: OpenCode Console SystemOne API (`https://opencode.ai/inference/systemone/v1/systemone`).
 
+Wire 4 is **not** a fourth decider: it is the opt-in secondary transport `jev_console` may consult
+after its own chain fails technically.
+
 ---
 
 ## Wire 1: TypeSafe Jev Decisions API (`decider: jev`)
@@ -233,3 +236,139 @@ The decider responds with SystemOne envelope carrying `answers`:
 ```
 
 When the primary `console_jev_model` fails (HTTP error, timeout, malformed payload), the backend iterates to `console_jev_fallback_model` (e.g. standard/paid Jev on OpenCode Console). If both fail or confidence falls below threshold, the router fails open gracefully leaving the original request intact.
+
+---
+
+## Wire 4: CommandCode SystemOne fallback for `jev_console` (opt-in)
+
+A second SystemOne host behind Wire 3, **off unless an operator configures all three settings**. It
+covers one operational case: the console chain (free, then paid) fails *technically* — 429, 5xx, a
+timeout, a dead credential — and the turn would otherwise keep the statically configured model.
+
+Enabling it is a deliberate act with a privacy consequence, so it is never a default, never inferred
+from a key being present, and never enabled for the `jev` or `openai_compatible` deciders.
+
+### Configuration (all three required)
+
+```yaml
+decider: jev_console
+console_jev_commandcode_base_url: https://api.commandcode.ai/provider/v1/systemone
+console_jev_commandcode_api_key_env: COMMANDCODE_API_KEY
+console_jev_commandcode_model: typesafe/jev
+```
+
+| Setting | Contract |
+|---|---|
+| `console_jev_commandcode_base_url` | The **complete** SystemOne endpoint. No suffix is appended: the path is the provider's contract, not this plugin's to compose. Must be `https://`, and must not carry userinfo, a query or a fragment — each of those either leaks a credential into a record or sends the decision somewhere other than the documented endpoint. An unusable value disables the fallback and is not echoed anywhere. |
+| `console_jev_commandcode_api_key_env` | The **name** of the variable holding the key. The value is read from the environment at call time (`os.environ`), never from `config.yaml`, never from `auth.json`, never from a credential pool, and never written to a log or an audit record. |
+| `console_jev_commandcode_model` | The decision model id asked on this host. CommandCode namespaces its ids, so the same Jev is `typesafe/jev` here and `typesafe/jev-1.13` on Wire 1 — they are different contracts. |
+
+State machine:
+
+* **empty trio** → disabled, and the deployment is indistinguishable from one that predates the
+  feature: same payload bytes, same number of HTTP calls, same audit shape, same status output;
+* **partial or invalid trio** → disabled. A sanitized warning names the setting at fault (never its
+  value) and *only* the fallback is switched off — the console chain keeps working;
+* **complete, valid trio** → enabled for `jev_console` only.
+
+### When the fallback is consulted
+
+```
+console primary (free) → console paid (when console_jev_fallback_model is set and differs)
+                       → CommandCode, once → fail open
+```
+
+CommandCode is asked only after a **technical** failure of that chain:
+
+| Last console outcome | Fallback consulted? |
+|---|---|
+| no `OPENCODE_CONSOLE_API_KEY` | yes (it is the only transport left) |
+| timeout / transport exception / absent response | yes |
+| HTTP non-2xx, including 400 (credit), 401/403, 404, 422, 429, 5xx | yes |
+| non-JSON body, or a wire that fails SystemOne validation (`malformed_answer`) | yes |
+| valid answer below the confidence threshold (`low_confidence`) | **no** |
+| valid answer naming an option the grid does not carry (`unknown_choice`) | **no** |
+
+The last two are not host failures: the console answered, the router simply could not apply the
+answer, so asking a second host the same question would add latency and cost for nothing.
+
+### Request shape
+
+The payload is Wire 3's, unchanged except for `model`:
+
+```json
+{
+  "model": "typesafe/jev",
+  "state": { "user_message": "...", "recent_context": "...", "surface": "cli", "provider": "opencode-console" },
+  "questions": { "model_route": { "type": "choice", "criteria": { "1": "deepseek-v4.1-flash: ..." } },
+                 "reasoning_effort": { "type": "choice", "criteria": { "low": "...", "medium": "...", "high": "..." } } }
+}
+```
+
+Headers are built from scratch — the generation provider's `extra_headers` are **never** inherited:
+
+```
+POST {console_jev_commandcode_base_url}
+Authorization: Bearer ${console_jev_commandcode_api_key_env}
+Content-Type: application/json
+X-Title: hermes-jev-effort-router
+```
+
+`x-cmd-zdr` is a chat-only marker and must never reach a decision request: the transport does not
+send it, and the header filter strips it case-insensitively as a backstop. No `User-Agent` is
+injected either — the HTTP client's own effective value is preserved, exactly as on the Wire 3 path.
+
+### Failure classification
+
+| Fallback outcome | Reason recorded |
+|---|---|
+| HTTP 4xx/5xx (credit, credential, rate limit) | `upstream_error` |
+| timeout | `timeout` |
+| transport exception, absent response | `upstream_error` |
+| non-JSON body, invalid SystemOne wire | `malformed_answer` |
+| valid answer below threshold / off-grid choice | the semantic reason (`low_confidence`, `unknown_choice`) |
+| missing secondary credential | nothing is sent; the console chain's last reason stays final |
+
+That last row matters: a missing secondary key must not turn a 429 or a timeout into `no_api_key`,
+or a fallback configuration problem would hide the host failure the operator has to act on. When
+*both* credentials are missing the answer is the legacy `no_api_key`.
+
+There are no retries and no recursion: the same per-call `timeout_s`, one request, and the recorded
+`latency_ms` is the cumulative cost of the whole chain.
+
+### Audit, replay and status
+
+* `jev_model` keeps naming the model that actually answered — `typesafe/jev` on a fallback rescue.
+* `decider_fallback_reason` carries the reason of the failed attempt that preceded the successful one
+  (`upstream_error`, `timeout`, `malformed_answer`, `no_api_key`). It is not `fallback_reasons`,
+  which describes a degraded *answer*.
+* With the trio enabled, the route record also gains two columns:
+  `decider_model` (the effective model) and `decider_endpoint` (the effective URL, never carrying a
+  credential). They are written for the primary, paid and fallback legs alike, and a legacy
+  deployment never gains them.
+* The trio is part of the memo's configuration identity: changing the endpoint, model or key
+  variable — or switching the trio on/off — invalidates a replay and the call fails open instead of
+  reproducing a decision the active configuration would no longer make.
+* `jev_effort_router_status` reports a `commandcode_fallback` block with `configured`, `enabled`,
+  `endpoint`, `model`, `api_key_env`, `api_key_present` and a sanitized `reason`. The key's *name* is
+  shown; its value never is. With an empty trio the block is omitted entirely.
+
+### Privacy and cost — read before enabling
+
+* **No ZDR agreement.** CommandCode/SystemOne is not a zero-data-retention upstream, so enabling it
+  changes where this deployment's routing context may be retained. That is why the setting is
+  inert by default and why activation requires an explicit decision by the operator.
+* **What leaves the machine**: exactly what Wire 3 already sends — the last user message (up to 4000
+  characters), up to `context_turns` preceding turns (up to 12000 characters), the platform and
+  provider names, and the grid criteria. No system prompt, no tool output, no conversation beyond
+  that window, no credential belonging to another host.
+* **Cost**: the host is reached on the operator's existing paid plan (GOAT) and consumes its credit.
+  This plugin does not meter spend, does not top up and never purchases a plan; a credit failure
+  (`400`/`402`/`429`) is reported as `upstream_error` and the turn falls open.
+* **Latency**: the chain's budget is the console chain plus one more call, not a fan-out.
+
+### Rollback
+
+Empty the three settings and restart the gateway. No code change, no migration, and the legacy
+behaviour returns byte-identical — including the absence of the two extra audit columns.
+

@@ -209,6 +209,20 @@ def _status(router, settings: Settings, recent: int = 5, provider: Optional[str]
     coverage = _grid_coverage(router, settings, provider=target_provider)
     if coverage:
         payload["grid_coverage"] = coverage
+    # The opt-in SystemOne transport is reported only when the operator configured any part of it:
+    # an unconfigured deployment keeps byte-identical status output. The key variable's *name* is
+    # shown, never its value.
+    commandcode = settings.commandcode_fallback()
+    if commandcode.configured:
+        payload["commandcode_fallback"] = {
+            "configured": True,
+            "enabled": settings.active_commandcode_fallback().enabled,
+            "endpoint": commandcode.url or None,
+            "model": commandcode.model or None,
+            "api_key_env": commandcode.key_env or None,
+            "api_key_present": bool(api_key(commandcode.key_env)) if commandcode.key_env else False,
+            "reason": commandcode.reason or None,
+        }
     # Only present when the provider catalog could actually be read: an empty list is omitted
     # rather than reported as "every model is missing".
     unavailable = _grid_unavailable(router, settings, provider=target_provider)

@@ -50,6 +50,17 @@ class Memo:
     #: did. Stored so a replayed record keeps the provenance of the turn it replays instead of
     #: re-reporting the configured primary as if it had been consulted again.
     decider_model_used: str = ""
+    #: The endpoint that actually answered, when it is not the configured primary endpoint (the
+    #: opt-in SystemOne fallback). Provenance for a replayed record, kept apart from
+    #: ``decider_endpoint``, which is the *configured* endpoint the replay guards compare against.
+    decider_endpoint_used: str = ""
+    #: The opt-in SystemOne trio as configured when this decision was written. Part of the replay
+    #: identity: changing the endpoint, model or key variable — or turning the trio on or off —
+    #: invalidates the memo instead of replaying a decision the active configuration would no longer
+    #: make. Empty on every deployment that never opted in, so a legacy memo matches an empty trio.
+    decider_commandcode_endpoint: str = ""
+    decider_commandcode_model: str = ""
+    decider_commandcode_key_env: str = ""
     decider_fallback_reason: Optional[str] = None
     confidence_threshold: float = 0.0
     max_effort: Optional[str] = None
