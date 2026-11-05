@@ -617,3 +617,72 @@ def test_materialized_schema_defaults():
     assert settings.is_provider_routable("opencode-console") is False
     assert settings.is_provider_routable("ollama-cloud") is True
 
+
+
+# -- effort map parsing: levels, nulls, and immutability -----------------------------
+
+
+def test_the_effort_map_parser_drops_non_levels_instead_of_stringifying_them():
+    """``str(None)`` used to become the level ``"none"`` — the parser must not do that."""
+    settings = settings_for(
+        {
+            "effort_maps": {
+                "openai-codex": {
+                    "gpt-6-luna": {
+                        "accepted": ["none", None, 3, True, " HIGH ", ""],
+                        "overrides": {"xhigh": "max", None: "max", "low": None, 7: "high"},
+                    }
+                },
+                "p": {"m": None},
+                None: {"m": ["low"]},
+                3: {"m": ["low"]},
+            }
+        }
+    )
+
+    luna = settings.effort_maps["openai-codex"]["gpt-6-luna"]
+    assert luna["accepted"] == ("none", "high")
+    assert dict(luna["overrides"]) == {"xhigh": "max"}
+    # A null key is not a route name and a null spec is not an absent entry.
+    assert set(settings.effort_maps) == {"openai-codex", "p"}
+    assert settings.effort_maps["p"]["m"] is None
+
+
+def test_effort_map_specs_accept_both_shapes_and_only_those():
+    """A sequence, an ``{accepted, overrides}`` mapping — nothing else is a declaration."""
+    settings = settings_for(
+        {
+            "effort_maps": {
+                "p": {
+                    "seq": ["low", "high"],
+                    "obj": {"accepted": ["none"], "overrides": {"xhigh": "none"}},
+                    "scalar": "low",
+                    "number": 4,
+                    "mapping_wrong_type": {"accepted": "low"},
+                }
+            }
+        }
+    )
+    provider = settings.effort_maps["p"]
+    assert provider["seq"] == ("low", "high")
+    assert provider["obj"]["accepted"] == ("none",)
+    assert dict(provider["obj"]["overrides"]) == {"xhigh": "none"}
+    # A bare string is not a sequence of levels: iterating it would yield its characters.
+    assert provider["scalar"] == "low"
+    assert provider["number"] == 4
+    assert provider["mapping_wrong_type"]["accepted"] == ()
+
+
+def test_the_effort_map_stays_immutable_after_parsing():
+    settings = settings_for(
+        {"effort_maps": {"p": {"m": {"accepted": ["low", "high"], "overrides": {"xhigh": "high"}}}}}
+    )
+    with pytest.raises(TypeError):
+        settings.effort_maps["p"] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        settings.effort_maps["p"]["m"] = ()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        settings.effort_maps["p"]["m"]["accepted"] = ()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        settings.effort_maps["p"]["m"]["overrides"]["xhigh"] = "low"  # type: ignore[index]
+    assert hash(settings) == hash(settings)

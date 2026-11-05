@@ -750,7 +750,7 @@ def test_routable_providers_allowlist(tmp_path):
 
 def test_provider_specific_grid_and_effort_map(tmp_path):
     transport = StubTransport([StubResponse(decision_payload("1", 0.95, "high", 0.95, grid_size=2))])
-    router, _ = build(
+    router, settings = build(
         tmp_path,
         transport,
         config={
@@ -768,8 +768,36 @@ def test_provider_specific_grid_and_effort_map(tmp_path):
     )
     assert result is not None
     assert result["request"]["model"] == "deepseek-v4.1-flash"
-    # Effort clamped to medium because effort_maps declares low/medium for deepseek on opencode-go
-    assert result["request"]["reasoning_effort"] == "medium"
+    # `high` is not in the declared map, so the field is removed rather than clamped to `medium`.
+    assert "reasoning_effort" not in result["request"]
+    record = router.tail(settings, limit=1)[0]
+    assert record["effort_requested"] == "high"
+    assert record["effort"] is None
+
+    # A declared level lands verbatim on the same requested model.
+    transport_declared = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, "medium", 0.95, grid_size=2))]
+    )
+    router_declared, settings_declared = build(
+        tmp_path,
+        transport_declared,
+        config={
+            "routable_providers": ["opencode-go"],
+            "grids": {"opencode-go": ["deepseek-v4.1-flash: fast", "kimi-k3: code"]},
+            "effort_maps": {"opencode-go": {"deepseek-v4.1-flash": ["low", "medium"]}},
+        },
+    )
+    declared = route(
+        router_declared,
+        ollama_request(),
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+        turn_id="turn-2",
+        session_id="session-2",
+    )
+    assert declared is not None
+    assert declared["request"]["reasoning_effort"] == "medium"
+    assert router_declared.tail(settings_declared, limit=1)[0]["effort"] == "medium"
 
 
 def test_openai_compatible_decider_routing_end_to_end(tmp_path, monkeypatch):
@@ -2396,3 +2424,233 @@ def test_chat_completions_still_writes_the_top_level_field_only(tmp_path):
     assert result["request"]["reasoning_effort"] == "high"
     assert "reasoning" not in result["request"]
 
+
+
+# -- the declarative contract, end to end -------------------------------------------
+
+#: The maps the ``code`` profile is being migrated to, trimmed to what these tests route.
+CHAT_ROUTE_MAP_CONFIG = {
+    "decider": "jev_console",
+    "routable_providers": ["opencode-go", "commandcode"],
+    "effort_maps": {
+        "opencode-go": {
+            "deepseek-v4.1-flash": {
+                "accepted": ["low", "medium", "high", "max"],
+                "overrides": {"xhigh": "max"},
+            }
+        },
+        "commandcode": {
+            "deepseek/deepseek-v4.1-flash": {
+                "accepted": ["low", "medium", "high", "max"],
+                "overrides": {"xhigh": "max"},
+            }
+        },
+    },
+}
+
+CODEX_ROUTE_MAP_CONFIG = {
+    "decider": "jev_console",
+    "routable_providers": ["openai-codex"],
+    "effort_maps": {
+        "openai-codex": {
+            "gpt-6-luna": {"accepted": ["none", "low", "medium", "high", "xhigh", "max"]},
+            "gpt-6-luna-900k": {"accepted": ["none", "low", "medium", "high", "xhigh", "max"]},
+            "gpt-6.1-sol": {"accepted": ["low", "medium", "high", "xhigh", "max"]},
+        }
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "provider,model",
+    [("opencode-go", "deepseek-v4.1-flash"), ("commandcode", "deepseek/deepseek-v4.1-flash")],
+)
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_a_declared_map_lands_the_jev_level_on_the_chat_routes(
+    tmp_path, monkeypatch, provider, model, level
+):
+    """Every level Jev can decide reaches the wire verbatim, through the operator's map."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, level, 0.9, grid_size=1))]
+    )
+    router, settings = build(tmp_path, transport, config=CHAT_ROUTE_MAP_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = route(
+        router,
+        provider=provider,
+        model=model,
+        turn_id=f"{provider}-{level}",
+        session_id=f"{provider}-{level}",
+    )
+
+    assert result is not None
+    # The route really ran: the model Jev chose is the one on the wire.
+    assert result["request"]["model"] == model
+    assert result["request"]["reasoning_effort"] == level
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["provider"] == provider
+    assert record["model"] == model
+    assert record["effort_requested"] == level
+    assert record["effort"] == level
+    assert record["fallback_reasons"] == []
+    assert transport.call_count == 1
+
+
+def test_a_declared_map_removes_a_preexisting_effort_field_when_it_omits(tmp_path, monkeypatch):
+    """A level the map does not declare is omitted from a payload that already carried one."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, "high", 0.9, grid_size=1))]
+    )
+    config = {
+        "decider": "jev_console",
+        "routable_providers": ["opencode-go"],
+        "effort_maps": {"opencode-go": {"deepseek-v4.1-flash": ["low"]}},
+    }
+    router, settings = build(tmp_path, transport, config=config)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    # Exactly what the profile's derivation would have put there before the middleware ran.
+    request = ollama_request(model="deepseek-v4.1-flash", reasoning_config={"effort": "low"})
+    request["reasoning_effort"] = "low"
+
+    result = route(
+        router,
+        request,
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+        turn_id="omit-map",
+        session_id="omit-map",
+    )
+
+    assert result is not None
+    assert "reasoning_effort" not in result["request"]
+    record = router.tail(settings, limit=1)[0]
+    # The wire carried nothing; the audit keeps Jev's choice as a separate field.
+    assert record["effort"] is None
+    assert record["effort_requested"] == "high"
+
+
+@pytest.mark.parametrize(
+    "choice,model,wire_model",
+    [
+        ("1", "gpt-6-luna", "gpt-6-luna"),
+        ("2", "gpt-6-luna-900k", "gpt-6-luna"),
+        ("3", "gpt-6.1-sol", "gpt-6.1-sol"),
+    ],
+)
+def test_codex_selects_each_declared_model_and_writes_only_reasoning_effort(
+    tmp_path, monkeypatch, choice, model, wire_model
+):
+    """Each of the three served ids is really selected, and only ``reasoning.effort`` changes."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    transport = StubTransport(
+        [StubResponse(decision_payload(choice, 0.95, "high", 0.9, grid_size=3))]
+    )
+    router, settings = build(tmp_path, transport, config=CODEX_ROUTE_MAP_CONFIG)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    result = codex_route(
+        router, turn_id=f"codex-map-{choice}", session_id=f"codex-map-{choice}"
+    )
+
+    assert result is not None
+    routed = result["request"]
+    assert routed["model"] == wire_model
+    # The level is written inside the object the transport already built, nothing else.
+    assert routed["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert routed["include"] == ["reasoning.encrypted_content"]
+    assert "reasoning_effort" not in routed
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["model"] == model
+    assert record["wire_model"] == wire_model
+    assert record["effort_requested"] == "high"
+    assert record["effort"] == "high"
+    assert transport.call_count == 1
+
+
+def test_codex_omits_a_level_the_map_does_not_declare(tmp_path, monkeypatch):
+    """A level outside the declared set removes only ``effort`` — summary/include stay."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    config = {
+        "decider": "jev_console",
+        "routable_providers": ["openai-codex"],
+        "effort_maps": {
+            "openai-codex": {
+                "gpt-6-luna": {"accepted": ["low", "medium", "high"]},
+                "gpt-6-luna-900k": {"accepted": ["low", "medium", "high"]},
+                "gpt-6.1-sol": {"accepted": ["low"]},
+            }
+        },
+    }
+    transport = StubTransport(
+        [StubResponse(decision_payload("3", 0.95, "high", 0.9, grid_size=3))]
+    )
+    router, settings = build(tmp_path, transport, config=config)
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    request = codex_request(model="gpt-6.1-sol", effort="high")
+    result = codex_route(
+        router, request, model="gpt-6.1-sol", turn_id="codex-none", session_id="codex-none"
+    )
+
+    assert result is not None
+    assert result["request"]["reasoning"] == {"summary": "auto"}
+    assert result["request"]["include"] == ["reasoning.encrypted_content"]
+    record = router.tail(settings, limit=1)[0]
+    assert record["effort"] is None
+    assert record["effort_requested"] == "high"
+
+
+def test_replay_re_resolves_the_level_after_the_map_changes(tmp_path, monkeypatch):
+    """The memo stores Jev's choice, not the level: the second call re-resolves it."""
+    monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "***")
+    config = {
+        "decider": "jev_console",
+        "routable_providers": ["opencode-go"],
+        "effort_maps": {"opencode-go": {"deepseek-v4.1-flash": ["low", "medium", "high"]}},
+    }
+    transport = StubTransport(
+        [StubResponse(decision_payload("1", 0.95, "high", 0.9, grid_size=1))]
+    )
+    router = Router(
+        lambda: load_settings(lambda key, default=None: config.get(key, default)),
+        get_state=lambda: StubState(tmp_path),
+        client_factory=lambda _settings: JevClient(
+            load_settings(lambda key, default=None: config.get(key, default)), transport=transport
+        ),
+        catalog=_NoCatalog(),
+    )
+    monkeypatch.setattr(router, "_data_dir", lambda: str(tmp_path / "audit"))
+
+    first = route(
+        router,
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+        turn_id="replay-map",
+        session_id="replay-map",
+    )
+    assert first is not None
+    assert first["request"]["reasoning_effort"] == "high"
+
+    # The operator narrows the map between the two calls of the same turn.
+    config["effort_maps"] = {"opencode-go": {"deepseek-v4.1-flash": ["low"]}}
+    second = route(
+        router,
+        dict(first["request"]),
+        provider="opencode-go",
+        model="deepseek-v4.1-flash",
+        turn_id="replay-map",
+        session_id="replay-map",
+        api_call_count=1,
+        api_request_id="replay-map:api:1",
+    )
+
+    assert second is not None
+    assert "reasoning_effort" not in second["request"]
+    # No second decision: the memo supplied the model and Jev's requested level.
+    assert transport.call_count == 1

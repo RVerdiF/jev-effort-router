@@ -54,6 +54,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **`effort_maps` now mean one thing, on every route.** The map path and the strict built-in routes
+  (`opencode-console`, `opencode-go`, `commandcode`, `openai-codex`) run a single algorithm,
+  `effort.resolve_declared_effort`: a requested level the declaration accepts goes out verbatim;
+  otherwise a *declared* override whose target is itself accepted is used; otherwise the field is
+  omitted. The custom path's nearest-weaker clamp, its `LADDER` position comparison and its
+  anti-escalation rule for overrides are gone — an override is honoured because it is written down,
+  which is what makes `xhigh → max` work on a map exactly as it did on a built-in policy. `"none"` is
+  an ordinary level when declared (`accepted: ["none"]` is a valid contract), while Python `None`, an
+  empty request and a YAML `null` mean "omit". A matched model entry **replaces** the built-in policy
+  (levels, overrides and the omission decision) instead of merging with it; a provider map that does
+  not mention a model leaves the built-in fallback in place, and an entry that matches with an empty
+  spec omits rather than revealing the built-in policy. `ModelReasoningPolicy.overrides` now carries
+  the effective declaration and `wire_parameter` stays metadata (`reasoning` for Codex and its
+  aliases, `reasoning_effort` for the other custom contracts). Map keys now resolve deterministically:
+  full id exact, then a namespace-free key equal to the slug, then the longest true `-`-delimited
+  prefix (never a substring), with the provider looked up by exact name and then by the canonical
+  name of a registered alias. `ollama-cloud` **without** a map entry keeps its legacy family clamp
+  unchanged. **This is a deliberate behaviour break for maps that relied on the clamp:** a level that
+  used to be clamped to the nearest weaker accepted level is now omitted. Migration: declare the
+  override (`overrides: {xhigh: max}`) or accept the omission; a map that wants the built-in
+  vocabulary must now repeat it.
 - **`opencode-go` now applies the decided level as `reasoning_effort`.** The built-in policy for
   `deepseek-v4.1-flash` on that route stops claiming "no confirmed contract": a probe of
   `POST https://opencode.ai/zen/go/v1/chat/completions` (mandatory `x-opencode-session` header) on
@@ -96,6 +117,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **A YAML `null` level no longer becomes the level `"none"`.** `config._freeze_effort_spec` built
+  every declaration with `str(x).strip().lower()`, so `None` became `"none"` and a null entry looked
+  like a declared disable — the same string the Luna policy legitimately sends. Parsing and
+  resolution now share one normaliser (`effort.normalise_level`): only non-empty strings are levels,
+  and nulls, numbers and booleans are dropped from `accepted`, from override keys and targets, and
+  from provider/model keys. A spec that matched the model but declares nothing is still a matched
+  entry — it omits instead of falling back to the built-in policy. The structures stay immutable.
 - **The plugin is a virtual uv workspace member, so it installs in more than one profile.** With a
   `[build-system]` block, `pm/workspace.py` kept the declared project name
   (`hermes-plugin-jev-effort-router`) for every profile copy. Two profiles enabling the same plugin

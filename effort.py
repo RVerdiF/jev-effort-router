@@ -1,22 +1,239 @@
-"""Per-family reasoning-effort translation.
+"""Reasoning-effort translation: declared vocabularies, and the legacy Ollama fallback.
 
-Hermes carries a wide internal ladder (``none`` … ``ultra``) and clamps it per provider.
-The router only ever asks for ``low``/``medium``/``high``, so the job here is narrower:
-land the chosen level on the vocabulary the *selected model's* wire really accepts, never
-escalate, and omit the field rather than send a level the route would reject with a 400.
+Two contracts live here, and only one of them guesses.
+
+* **Declared** — an operator ``effort_maps`` entry and every strict built-in route
+  (``opencode-console``, ``opencode-go``, ``commandcode``, ``openai-codex``). The declaration is
+  authoritative: a requested level that the declaration accepts goes out verbatim; otherwise a
+  *declared* override whose target is itself accepted is used; otherwise the field is omitted.
+  There is no ordering, no nearest-weaker clamp and no anti-escalation rule: ``xhigh → max``
+  works because it is written down, and a level nobody declared is never invented.
+  ``"none"`` is an ordinary level here — valid when (and only when) it is declared — while
+  Python ``None`` (and empty/whitespace) means "omit the field".
+
+* **Legacy Ollama:cloud families** — only for an ``ollama-cloud`` route with **no** map entry.
+  That route keeps the historical nearest-weaker clamp (:func:`clamp`) for compatibility; it is
+  outside the declarative contract on purpose.
 
 The vocabularies below mirror ``agent/reasoning_effort.py`` in hermes-agent, which is the
-reference implementation of the clamping rule ("nearest weaker level, never stronger").
-`docs/routing-grid.md` records where each row came from.
+reference implementation of the clamping rule ("nearest weaker level, never stronger") that the
+legacy path still uses. `docs/routing-grid.md` records where each row came from.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 #: Hermes' ladder, low to high. Used only for nearest-weaker arithmetic.
 LADDER: Tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def normalise_level(value: Any) -> Optional[str]:
+    """A declared or requested level, or ``None`` when the value is not one.
+
+    Levels are non-empty strings, normalised with ``strip().lower()``. YAML ``null``, Python
+    ``None``, numbers and booleans are **not** levels: they are dropped rather than stringified
+    (``str(None)`` used to become the perfectly valid level ``"none"``). The vocabulary is not
+    filtered against :data:`LADDER` — a declaration may use the endpoint's own words.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    return text or None
+
+
+def normalise_levels(values: Any) -> Tuple[str, ...]:
+    """A declared level sequence, normalised, in declaration order, without duplicates.
+
+    A bare string is not a sequence of levels — it is refused instead of being iterated over its
+    characters. Anything that is not a list/tuple/set is refused too.
+    """
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return ()
+    levels: list[str] = []
+    for item in values:
+        level = normalise_level(item)
+        if level is not None and level not in levels:
+            levels.append(level)
+    return tuple(levels)
+
+
+def normalise_overrides(raw: Any) -> Mapping[str, str]:
+    """A declared ``requested -> sent`` mapping, normalised on both sides.
+
+    Entries whose key or target is not a level (``null``, a number, a boolean, an empty string)
+    are dropped: an override is never a way to smuggle a non-level onto the wire.
+    """
+    if not isinstance(raw, Mapping):
+        return MappingProxyType({})
+    pairs: Dict[str, str] = {}
+    for key, value in raw.items():
+        source = normalise_level(key)
+        target = normalise_level(value)
+        if source is None or target is None or source in pairs:
+            continue
+        pairs[source] = target
+    return MappingProxyType(pairs)
+
+
+@dataclass(frozen=True)
+class EffortContract:
+    """One model's declared reasoning vocabulary, in either supported shape."""
+
+    accepted: Tuple[str, ...] = ()
+    overrides: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    @property
+    def valid(self) -> bool:
+        """True when the contract declares at least one level.
+
+        An entry that matched the model but declares nothing is a *deliberate* shadow of the
+        built-in policy, not an absence — callers must omit rather than fall back.
+        """
+        return bool(self.accepted)
+
+    def resolve(self, requested: Any) -> Optional[str]:
+        """The level to put on the wire, or ``None`` when the contract does not cover it."""
+        return resolve_declared_effort(requested, self.accepted, self.overrides)
+
+
+EMPTY_CONTRACT = EffortContract()
+
+
+def parse_effort_spec(spec: Any) -> EffortContract:
+    """Read an effort spec in either supported shape: a level sequence or ``{accepted, ...}``.
+
+    Accepts the immutable structures ``config.parse_effort_maps`` produces as well as the raw
+    YAML shapes. Anything else — ``None``, a scalar, a mapping with no usable ``accepted`` —
+    yields an empty contract.
+    """
+    if isinstance(spec, Mapping):
+        return EffortContract(
+            accepted=normalise_levels(spec.get("accepted")),
+            overrides=normalise_overrides(spec.get("overrides")),
+        )
+    if isinstance(spec, (list, tuple, set, frozenset)):
+        return EffortContract(accepted=normalise_levels(spec))
+    return EMPTY_CONTRACT
+
+
+def resolve_declared_effort(
+    requested: Any,
+    accepted: Any,
+    overrides: Any = None,
+) -> Optional[str]:
+    """The single declarative algorithm, shared by maps and strict built-in policies.
+
+    Order, and nothing else:
+
+    1. a request that is not a level, or a contract that accepts nothing → omit (``None``);
+    2. the request is one of the declared levels → return it verbatim (an accepted level always
+       wins, even when a conflicting override names another one);
+    3. ``overrides[requested]`` → its target, but only when that target is itself accepted;
+    4. otherwise → omit.
+
+    Overrides are never chained, and no level outside ``accepted`` is ever produced. Position on
+    :data:`LADDER` plays no part: ``xhigh → max`` happens because it is written down.
+    """
+    level = normalise_level(requested)
+    if level is None:
+        return None
+    declared = normalise_levels(accepted)
+    if not declared:
+        return None
+    if level in declared:
+        return level
+    target = normalise_overrides(overrides).get(level)
+    if target is not None and target in declared:
+        return target
+    return None
+
+
+def select_model_spec(entries: Any, model_id: Optional[str]) -> Tuple[bool, Any]:
+    """Pick the entry for ``model_id`` from a model-keyed mapping: ``(found, spec)``.
+
+    The result is deterministic and independent of insertion order:
+
+    1. the full model id exactly (``deepseek/deepseek-v4.1-flash``);
+    2. a namespace-free key exactly equal to the slug;
+    3. the longest true prefix — the id continues with ``-``, so ``gpt-6-luna`` matches
+       ``gpt-6-luna-900k`` but a key merely contained in the middle of the id never matches.
+
+    A qualified key is compared with the full id only, so it cannot claim another namespace's
+    model; a bare key is compared with the slug. Prefix ties are broken by the length of the
+    key's model part (longer first), then by qualified-before-bare, then lexically.
+
+    ``found`` is returned separately from ``spec`` on purpose: a matched entry whose spec is
+    empty or ``None`` is a deliberate shadow, not an absence.
+    """
+    if not isinstance(entries, Mapping):
+        return False, None
+    full_id = normalise_level(model_id)
+    if not full_id:
+        return False, None
+    slug = full_id.rsplit("/", 1)[-1]
+
+    best: Optional[Tuple[Tuple[Any, ...], Any]] = None
+    for key, spec in entries.items():
+        candidate = normalise_level(key)
+        if candidate is None:
+            continue
+        qualified = "/" in candidate
+        scope = full_id if qualified else slug
+        model_part = candidate.rsplit("/", 1)[-1]
+        if candidate == full_id:
+            rank: Tuple[Any, ...] = (0, -len(model_part), 0 if qualified else 1, candidate)
+        elif not qualified and candidate == slug:
+            rank = (1, -len(model_part), 1, candidate)
+        elif scope.startswith(candidate + "-"):
+            rank = (2, -len(model_part), 0 if qualified else 1, candidate)
+        else:
+            continue
+        if best is None or rank < best[0]:
+            best = (rank, spec)
+    if best is None:
+        return False, None
+    return True, best[1]
+
+
+def _canonical_provider(provider: str) -> str:
+    """The route's canonical name: the alias table's answer, else the name as given.
+
+    Imported lazily: ``config`` itself imports this module for the level normalisation, so a
+    module-level import here would be a cycle. The alias table is never duplicated.
+    """
+    key = (provider or "").strip().lower()
+    from .config import canonical_provider_name as _canonical
+
+    return _canonical(key) or key
+
+
+def _custom_wire_parameter(provider: str) -> str:
+    """The field a custom contract's level rides in — metadata, not a transport selector.
+
+    ``reasoning`` for the Codex Responses route (the transport nests the level there),
+    ``reasoning_effort`` for every other custom contract. The router still picks the payload
+    shape from ``api_mode``; nothing here can create a ``reasoning`` object.
+    """
+    canonical = _canonical_provider(provider)
+    return "reasoning" if canonical == "openai-codex" else "reasoning_effort"
+
+
+def _effort_map_entry(
+    effort_maps: Optional[Mapping[str, Any]],
+    provider_key: str,
+) -> Tuple[Optional[str], Any]:
+    """The provider's map: the exact name first, then the canonical name of a known alias."""
+    if not effort_maps or not isinstance(effort_maps, Mapping):
+        return None, None
+    if provider_key in effort_maps:
+        return provider_key, effort_maps[provider_key]
+    canonical = _canonical_provider(provider_key)
+    if canonical and canonical != provider_key and canonical in effort_maps:
+        return canonical, effort_maps[canonical]
+    return None, None
 
 
 @dataclass(frozen=True)
@@ -93,6 +310,10 @@ def clamp(
 ) -> Optional[str]:
     """Clamp a requested level onto ``accepted``; ``None`` means "omit the field".
 
+    **Legacy path only**: the ``ollama-cloud`` family table for a route with no
+    ``effort_maps`` entry. Declared policies — operator maps and the strict built-in routes — use
+    :func:`resolve_declared_effort` and never clamp.
+
     Order: declared override, verbatim when accepted, else the nearest **weaker** level, and
     the provider's floor when nothing weaker exists. A level that is not a ladder rung at all
     (a bespoke provider vocabulary) is passed through untouched.
@@ -122,65 +343,6 @@ def clamp(
     return min(candidates, key=LADDER.index)
 
 
-def _resolve_custom_provider_effort(
-    requested_effort: str,
-    spec: Any,
-) -> Optional[str]:
-    """Resolve effort for a custom provider map without escalation.
-
-    Rules (O2):
-    - Never escalate or invent a level: omit (return None) when no declared accepted
-      level is equal to or weaker than requested.
-    - An empty spec, empty accepted list, or unverified model returns None (omit).
-    - An escalating override (mapping a level to a strictly stronger level) is ignored.
-    - If requested is in accepted: return requested.
-    - If requested is in LADDER: clamp only to the nearest *weaker* accepted level.
-      If no weaker accepted level exists, return None (never escalate to a higher floor).
-    """
-    requested = requested_effort.strip().lower()
-    if not requested:
-        return None
-
-    if isinstance(spec, (list, tuple, set)):
-        accepted_raw = spec
-        overrides = {}
-    elif isinstance(spec, (dict, Mapping)):
-        accepted_raw = spec.get("accepted", ())
-        overrides = spec.get("overrides", {})
-    else:
-        return None
-
-    accepted = [str(item).strip().lower() for item in accepted_raw if str(item).strip().lower() in LADDER]
-    # 'none' disables reasoning outright - never a landing target
-    accepted = [lvl for lvl in accepted if lvl != "none"]
-    if not accepted:
-        return None
-
-    # Check overrides, but reject escalating overrides
-    if overrides and requested in overrides:
-        candidate_ovr = str(overrides[requested]).strip().lower()
-        if candidate_ovr in accepted:
-            if requested in LADDER and candidate_ovr in LADDER:
-                if LADDER.index(candidate_ovr) <= LADDER.index(requested):
-                    return candidate_ovr
-            elif candidate_ovr == requested:
-                return candidate_ovr
-
-    if requested in accepted:
-        return requested
-
-    if requested not in LADDER:
-        return None
-
-    req_idx = LADDER.index(requested)
-    weaker = [lvl for lvl in accepted if LADDER.index(lvl) < req_idx]
-    if weaker:
-        return max(weaker, key=LADDER.index)
-
-    # No level equal or weaker exists -> omit, never escalate!
-    return None
-
-
 @dataclass(frozen=True)
 class ModelReasoningPolicy:
     """Explicit reasoning effort policy for a model under a target provider."""
@@ -192,10 +354,14 @@ class ModelReasoningPolicy:
     evidence: str
     omitted: bool
     decision: str
-    #: Declared vendor mapping consulted before the exact-membership test, mirroring the core's
-    #: `DEEPSEEK_V4_OVERRIDES` (``{"xhigh": "max"}``). Only a target that is itself an accepted
-    #: level is honoured; the mapping never adds a level the policy did not declare.
+    #: Declared vendor mapping consulted when the request is not itself accepted, mirroring the
+    #: core's `DEEPSEEK_V4_OVERRIDES` (``{"xhigh": "max"}``). Only a target that is itself an
+    #: accepted level is honoured; the mapping never adds a level the policy did not declare.
     overrides: Mapping[str, str] = field(default_factory=dict)
+    #: True only for the legacy Ollama:cloud family fallback (a route with **no** map entry).
+    #: Such a policy is resolved with :func:`clamp` — nearest weaker, never stronger — while every
+    #: declared policy (operator map or strict built-in) uses :func:`resolve_declared_effort`.
+    legacy_clamp: bool = False
 
 
 #: Explicit reasoning policies for the opt-in OpenCode routes. Support on one provider is never
@@ -394,56 +560,59 @@ def model_reasoning_policy(
     provider: str = "",
     effort_maps: Optional[Mapping[str, Any]] = None,
 ) -> ModelReasoningPolicy:
-    """Return the explicit reasoning policy for a given model and provider."""
-    provider_key = (provider or "").strip().lower()
-    mid = (model_id or "").strip().lower().rsplit("/", 1)[-1]
+    """Return the reasoning policy for a model and provider.
 
-    # Custom configured effort_maps
-    if effort_maps and provider_key in effort_maps:
-        pmap = effort_maps[provider_key]
-        if isinstance(pmap, (dict, Mapping)):
-            for k, spec in pmap.items():
-                cand = str(k).strip().lower()
-                if cand == mid or cand == (model_id or "").strip().lower() or cand in mid:
-                    if isinstance(spec, (list, tuple, set)):
-                        acc = tuple(
-                            str(x).strip().lower()
-                            for x in spec
-                            if str(x).strip().lower() in LADDER and str(x).strip().lower() != "none"
-                        )
-                    elif isinstance(spec, (dict, Mapping)):
-                        acc = tuple(
-                            str(x).strip().lower()
-                            for x in spec.get("accepted", ())
-                            if str(x).strip().lower() in LADDER and str(x).strip().lower() != "none"
-                        )
-                    else:
-                        acc = ()
-                    if acc:
-                        return ModelReasoningPolicy(
-                            provider=provider_key,
-                            model_id=model_id or "",
-                            wire_parameter="reasoning_effort",
-                            accepted_levels=acc,
-                            evidence="Explicitly configured by operator via settings.effort_maps",
-                            omitted=False,
-                            decision=f"Operator declared effort map for {provider_key}/{model_id} with accepted levels {acc}.",
-                        )
-                    return ModelReasoningPolicy(
-                            provider=provider_key,
-                            model_id=model_id or "",
-                            wire_parameter=None,
-                            accepted_levels=(),
-                            evidence="Empty or invalid operator effort map specification",
-                            omitted=True,
-                            decision=f"Operator configured empty or invalid effort map for {provider_key}/{model_id}; omitting on wire.",
-                    )
+    Order: an operator ``effort_maps`` entry for this model **replaces** the built-in policy
+    wholesale (accepted levels, overrides and the omission decision), so a map can restrict or
+    even disable a route; a provider map that does not mention this model leaves the built-in
+    fallback in place. An entry that matched but declares nothing is a deliberate shadow: it
+    omits, and never falls back.
+    """
+    provider_key = (provider or "").strip().lower()
+
+    declared_by, provider_map = _effort_map_entry(effort_maps, provider_key)
+    if declared_by is not None:
+        found, spec = select_model_spec(provider_map, model_id)
+        if found:
+            contract = parse_effort_spec(spec)
+            if contract.valid:
+                return ModelReasoningPolicy(
+                    provider=provider_key,
+                    model_id=model_id or "",
+                    wire_parameter=_custom_wire_parameter(declared_by),
+                    accepted_levels=contract.accepted,
+                    evidence=(
+                        "Explicitly configured by the operator in settings.effort_maps "
+                        "(a declaration of the route's vocabulary, not an empirical probe)."
+                    ),
+                    omitted=False,
+                    decision=(
+                        f"Operator declared the effort map for {declared_by}/{model_id}: accepted "
+                        f"levels {contract.accepted}, overrides {dict(contract.overrides)}. A "
+                        "declared level goes out verbatim; a declared override whose target is "
+                        "accepted is used; anything else is omitted."
+                    ),
+                    overrides=contract.overrides,
+                )
+            return ModelReasoningPolicy(
+                provider=provider_key,
+                model_id=model_id or "",
+                wire_parameter=None,
+                accepted_levels=(),
+                evidence="Empty or invalid operator effort map specification",
+                omitted=True,
+                decision=(
+                    f"Operator configured an empty or invalid effort map for "
+                    f"{declared_by}/{model_id}; the entry shadows the built-in contract and the "
+                    "field is omitted."
+                ),
+            )
 
     # opencode-console built-in policy
     if provider_key in ("opencode-console", "opencode_console"):
-        for k, pol in OPENCODE_CONSOLE_REASONING_POLICIES.items():
-            if k == mid or k in mid:
-                return pol
+        found, policy = select_model_spec(OPENCODE_CONSOLE_REASONING_POLICIES, model_id)
+        if found:
+            return policy
         return ModelReasoningPolicy(
             provider=provider_key,
             model_id=model_id or "",
@@ -456,9 +625,9 @@ def model_reasoning_policy(
 
     # opencode-go built-in policy: the generation route of the opt-in Console decider.
     if provider_key in ("opencode-go", "opencode_go"):
-        for k, pol in OPENCODE_GO_REASONING_POLICIES.items():
-            if k == mid or k in mid:
-                return pol
+        found, policy = select_model_spec(OPENCODE_GO_REASONING_POLICIES, model_id)
+        if found:
+            return policy
         return ModelReasoningPolicy(
             provider=provider_key,
             model_id=model_id or "",
@@ -470,10 +639,14 @@ def model_reasoning_policy(
         )
 
     # commandcode built-in policy: namespaced ids, native DeepSeek thinking controls.
+    # This route keeps its explicit full-id/slug equivalence instead of prefix matching: the
+    # allowlist is one namespaced id, and a prefix rule would invent a family it never declared.
     if provider_key in ("commandcode", "commandcode-chat", "commandcode_chat"):
-        for k, pol in COMMANDCODE_REASONING_POLICIES.items():
-            if k == (model_id or "").strip().lower() or k.rsplit("/", 1)[-1] == mid:
-                return pol
+        full_id = normalise_level(model_id) or ""
+        slug = full_id.rsplit("/", 1)[-1]
+        for key, policy in COMMANDCODE_REASONING_POLICIES.items():
+            if key == full_id or key.rsplit("/", 1)[-1] == slug:
+                return policy
         return ModelReasoningPolicy(
             provider=provider_key,
             model_id=model_id or "",
@@ -486,9 +659,9 @@ def model_reasoning_policy(
 
     # openai-codex built-in policy: bare slugs, Responses wire, two effort vocabularies.
     if provider_key in ("openai-codex", "codex", "openai_codex"):
-        for k, pol in CODEX_REASONING_POLICIES.items():
-            if k == mid or k in mid:
-                return pol
+        found, policy = select_model_spec(CODEX_REASONING_POLICIES, model_id)
+        if found:
+            return policy
         return ModelReasoningPolicy(
             provider=provider_key,
             model_id=model_id or "",
@@ -499,7 +672,7 @@ def model_reasoning_policy(
             decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
         )
 
-    # ollama-cloud built-in policy
+    # ollama-cloud built-in policy: the legacy family table, and the only remaining clamp.
     if not provider_key or provider_key in ("ollama-cloud", "ollama_cloud"):
         fam = family_for(model_id, provider=provider_key)
         return ModelReasoningPolicy(
@@ -510,6 +683,8 @@ def model_reasoning_policy(
             evidence="Empirically verified against Ollama:cloud chat completions contract.",
             omitted=False,
             decision=f"Mapped to family '{fam.name}' with accepted levels {fam.accepted}.",
+            overrides=fam.overrides,
+            legacy_clamp=True,
         )
 
     # Generic unmapped provider
@@ -524,25 +699,6 @@ def model_reasoning_policy(
     )
 
 
-#: Providers whose effort contract is a built-in per-model policy rather than a family table.
-#: Their vocabulary is exact: the requested level goes out only when the policy declares it, or
-#: when a declared override maps it onto a declared level. No nearest-weaker clamp, because the
-#: family fallback would answer a level the route never declared (``minimal``/``ultra``/an unknown
-#: string would land on some Ollama rung).
-BUILTIN_POLICY_PROVIDERS: tuple[str, ...] = (
-    "opencode-console",
-    "opencode_console",
-    "opencode-go",
-    "opencode_go",
-    "commandcode",
-    "commandcode-chat",
-    "commandcode_chat",
-    "openai-codex",
-    "codex",
-    "openai_codex",
-)
-
-
 def resolve_effort(
     model_id: Optional[str],
     effort: Optional[str],
@@ -552,50 +708,22 @@ def resolve_effort(
 ) -> Optional[str]:
     """The exact value to put on the wire for ``model_id``, or ``None`` to omit the field.
 
-    When ``effort_maps`` specifies a map for ``provider``, it takes precedence and is clamped
-    to its declared accepted levels. Built-in routes (opencode-console, opencode-go,
-    commandcode, openai-codex) pass the requested level through only when their policy declares
-    it, or when a declared override maps it onto a declared level; anything else is omitted
-    rather than guessed, clamped or escalated.
+    One algorithm, wherever the declaration came from: the selected policy's own accepted
+    levels and overrides, applied by :func:`resolve_declared_effort` — accepted level verbatim,
+    else a declared override with an accepted target, else omit. The sole exception is a legacy
+    ``ollama-cloud`` route **with no map entry**, whose family table keeps its nearest-weaker
+    clamp for compatibility.
     """
-    if not effort:
+    if normalise_level(effort) is None:
         return None
 
     policy = model_reasoning_policy(model_id, provider=provider, effort_maps=effort_maps)
-    if policy.omitted or not policy.wire_parameter:
+    if policy.omitted or not policy.wire_parameter or not policy.accepted_levels:
         return None
 
-    provider_key = (provider or "").strip().lower()
-
-    # If resolved via custom effort_maps
-    if effort_maps and provider_key in effort_maps:
-        pmap = effort_maps[provider_key]
-        if isinstance(pmap, (dict, Mapping)):
-            model_key = (model_id or "").strip().lower().rsplit("/", 1)[-1]
-            matched_spec = None
-            for k, spec in pmap.items():
-                cand = str(k).strip().lower()
-                if cand == model_key or cand == (model_id or "").strip().lower() or cand in model_key:
-                    matched_spec = spec
-                    break
-            if matched_spec is not None:
-                return _resolve_custom_provider_effort(effort, matched_spec)
-
-    # Built-in opencode/commandcode policy: only a declared level goes out. These wires do not
-    # share the Ollama family vocabulary, so a level the policy did not declare is omitted
-    # instead of being clamped onto some family rung; a declared override (the Go route's
-    # `xhigh` -> `max`, same as the core's DEEPSEEK_V4_OVERRIDES) is honoured first.
-    if provider_key in BUILTIN_POLICY_PROVIDERS:
-        requested = str(effort or "").strip().lower()
-        if requested in policy.accepted_levels:
-            return requested
-        mapped = (policy.overrides or {}).get(requested)
-        return mapped if mapped in policy.accepted_levels else None
-
-    # Default built-in Ollama:cloud families
-    family = family_for(model_id, provider=provider_key)
-    clamped = clamp(effort, family.accepted, family.overrides)
-    return clamped
+    if policy.legacy_clamp:
+        return clamp(effort, policy.accepted_levels, dict(policy.overrides or {}))
+    return resolve_declared_effort(effort, policy.accepted_levels, policy.overrides)
 
 
 def is_omitted(

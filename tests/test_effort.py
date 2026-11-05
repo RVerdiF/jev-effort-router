@@ -100,14 +100,23 @@ def test_unmapped_provider_defaults_to_omitting_effort():
     assert is_omitted("deepseek-v4.1-flash", "medium", provider="openrouter")
 
 
-def test_per_provider_effort_maps_honoured():
+def test_per_provider_effort_maps_declare_the_vocabulary():
     effort_maps = {
         "opencode-go": {
             "deepseek-v4.1-flash": ["low", "medium"],
             "kimi-k3": {"accepted": ["low", "high"], "overrides": {"medium": "high"}},
         }
     }
-    # Clamping without escalation: high clamped to medium
+    # A declared level goes out verbatim; one the map does not declare is omitted, not clamped.
+    assert (
+        resolve_effort(
+            "deepseek-v4.1-flash",
+            "low",
+            provider="opencode-go",
+            effort_maps=effort_maps,
+        )
+        == "low"
+    )
     assert (
         resolve_effort(
             "deepseek-v4.1-flash",
@@ -115,9 +124,9 @@ def test_per_provider_effort_maps_honoured():
             provider="opencode-go",
             effort_maps=effort_maps,
         )
-        == "medium"
+        is None
     )
-    # Escalating override medium -> high is rejected; clamps to weaker 'low'
+    # `medium` is not accepted, but the override that carries it to `high` is written down.
     assert (
         resolve_effort(
             "kimi-k3",
@@ -125,9 +134,10 @@ def test_per_provider_effort_maps_honoured():
             provider="opencode-go",
             effort_maps=effort_maps,
         )
-        == "low"
+        == "high"
     )
-    # Unmapped model under provider with effort_map omits effort
+    # A model the map does not mention keeps the route's built-in contract: the Go catalog does
+    # not serve it, so the field is omitted rather than guessed from another wire.
     assert (
         resolve_effort(
             "unknown-model",
@@ -139,22 +149,70 @@ def test_per_provider_effort_maps_honoured():
     )
 
 
-def test_per_provider_effort_maps_never_escalates_and_omits_when_unknown():
-    # Higher floor: accepted has only high
-    # low and medium cannot be fulfilled without escalation -> omit (None)
-    spec_high = ["high"]
-    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": spec_high}}) is None
-    assert resolve_effort("m", "medium", provider="opencode-go", effort_maps={"opencode-go": {"m": spec_high}}) is None
-    assert resolve_effort("m", "high", provider="opencode-go", effort_maps={"opencode-go": {"m": spec_high}}) == "high"
+def test_effort_maps_use_one_declarative_rule():
+    """Membership, then a declared override with an accepted target, then omission."""
+    high_only = {"opencode-go": {"m": ["high"]}}
+    # No nearest-weaker fallback and no escalation to the floor.
+    assert resolve_effort("m", "low", provider="opencode-go", effort_maps=high_only) is None
+    assert resolve_effort("m", "medium", provider="opencode-go", effort_maps=high_only) is None
+    assert resolve_effort("m", "high", provider="opencode-go", effort_maps=high_only) == "high"
 
-    # Empty or invalid specs omit
-    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": []}}) is None
-    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": {"accepted": []}}}) is None
-    assert resolve_effort("m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": None}}) is None
+    # Empty, null and non-sequence specs omit instead of revealing the built-in policy.
+    for spec in ([], {"accepted": []}, None, "low", 3, True, {"accepted": "low"}):
+        assert (
+            resolve_effort(
+                "m", "low", provider="opencode-go", effort_maps={"opencode-go": {"m": spec}}
+            )
+            is None
+        )
 
-    # Non-escalating override is honored
-    override_deescalate = {"accepted": ["low", "medium"], "overrides": {"high": "medium"}}
-    assert resolve_effort("m", "high", provider="opencode-go", effort_maps={"opencode-go": {"m": override_deescalate}}) == "medium"
+    # An ascending override is honoured when its target is accepted — it is declared, not inferred.
+    ascending = {"opencode-go": {"m": {"accepted": ["low", "high"], "overrides": {"medium": "high"}}}}
+    assert resolve_effort("m", "medium", provider="opencode-go", effort_maps=ascending) == "high"
+
+    # A target outside `accepted` is ignored, and overrides are never chained.
+    outside = {
+        "opencode-go": {"m": {"accepted": ["low"], "overrides": {"medium": "high", "high": "max"}}}
+    }
+    assert resolve_effort("m", "medium", provider="opencode-go", effort_maps=outside) is None
+    assert resolve_effort("m", "high", provider="opencode-go", effort_maps=outside) is None
+    chained = {
+        "opencode-go": {
+            "m": {"accepted": ["low", "max"], "overrides": {"medium": "high", "high": "max"}}
+        }
+    }
+    assert resolve_effort("m", "medium", provider="opencode-go", effort_maps=chained) is None
+
+    # An accepted level always wins, even when an override names another accepted one.
+    conflict = {
+        "opencode-go": {"m": {"accepted": ["low", "high"], "overrides": {"high": "low"}}}
+    }
+    assert resolve_effort("m", "high", provider="opencode-go", effort_maps=conflict) == "high"
+
+    # A vocabulary the core's ladder has never heard of is legal when it is declared.
+    bespoke = {"opencode-go": {"m": {"accepted": ["careful"], "overrides": {"xhigh": "careful"}}}}
+    assert resolve_effort("m", "careful", provider="opencode-go", effort_maps=bespoke) == "careful"
+    assert resolve_effort("m", "xhigh", provider="opencode-go", effort_maps=bespoke) == "careful"
+    assert resolve_effort("m", "high", provider="opencode-go", effort_maps=bespoke) is None
+
+
+def test_none_string_is_a_declared_level_while_python_none_omits():
+    maps = {"p": {"m": {"accepted": ["none"]}}}
+    assert resolve_effort("m", "none", provider="p", effort_maps=maps) == "none"
+    assert is_omitted("m", "none", provider="p", effort_maps=maps) is False
+    policy = model_reasoning_policy("m", provider="p", effort_maps=maps)
+    assert policy.omitted is False
+    assert policy.accepted_levels == ("none",)
+
+    # A missing request is omission, never the level `none`.
+    assert resolve_effort("m", None, provider="p", effort_maps=maps) is None
+    assert resolve_effort("m", "", provider="p", effort_maps=maps) is None
+    assert resolve_effort("m", "   ", provider="p", effort_maps=maps) is None
+
+    # Nulls, numbers and booleans in the declaration are not levels either.
+    nulls = {"p": {"m": {"accepted": [None, 3, True, ""], "overrides": {None: "none"}}}}
+    assert resolve_effort("m", "none", provider="p", effort_maps=nulls) is None
+    assert model_reasoning_policy("m", provider="p", effort_maps=nulls).omitted is True
 
 
 def test_opencode_console_explicit_reasoning_policies():
@@ -251,19 +309,153 @@ def test_declared_override_cannot_invent_a_level_outside_the_policy(monkeypatch)
     assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-go") == "medium"
 
 
-def test_operator_effort_map_takes_precedence_over_the_go_builtin_policy():
-    """An operator map still wins, and keeps its existing nearest-weaker clamp."""
+def test_operator_effort_map_replaces_the_builtin_vocabulary():
+    """An operator map is authoritative: it replaces the built-in set instead of merging."""
     maps = {"opencode-go": {"deepseek-v4.1-flash": {"accepted": ["low"]}}}
     pol = model_reasoning_policy("deepseek-v4.1-flash", provider="opencode-go", effort_maps=maps)
     assert pol.wire_parameter == "reasoning_effort"
     assert pol.omitted is False
     assert pol.accepted_levels == ("low",)
+    assert dict(pol.overrides) == {}
     assert "operator" in pol.evidence.lower()
-    # `high` cannot be sent to a route that only declared `low`: clamp down, never escalate.
+    assert "settings.effort_maps" in pol.evidence
+    # `high` is outside the declared set, and the built-in `xhigh -> max` did not survive the
+    # replacement: both are omitted rather than clamped onto `low` or mapped by a hidden override.
     assert (
         resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-go", effort_maps=maps)
+        is None
+    )
+    assert (
+        resolve_effort("deepseek-v4.1-flash", "xhigh", provider="opencode-go", effort_maps=maps)
+        is None
+    )
+    assert (
+        resolve_effort("deepseek-v4.1-flash", "low", provider="opencode-go", effort_maps=maps)
         == "low"
     )
+
+
+def test_a_partial_map_keeps_the_builtin_contract_for_unmentioned_models():
+    """A provider map that mentions one model does not disable the route for the others."""
+    maps = {"openai-codex": {"gpt-6-luna": {"accepted": ["low"]}}}
+    # The mentioned model is restricted, and its `none` from the built-in set is gone.
+    assert resolve_effort("gpt-6-luna", "none", provider="openai-codex", effort_maps=maps) is None
+    assert resolve_effort("gpt-6-luna", "low", provider="openai-codex", effort_maps=maps) == "low"
+    # The prefix rule means the `-900k` picker alias inherits that same entry, deliberately.
+    assert resolve_effort("gpt-6-luna-900k", "low", provider="openai-codex", effort_maps=maps) == "low"
+    assert resolve_effort("gpt-6-luna-900k", "none", provider="openai-codex", effort_maps=maps) is None
+    # A model the map does not cover at all keeps the built-in policy, `gpt-6.1-sol` without `none`.
+    assert resolve_effort("gpt-6.1-sol", "high", provider="openai-codex", effort_maps=maps) == "high"
+    assert resolve_effort("gpt-6.1-sol", "none", provider="openai-codex", effort_maps=maps) is None
+
+
+def test_a_map_on_a_new_provider_is_not_ignored():
+    """A provider with no built-in policy is exactly what a map is for."""
+    maps = {"acme": {"chat-1": {"accepted": ["low", "medium"]}}}
+    pol = model_reasoning_policy("chat-1", provider="acme", effort_maps=maps)
+    assert pol.omitted is False
+    assert pol.wire_parameter == "reasoning_effort"
+    assert resolve_effort("chat-1", "low", provider="acme", effort_maps=maps) == "low"
+    assert resolve_effort("chat-1", "high", provider="acme", effort_maps=maps) is None
+    # Without the declaration the same route is unmapped and omits everything.
+    assert resolve_effort("chat-1", "low", provider="acme") is None
+    assert model_reasoning_policy("chat-1", provider="acme").omitted is True
+
+
+def test_a_restrictive_map_on_a_builtin_provider_is_not_ignored():
+    """The built-in policy would answer `high`; the operator's map says it may not."""
+    maps = {"opencode-console": {"deepseek-v4.1-flash": {"accepted": ["low"]}}}
+    assert resolve_effort("deepseek-v4.1-flash", "low", provider="opencode-console", effort_maps=maps) == "low"
+    assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-console", effort_maps=maps) is None
+    # The built-in policy for this route is an omission; the map is what makes a level possible.
+    assert resolve_effort("deepseek-v4.1-flash", "low", provider="opencode-console") is None
+
+
+def test_effort_maps_prefer_the_exact_model_over_a_prefix():
+    """`gpt-6-luna-900k` has its own vocabulary and keeps it, in either insertion order."""
+    specific = {"accepted": ["careful"]}
+    broad = {"accepted": ["low", "high"]}
+    for order in (
+        {"gpt-6-luna": broad, "gpt-6-luna-900k": specific},
+        {"gpt-6-luna-900k": specific, "gpt-6-luna": broad},
+    ):
+        maps = {"openai-codex": order}
+        assert (
+            resolve_effort("gpt-6-luna-900k", "careful", provider="openai-codex", effort_maps=maps)
+            == "careful"
+        )
+        # The prefix entry's vocabulary is not mixed in.
+        assert resolve_effort("gpt-6-luna-900k", "low", provider="openai-codex", effort_maps=maps) is None
+        assert resolve_effort("gpt-6-luna", "low", provider="openai-codex", effort_maps=maps) == "low"
+
+
+def test_effort_maps_require_a_real_prefix_boundary():
+    """Only `-`-delimited continuations match; a key merely contained in the id does not."""
+    # `luna` and `6-luna` are *inside* `gpt-6-luna`; neither starts it, so neither may claim it.
+    assert resolve_effort("gpt-6-luna", "low", provider="p", effort_maps={"p": {"luna": ["low"]}}) is None
+    assert (
+        resolve_effort("gpt-6-luna-900k", "low", provider="p", effort_maps={"p": {"6-luna": ["low"]}})
+        is None
+    )
+    # A true prefix — the id continues with `-` — does match.
+    assert (
+        resolve_effort("gpt-6-luna-900k", "low", provider="p", effort_maps={"p": {"gpt-6-luna": ["low"]}})
+        == "low"
+    )
+
+    # The longest true prefix wins when several could apply.
+    longest = {
+        "p": {
+            "gpt-6": {"accepted": ["low"]},
+            "gpt-6-luna": {"accepted": ["medium"]},
+        }
+    }
+    assert resolve_effort("gpt-6-luna-900k", "medium", provider="p", effort_maps=longest) == "medium"
+    assert resolve_effort("gpt-6-luna-900k", "low", provider="p", effort_maps=longest) is None
+
+
+def test_effort_map_keys_cannot_cross_namespaces():
+    """A qualified key is compared with the full id, a bare one with the slug — never both."""
+    from effort import select_model_spec
+
+    qualified = {"deepseek/deepseek-v4.1-flash": ["low"]}
+    assert select_model_spec(qualified, "deepseek/deepseek-v4.1-flash")[0] is True
+    # The namespaced key does not claim the bare slug...
+    assert select_model_spec({"deepseek/deepseek-v4.1-flash": ["low"]}, "deepseek-v4.1-flash") == (False, None)
+    # ...while a namespace-free key follows the slug, whichever namespace the id came from.
+    assert select_model_spec({"deepseek-v4.1-flash": ["low"]}, "other/deepseek-v4.1-flash")[0] is True
+    # A different namespace's qualified key never matches.
+    assert select_model_spec({"other/deepseek-v4.1-flash": ["low"]}, "deepseek/deepseek-v4.1-flash") == (False, None)
+
+
+def test_an_empty_map_entry_shadows_the_builtin_instead_of_missing_it():
+    from effort import select_model_spec
+
+    assert select_model_spec({"gpt-6-luna": None}, "gpt-6-luna") == (True, None)
+    assert select_model_spec({"gpt-6-luna": []}, "gpt-6-luna-900k")[0] is True
+    for spec in (None, [], {}, {"accepted": []}):
+        maps = {"openai-codex": {"gpt-6-luna": spec}}
+        assert resolve_effort("gpt-6-luna", "high", provider="openai-codex", effort_maps=maps) is None
+        assert model_reasoning_policy("gpt-6-luna", provider="openai-codex", effort_maps=maps).omitted is True
+
+
+def test_provider_aliases_resolve_to_the_canonical_map_without_escaping_it():
+    """The alias lookup reuses ``config._GRID_ALIASES``; it never bypasses the restriction."""
+    maps = {"openai-codex": {"gpt-6-luna": {"accepted": ["low"]}}}
+    for alias in ("codex", "openai_codex"):
+        assert resolve_effort("gpt-6-luna", "low", provider=alias, effort_maps=maps) == "low"
+        assert resolve_effort("gpt-6-luna", "high", provider=alias, effort_maps=maps) is None
+    # The custom policy reports the field the transport actually uses for this route.
+    assert model_reasoning_policy("gpt-6-luna", provider="codex", effort_maps=maps).wire_parameter == "reasoning"
+    # An exact provider key wins over the canonical one.
+    both = {
+        "openai-codex": {"gpt-6-luna": {"accepted": ["low"]}},
+        "codex": {"gpt-6-luna": {"accepted": ["medium"]}},
+    }
+    assert resolve_effort("gpt-6-luna", "medium", provider="codex", effort_maps=both) == "medium"
+    # The canonical route does not read the alias's entry: the table maps aliases to canonical
+    # names, never the other way round.
+    assert resolve_effort("gpt-6-luna", "medium", provider="openai-codex", effort_maps=both) is None
 
 
 def test_opencode_go_effort_cannot_be_inferred_from_other_providers():
@@ -396,29 +588,48 @@ def test_opencode_console_effort_cannot_be_inferred_from_other_providers():
 
 
 def test_opencode_console_custom_effort_map_overrides_omission():
-    # If operator explicitly configures effort_maps for opencode-console, it is honored
+    # An explicit operator map is what enables the route, and the map is the whole vocabulary.
     maps = {"opencode-console": {"deepseek-v4.1-flash": ["low", "medium"]}}
     pol = model_reasoning_policy("deepseek-v4.1-flash", provider="opencode-console", effort_maps=maps)
     assert pol.omitted is False
     assert pol.wire_parameter == "reasoning_effort"
     assert pol.accepted_levels == ("low", "medium")
     assert resolve_effort("deepseek-v4.1-flash", "low", provider="opencode-console", effort_maps=maps) == "low"
-    assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-console", effort_maps=maps) == "medium"
+    # `high` is not declared: the map does not clamp it onto `medium` either.
+    assert resolve_effort("deepseek-v4.1-flash", "high", provider="opencode-console", effort_maps=maps) is None
 
 
-#: The settings block the ``code`` profile runs
-#: (``plugins.entries.jev-effort-router.settings`` in its ``config.yaml``). ``commandcode``
-#: deliberately carries **no** ``effort_maps`` entry: an operator map is resolved by the custom
-#: path, whose nearest-weaker clamp answers ``xhigh`` with ``high`` and ``ultra`` with ``max``, so
-#: the entry would shadow the built-in contract (``low``/``medium``/``high``/``max``, ``xhigh`` →
-#: ``max``, everything else omitted). The ``opencode-go`` map stays — it is that route's declared
-#: operator vocabulary and keeps the §8 semantics, including its documented clamp.
+#: The settings block the ``code`` profile is being migrated to
+#: (``plugins.entries.jev-effort-router.settings`` in its ``config.yaml``). All three routable
+#: routes declare their vocabulary now — that is what the uniform contract buys: the same
+#: ``accepted``/``overrides`` shape means the same thing whether or not the route also carries a
+#: built-in policy, so the declaration is the authority instead of a clamp.
 #:
-#: ``openai-codex`` carries the three ids this account's ChatGPT catalog actually serves. The
-#: fourth id the routing card names, ``gpt-6.1-sol-900k``, is not in that catalog (a live turn
-#: against ``--provider openai-codex -m gpt-6.1-sol-900k`` returns HTTP 400 "model entitlement"
-#: and Hermes falls back to another model), so pointing the operator grid at it would buy a
-#: silent fallback and an audit record for a route that never happened.
+#: The five entries carry the routes' real vocabularies:
+#:
+#: * ``opencode-go``/``deepseek-v4.1-flash`` and ``commandcode``/``deepseek/deepseek-v4.1-flash``:
+#:   ``low``/``medium``/``high``/``max`` with the declared ``xhigh → max``;
+#: * ``openai-codex``/``gpt-6-luna`` and ``gpt-6-luna-900k``: the full ``none..max`` set;
+#: * ``openai-codex``/``gpt-6.1-sol``: that set without ``none``, which the route 400s on.
+#:
+#: ``gpt-6.1-sol-900k`` is deliberately absent: that id is not in this account's catalog (a live
+#: turn returns HTTP 400 "model entitlement" and Hermes falls back), so a declaration for it
+#: would document a route that never happens.
+COMMANDCODE_MODEL = "deepseek/deepseek-v4.1-flash"
+
+GO_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
+CODEX_LUNA_LEVELS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
+CODEX_SOL_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+CODEX_DELIVERED_MODELS = ("gpt-6-luna", "gpt-6-luna-900k", "gpt-6.1-sol")
+
+
+def _declared(levels: tuple[str, ...], overrides: dict | None = None) -> dict:
+    spec: dict = {"accepted": list(levels)}
+    if overrides:
+        spec["overrides"] = dict(overrides)
+    return spec
+
+
 DELIVERED_CODE_PROFILE_SETTINGS = {
     "enabled": True,
     "decider": "jev_console",
@@ -436,88 +647,192 @@ DELIVERED_CODE_PROFILE_SETTINGS = {
         ],
     },
     "effort_maps": {
-        "opencode-go": {"deepseek-v4.1-flash": {"accepted": ["low", "medium", "high", "max"]}},
+        "opencode-go": {"deepseek-v4.1-flash": _declared(GO_LEVELS, {"xhigh": "max"})},
+        "commandcode": {COMMANDCODE_MODEL: _declared(GO_LEVELS, {"xhigh": "max"})},
+        "openai-codex": {
+            "gpt-6-luna": _declared(CODEX_LUNA_LEVELS),
+            "gpt-6-luna-900k": _declared(CODEX_LUNA_LEVELS),
+            "gpt-6.1-sol": _declared(CODEX_SOL_LEVELS),
+        },
     },
 }
 
-COMMANDCODE_MODEL = "deepseek/deepseek-v4.1-flash"
 
-CODEX_DELIVERED_MODELS = ("gpt-6-luna", "gpt-6-luna-900k", "gpt-6.1-sol")
-
-
-def _assert_codex_contract(settings) -> None:
-    """The Codex route's contract, resolved from the delivered settings.
-
-    No ``effort_maps`` entry shadows it, so the built-in per-family policy is what runs: Luna
-    takes the full ``none..max`` set, Sol has no ``none`` and omits it rather than sending one.
-    """
-    assert "openai-codex" not in settings.effort_maps
-    assert [entry.model_id for entry in settings.grid_for("openai-codex")] == list(
-        CODEX_DELIVERED_MODELS
+def _assert_go_contract(settings) -> None:
+    """The Go route's vocabulary, resolved through the operator's own ``effort_maps``."""
+    maps = settings.effort_maps
+    assert "opencode-go" in maps
+    for level in GO_LEVELS:
+        assert (
+            resolve_effort("deepseek-v4.1-flash", level, provider="opencode-go", effort_maps=maps)
+            == level
+        )
+        assert (
+            is_omitted("deepseek-v4.1-flash", level, provider="opencode-go", effort_maps=maps)
+            is False
+        )
+    # `xhigh` reaches `max` because the override is declared, not because of any ladder ordering.
+    assert (
+        resolve_effort("deepseek-v4.1-flash", "xhigh", provider="opencode-go", effort_maps=maps)
+        == "max"
     )
-    for provider_name in ("openai-codex", "codex", "openai_codex"):
-        for level in ("low", "medium", "high", "xhigh", "max"):
-            for model_id in CODEX_DELIVERED_MODELS:
-                assert (
-                    resolve_effort(
-                        model_id, level, provider=provider_name, effort_maps=settings.effort_maps
-                    )
-                    == level
-                )
-        # ``none`` is a Luna level and not a Sol one.
-        assert resolve_effort("gpt-6-luna", "none", provider=provider_name) == "none"
-        assert resolve_effort("gpt-6-luna-900k", "none", provider=provider_name) == "none"
-        assert resolve_effort("gpt-6.1-sol", "none", provider=provider_name) is None
+    # Nothing undeclared is invented or clamped: the field is omitted.
+    for level in ("none", "minimal", "ultra", "bogus", ""):
+        assert (
+            resolve_effort("deepseek-v4.1-flash", level, provider="opencode-go", effort_maps=maps)
+            is None
+        )
+        assert (
+            is_omitted("deepseek-v4.1-flash", level, provider="opencode-go", effort_maps=maps)
+            is True
+        )
 
 
 def _assert_commandcode_contract(settings) -> None:
     """The route's contract, resolved through the operator's own ``effort_maps``."""
     maps = settings.effort_maps
-    # Nothing shadows the policy: the built-in contract is the one in force on this route.
-    assert "commandcode" not in maps
-    for level in ("low", "medium", "high", "max"):
-        assert resolve_effort(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) == level
-        assert is_omitted(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) is False
-    # The core's declared override — not the custom path's anti-escalation clamp, which would
-    # answer `high` here.
-    assert resolve_effort(COMMANDCODE_MODEL, "xhigh", provider="commandcode", effort_maps=maps) == "max"
-    # Nothing undeclared is invented, clamped or escalated: the field is omitted.
-    for level in ("minimal", "none", "bogus", "ultra", ""):
-        assert resolve_effort(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) is None
-        assert is_omitted(COMMANDCODE_MODEL, level, provider="commandcode", effort_maps=maps) is True
+    assert "commandcode" in maps
+    for provider_name in ("commandcode", "commandcode-chat", "commandcode_chat"):
+        for level in GO_LEVELS:
+            assert (
+                resolve_effort(COMMANDCODE_MODEL, level, provider=provider_name, effort_maps=maps)
+                == level
+            )
+            assert (
+                is_omitted(COMMANDCODE_MODEL, level, provider=provider_name, effort_maps=maps)
+                is False
+            )
+        # The declared override, honoured by the same rule the built-in policy used to apply.
+        assert (
+            resolve_effort(COMMANDCODE_MODEL, "xhigh", provider=provider_name, effort_maps=maps)
+            == "max"
+        )
+        # Nothing undeclared is invented, clamped or escalated: the field is omitted.
+        for level in ("minimal", "none", "bogus", "ultra", ""):
+            assert (
+                resolve_effort(COMMANDCODE_MODEL, level, provider=provider_name, effort_maps=maps)
+                is None
+            )
+            assert (
+                is_omitted(COMMANDCODE_MODEL, level, provider=provider_name, effort_maps=maps)
+                is True
+            )
 
 
-def test_the_delivered_code_profile_config_holds_the_commandcode_contract():
-    """Regression for the delivered configuration, not just the bare policy.
+def _assert_codex_contract(settings) -> None:
+    """The Codex route's contract, resolved from the declared maps.
+
+    Luna takes the full ``none..max`` set (``none`` is a real level here, not an omission), Sol
+    has no ``none`` and omits it rather than sending one, and both ids are matched exactly — the
+    ``-900k`` picker alias has its own entry, not Luna's by prefix luck.
+    """
+    maps = settings.effort_maps
+    assert "openai-codex" in maps
+    assert set(maps["openai-codex"]) == set(CODEX_DELIVERED_MODELS)
+    assert [entry.model_id for entry in settings.grid_for("openai-codex")] == list(
+        CODEX_DELIVERED_MODELS
+    )
+    for provider_name in ("openai-codex", "codex", "openai_codex"):
+        for model_id in ("gpt-6-luna", "gpt-6-luna-900k"):
+            for level in CODEX_LUNA_LEVELS:
+                assert (
+                    resolve_effort(model_id, level, provider=provider_name, effort_maps=maps)
+                    == level
+                )
+            assert not is_omitted("gpt-6-luna", "none", provider=provider_name, effort_maps=maps)
+            for level in ("minimal", "ultra", "bogus"):
+                assert (
+                    resolve_effort(model_id, level, provider=provider_name, effort_maps=maps)
+                    is None
+                )
+        for level in CODEX_SOL_LEVELS:
+            assert (
+                resolve_effort("gpt-6.1-sol", level, provider=provider_name, effort_maps=maps)
+                == level
+            )
+        # ``none`` is a Luna level and not a Sol one: it is omitted, never invented.
+        assert (
+            resolve_effort("gpt-6.1-sol", "none", provider=provider_name, effort_maps=maps) is None
+        )
+        assert (
+            resolve_effort("gpt-6.1-sol", "minimal", provider=provider_name, effort_maps=maps)
+            is None
+        )
+
+
+def test_the_delivered_code_profile_config_holds_the_uniform_contract():
+    """Regression for the delivered configuration, across all three routes.
 
     The earlier round proved the contract with the built-in policy alone while the profile also
-    carried an ``effort_maps`` entry for the same route; the entry took precedence and answered
-    ``xhigh`` with ``high`` and ``ultra`` with ``max``. This test loads the settings the profile
-    actually runs, so a shadowing entry fails here.
+    carried an ``effort_maps`` entry for the same route; that entry ran through the custom path,
+    whose clamp answered ``xhigh`` with ``high`` and ``ultra`` with ``max``. The map is now the
+    declaration, not a shadow: this test loads what the profile is being migrated to and checks
+    the whole matrix through it.
     """
     settings = load_settings(lambda key, default=None: DELIVERED_CODE_PROFILE_SETTINGS.get(key, default))
 
-    # The route is configured with the namespaced model and nothing else.
+    # Each route is configured with its catalog's model(s) and nothing else.
     assert [entry.model_id for entry in settings.grid_for("commandcode")] == [COMMANDCODE_MODEL]
+    _assert_go_contract(settings)
     _assert_commandcode_contract(settings)
-    # The Codex route rides the same delivered block with its own two vocabularies.
     _assert_codex_contract(settings)
-    # The other live route keeps its own operator semantics: this fix changes nothing there.
-    assert (
-        resolve_effort("deepseek-v4.1-flash", "max", provider="opencode-go", effort_maps=settings.effort_maps)
-        == "max"
-    )
-    assert (
-        resolve_effort("deepseek-v4.1-flash", "xhigh", provider="opencode-go", effort_maps=settings.effort_maps)
-        == "high"
-    )
 
 
-def test_the_live_code_profile_config_holds_the_same_commandcode_contract():
+def test_the_parsed_maps_stay_immutable_and_normalised():
+    """``load_settings`` freezes the declaration and keeps its order and strings."""
+    settings = load_settings(lambda key, default=None: DELIVERED_CODE_PROFILE_SETTINGS.get(key, default))
+    luna = settings.effort_maps["openai-codex"]["gpt-6-luna"]
+    assert luna["accepted"] == CODEX_LUNA_LEVELS
+    assert dict(luna["overrides"]) == {}
+    assert settings.effort_maps["opencode-go"]["deepseek-v4.1-flash"]["accepted"] == GO_LEVELS
+    assert dict(settings.effort_maps["opencode-go"]["deepseek-v4.1-flash"]["overrides"]) == {
+        "xhigh": "max"
+    }
+    with pytest.raises(TypeError):
+        settings.effort_maps["openai-codex"]["gpt-6-luna"]["accepted"] = ()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        settings.effort_maps["opencode-go"]["deepseek-v4.1-flash"]["overrides"][  # type: ignore[index]
+            "xhigh"
+        ] = "high"
+
+
+def test_load_settings_never_turns_a_null_level_into_a_level():
+    """YAML ``null`` is not the level ``none``, and a null key is not a model name."""
+    raw = {
+        "effort_maps": {
+            "openai-codex": {
+                "gpt-6-luna": {
+                    "accepted": ["none", None, 3, True, " HIGH "],
+                    "overrides": {"xhigh": "max", None: "max", "low": None},
+                }
+            },
+            "p": {"m": None},
+            None: {"m": ["low"]},
+        }
+    }
+    settings = load_settings(lambda key, default=None: raw.get(key, default))
+    luna = settings.effort_maps["openai-codex"]["gpt-6-luna"]
+    assert luna["accepted"] == ("none", "high")
+    assert dict(luna["overrides"]) == {"xhigh": "max"}
+    # The null provider key never became the name "none".
+    assert None not in settings.effort_maps
+    assert "none" not in settings.effort_maps
+    # A matched entry whose spec is null is an empty contract, not an absent one.
+    assert settings.effort_maps["p"]["m"] is None
+    assert resolve_effort("m", "low", provider="p", effort_maps=settings.effort_maps) is None
+    assert resolve_effort("gpt-6-luna", "none", provider="openai-codex", effort_maps=settings.effort_maps) == "none"
+    assert resolve_effort("gpt-6-luna", "high", provider="openai-codex", effort_maps=settings.effort_maps) == "high"
+    assert resolve_effort("gpt-6-luna", "low", provider="openai-codex", effort_maps=settings.effort_maps) is None
+
+
+def test_the_live_code_profile_config_holds_the_uniform_contract():
     """Same contract, read from the operator's real profile file when the run points at it.
 
     Opt-in so the suite stays hermetic: a checkout without that file has nothing to read.
     ``JEV_PROFILE_CONFIG=/path/to/config.yaml`` enables the check.
+
+    The file is migrated in the next step of this work: until then this check fails on purpose
+    rather than asserting the old block, which would make the migration look complete.
     """
     raw_path = os.environ.get("JEV_PROFILE_CONFIG", "")
     if not raw_path or not Path(raw_path).is_file():
@@ -527,5 +842,6 @@ def test_the_live_code_profile_config_holds_the_same_commandcode_contract():
         "jev-effort-router"
     ]["settings"]
     settings = load_settings(lambda key, default=None: block.get(key, default))
+    _assert_go_contract(settings)
     _assert_commandcode_contract(settings)
     _assert_codex_contract(settings)

@@ -15,6 +15,11 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+#: The level normalisation is shared with the resolver on purpose: the parser and the resolver
+#: must agree on what a level is, or a declaration would mean one thing in the YAML and another
+#: on the wire. ``effort`` never imports ``config`` at module scope (only inside the alias
+#: lookup), so this direction cannot cycle.
+from .effort import normalise_level, normalise_levels, normalise_overrides
 from .grid import (
     CODEX_GRID,
     COMMANDCODE_GRID,
@@ -224,6 +229,19 @@ def _provider_group(provider: str) -> frozenset:
         if key in group:
             return frozenset(group)
     return frozenset()
+
+
+def canonical_provider_name(provider: str) -> Optional[str]:
+    """The canonical name of a known route **alias**, or ``None``.
+
+    Only an alias resolves: the canonical name itself answers ``None`` because the caller already
+    tried it verbatim. This is the one table ``_GRID_ALIASES``; nothing else registers aliases.
+    """
+    key = (provider or "").strip().lower()
+    for name, aliases in _GRID_ALIASES:
+        if key in aliases:
+            return name
+    return None
 
 
 def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
@@ -700,43 +718,44 @@ def parse_grids(raw: Any) -> Mapping[str, Tuple[Entry, ...]]:
 
 
 def _freeze_effort_spec(spec: Any) -> Any:
-    """Freeze an effort map spec into immutable structures."""
-    if isinstance(spec, (list, tuple, set)):
-        return tuple(str(x).strip().lower() for x in spec if str(x).strip())
-    if isinstance(spec, (dict, Mapping)):
-        acc_raw = spec.get("accepted", ())
-        if isinstance(acc_raw, (list, tuple, set)):
-            acc = tuple(str(x).strip().lower() for x in acc_raw if str(x).strip())
-        else:
-            acc = ()
-        ovr_raw = spec.get("overrides", {})
-        if isinstance(ovr_raw, (dict, Mapping)):
-            ovr = MappingProxyType({
-                str(k).strip().lower(): str(v).strip().lower()
-                for k, v in ovr_raw.items()
-                if str(k).strip() and str(v).strip()
-            })
-        else:
-            ovr = MappingProxyType({})
-        return MappingProxyType({"accepted": acc, "overrides": ovr})
+    """Freeze an effort map spec into immutable, normalised structures.
+
+    Levels are strings, ``strip()``ped and lower-cased. YAML ``null``, Python ``None``, numbers
+    and booleans are **not** levels: they are dropped instead of being stringified — ``str(None)``
+    used to become the valid level ``"none"``, which is exactly the bug that made a null entry
+    look like a declared disable. The vocabulary is not filtered against the core's ladder: a
+    route may declare its own words.
+    """
+    if isinstance(spec, (list, tuple, set, frozenset)):
+        return normalise_levels(spec)
+    if isinstance(spec, Mapping):
+        return MappingProxyType({
+            "accepted": normalise_levels(spec.get("accepted")),
+            "overrides": normalise_overrides(spec.get("overrides")),
+        })
     return spec
 
 
 def parse_effort_maps(raw: Any) -> Mapping[str, Any]:
-    """Parse per-provider effort maps into deep immutable structures."""
+    """Parse per-provider effort maps into deep immutable structures.
+
+    Provider and model keys go through the same normalisation as the levels: a key that is not
+    a non-empty string (``null``, a number, a boolean) is dropped rather than turned into a name.
+    """
     if not isinstance(raw, dict):
         return MappingProxyType({})
     result: Dict[str, Any] = {}
     for key, value in raw.items():
-        provider = str(key or "").strip().lower()
-        if not provider:
+        provider = normalise_level(key)
+        if provider is None:
             continue
         if isinstance(value, (dict, Mapping)):
-            provider_map = {
-                str(k).strip().lower(): _freeze_effort_spec(v)
-                for k, v in value.items()
-                if str(k).strip()
-            }
+            provider_map: Dict[str, Any] = {}
+            for model_key, spec in value.items():
+                model_name = normalise_level(model_key)
+                if model_name is None:
+                    continue
+                provider_map[model_name] = _freeze_effort_spec(spec)
             result[provider] = MappingProxyType(provider_map)
         else:
             result[provider] = MappingProxyType({})
