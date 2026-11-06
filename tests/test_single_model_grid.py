@@ -44,7 +44,7 @@ def test_a_two_model_grid_keeps_both_questions():
     assert "reasoning_effort" in questions
 
 
-def test_the_default_still_asks_the_model_question(monkeypatch):
+def test_the_default_still_asks_the_model_question():
     """A grid with a choice keeps the model question: the default asks when ``len(grid) > 1``."""
     from state import build_payload
 
@@ -298,7 +298,8 @@ def test_the_legacy_jev_wire_still_asks_the_model_on_a_one_model_grid(monkeypatc
 
     The legacy Decisions API payload is pinned byte-for-byte (see ``test_client``), so
     ``JevDecider`` passes ``ask_model=True`` explicitly: with a single model in the grid the
-    question is still sent and its answer is still the one that routes the turn.
+    model question stays in the payload. Dropping that argument has to fail here, or the frozen
+    payload would drift silently.
     """
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     settings = load_settings(
