@@ -27,7 +27,7 @@ Jev writes nothing. The selected model still does all the reasoning and all the 
 User input
    │
    ▼
-llm_request middleware  ──►  ask Jev (choice: model_route, choice: reasoning_effort)
+llm_request middleware  ──►  ask Jev (choice: model_route when the grid has ≥2 models, choice: reasoning_effort)
    │                              │
    │                              ▼
    │                       confidence guard (default 0.5)
