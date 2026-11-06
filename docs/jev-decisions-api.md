@@ -146,6 +146,13 @@ For example, when routing via OpenCode:
 
 ### Answer shape
 
+When the effective grid carries a **single** model, the plugin omits the model block from the
+prompt and drops the `model` field from the required JSON: a one-option question has one possible
+answer and a confidence of 1.0 by construction, so asking it buys a certainty at the cost of tokens
+and latency. The model is then `grid[0]`, the audit records `model_choice: "single"`, and a model
+field the model volunteers anyway is ignored. Multi-model grids keep the block, the rule and the
+strict membership validation below.
+
 The decider model must respond with valid JSON adhering to:
 
 ```json
@@ -219,6 +226,14 @@ User-Agent: Hermes-Agent/0.21.4 (jev-effort-router)
 ```
 
 ### Answer Shape & Fallback Model Iteration
+
+When the effective grid carries a **single** model, `model_route` is omitted from `questions` and
+only `reasoning_effort` is sent: a one-option Choice has one possible answer and a confidence of
+1.0 by construction, so asking it buys a certainty at the cost of tokens and latency. The model is
+then `grid[0]`, the audit records `model_choice: "single"`, and a `model_route` answer the endpoint
+volunteers anyway is ignored. This is the shape of every generation catalog the plugin routes
+(`opencode-console`, `opencode-go`, `commandcode`). Multi-model grids keep both questions and the
+strict validation of the model answer.
 
 The decider responds with SystemOne envelope carrying `answers`:
 
