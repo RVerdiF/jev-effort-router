@@ -81,6 +81,21 @@ def test_a_map_declaring_no_usable_level_keeps_the_default():
     assert offered_levels("ollama-cloud", "kimi-k3", maps) == DEFAULT_OFFERED_LEVELS
 
 
+def test_an_empty_intersection_falls_back_to_the_default_and_documents_it():
+    """Two models whose declarations share no level cannot be asked one question.
+
+    The plugin's answer is the default three levels (a declaration unusable for this question is
+    treated as no declaration); ``resolve_effort`` then omits whatever is answered, never clamps.
+    """
+    maps = {"p": {"a": ["high"], "b": ["low"]}}
+
+    assert offered_levels_for_grid((Entry("a", "x"), Entry("b", "y")), "p", maps) == (
+        "low",
+        "medium",
+        "high",
+    )
+
+
 def test_the_shared_question_offers_only_what_every_model_accepts():
     maps = {
         "p": {
@@ -259,6 +274,39 @@ def test_a_history_without_a_user_message_keeps_only_the_trailing_assistant_run(
     assert state["last_tool_results_excerpt"] == "recent output"
 
 
+def test_a_plain_assistant_turn_reports_no_tool_shape():
+    """No tool call and no tool result: nothing to report, and no invented ``tool_calls: 0``.
+
+    On the Responses wire the transport has already projected ``function_call`` items away, so an
+    eager zero would claim the previous turn used no tools when it may have used several.
+    """
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "a plain answer"},
+        {"role": "user", "content": "second"},
+    ]
+
+    state = build_state(messages, context_turns=4)
+
+    assert "previous_turn" not in state
+    assert "last_tool_results_excerpt" not in state
+
+
+def test_a_tool_output_larger_than_the_window_still_reports_its_tail(monkeypatch):
+    """The excerpt is the tail of the output, not the tail of the first megabyte."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-secret-for-this-test")
+    tail = "TRUE-END-OF-OUTPUT"
+    content = "x" * 1_200_000 + " sk-or-secret-for-this-test " + tail
+
+    state = build_state(_history_with_tools(["terminal"], tool_content=content), context_turns=2)
+    excerpt = state["last_tool_results_excerpt"]
+
+    assert len(excerpt) <= TOOL_RESULTS_CHAR_LIMIT
+    assert excerpt.endswith(tail)
+    assert "sk-or-secret-for-this-test" not in excerpt
+    assert "[REDACTED]" in excerpt
+
+
 def test_reasoning_is_never_forwarded():
     messages = [
         {"role": "user", "content": "first"},
@@ -286,6 +334,18 @@ def test_the_payload_fits_the_budget_with_a_full_context():
         messages.append({"role": "user", "content": f"turn {index} " + "u" * 5000})
         messages.append({"role": "assistant", "content": "a" * 5000})
         messages.append({"role": "tool", "content": "t" * 5000})
+    # The worst legal turn signal: eight tool calls whose names are far longer than any real one,
+    # plus a full-length excerpt. The name cap is what keeps this inside the budget.
+    messages.append(
+        {
+            "role": "assistant",
+            "content": "working",
+            "tool_calls": [
+                {"id": str(index), "function": {"name": "n" * 200}} for index in range(8)
+            ],
+        }
+    )
+    messages.append({"role": "tool", "content": "t" * 5000})
     messages.append({"role": "user", "content": "final request " + "f" * 5000})
 
     payload = build_payload(
@@ -298,6 +358,7 @@ def test_the_payload_fits_the_budget_with_a_full_context():
         levels=EFFORT_LEVELS,
     )
 
+    assert payload["state"]["previous_turn"]["tools"][0] == "n" * 64
     assert len(json.dumps(payload, ensure_ascii=False)) <= 20000
 
 
@@ -400,6 +461,64 @@ def test_a_capped_max_is_audited_with_the_level_that_was_asked(tmp_path, monkeyp
     record = router.tail(settings, limit=1)[0]
     assert record["effort_requested"] == "max"
     assert record["effort"] == "high"
+
+
+def test_the_replay_keeps_the_asked_level_and_the_cap_applies_to_the_wire(tmp_path, monkeypatch):
+    """The memo replay re-applies the cap to the wire, never to the recorded request."""
+    from stubs import StubResponse, StubTransport
+    from test_router import route
+
+    config = dict(GO_CONFIG, platform_overrides={"cli": {"max_effort": "high"}})
+    transport = StubTransport([StubResponse(_max_answer())])
+    router, settings = _go_router(tmp_path, monkeypatch, transport, config)
+
+    first = route(router, provider="opencode-go", turn_id="turn-replay")
+    second = route(router, provider="opencode-go", turn_id="turn-replay", api_call_count=1)
+
+    assert first is not None and second is not None
+    # One decider call for the turn: the second request is the memo's replay.
+    assert transport.call_count == 1
+    records = router.tail(settings, limit=5)
+    assert len(records) == 2
+    assert records[0].get("replayed") is not True
+    assert records[1]["replayed"] is True
+    for record in records:
+        assert record["effort_requested"] == "max"
+        assert record["effort"] == "high"
+
+
+def test_the_rubric_knobs_reach_the_question_the_decider_sends(tmp_path, monkeypatch):
+    """The knobs are wired end to end: settings → decider → the payload on the wire."""
+    from stubs import StubResponse, StubTransport, decision_payload
+    from test_router import route
+
+    config = dict(
+        GO_CONFIG,
+        effort_criteria={"high": "our own high-effort text"},
+        effort_instructions="our own routing rule",
+    )
+    transport = StubTransport(
+        [
+            StubResponse(
+                decision_payload(
+                    model_choice="1",
+                    model_confidence=1.0,
+                    effort_choice="medium",
+                    effort_confidence=1.0,
+                    effort_probabilities={"medium": 1.0},
+                    grid_size=1,
+                )
+            )
+        ]
+    )
+    router, _ = _go_router(tmp_path, monkeypatch, transport, config)
+
+    assert route(router, provider="opencode-go", turn_id="turn-knobs") is not None
+
+    question = transport.last_payload["questions"][EFFORT_QUESTION_ID]
+    assert question["instructions"] == "our own routing rule"
+    assert question["criteria"]["high"] == "our own high-effort text"
+    assert question["criteria"]["low"] == EFFORT_CRITERIA["low"]
 
 
 def test_max_effort_policy_accepts_max():
