@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from config import load_settings
-from decider import JevConsoleDecider, OpenAICompatibleDecider, REASON_MALFORMED
+from decider import JevConsoleDecider, JevDecider, OpenAICompatibleDecider, REASON_MALFORMED
 from grid import Entry
 from state import MODEL_QUESTION_ID, SINGLE_MODEL_CHOICE, build_questions
 from stubs import StubResponse, StubTransport, decision_payload
@@ -45,7 +45,7 @@ def test_a_two_model_grid_keeps_both_questions():
 
 
 def test_the_default_still_asks_the_model_question(monkeypatch):
-    """``ask_model`` defaults to True so the legacy Jev payload does not drift."""
+    """A grid with a choice keeps the model question: the default asks when ``len(grid) > 1``."""
     from state import build_payload
 
     payload = build_payload(
@@ -288,3 +288,36 @@ def test_openai_compatible_one_model_grid_never_invents_a_model_answer(monkeypat
     assert decision is not None
     assert decision.model == "deepseek-v4.1-flash"
     assert decision.effort == "medium"
+
+
+# -- legacy OpenRouter wire ----------------------------------------------------------
+
+
+def test_the_legacy_jev_wire_still_asks_the_model_on_a_one_model_grid(monkeypatch):
+    """The one-model rule scopes to the wires implemented here, not to a frozen contract.
+
+    The legacy Decisions API payload is pinned byte-for-byte (see ``test_client``), so
+    ``JevDecider`` passes ``ask_model=True`` explicitly: with a single model in the grid the
+    question is still sent and its answer is still the one that routes the turn.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    settings = load_settings(
+        lambda key, default=None: {
+            "decider": "jev",
+            "grid": ["only-model: the only choice"],
+        }.get(key, default)
+    )
+    transport = StubTransport([StubResponse(decision_payload("1", 0.9, grid_size=1))])
+    client = JevDecider(settings, transport=transport)
+
+    decision, reason = client.decide(
+        MESSAGES,
+        settings.effective(None),
+        platform="cli",
+        provider="ollama-cloud",
+    )
+
+    assert reason is None
+    assert decision is not None
+    assert decision.model == "only-model"
+    assert MODEL_QUESTION_ID in transport.last_payload["questions"]
