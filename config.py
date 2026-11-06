@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 #: must agree on what a level is, or a declaration would mean one thing in the YAML and another
 #: on the wire. ``effort`` never imports ``config`` at module scope (only inside the alias
 #: lookup), so this direction cannot cycle.
-from .effort import normalise_level, normalise_levels, normalise_overrides
+from .effort import DEFAULT_OFFERED_LEVELS, normalise_level, normalise_levels, normalise_overrides
 from .grid import (
     CODEX_GRID,
     COMMANDCODE_GRID,
@@ -869,7 +869,9 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         ),
         timeout_s=_as_float(read("timeout_s", DEFAULT_TIMEOUT_S), DEFAULT_TIMEOUT_S, minimum=0.05),
         default_model=_as_text(read("default_model", DEFAULT_MODEL), DEFAULT_MODEL),
-        default_effort=_as_choice(read("default_effort", DEFAULT_EFFORT), EFFORT_LEVELS, DEFAULT_EFFORT),
+        default_effort=_as_choice(
+            read("default_effort", DEFAULT_EFFORT), DEFAULT_OFFERED_LEVELS, DEFAULT_EFFORT
+        ),
         context_turns=_as_int(
             read("context_turns", DEFAULT_CONTEXT_TURNS), DEFAULT_CONTEXT_TURNS, minimum=0, maximum=50
         ),

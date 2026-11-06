@@ -637,3 +637,19 @@ def test_the_openai_compatible_schema_names_the_offered_levels(monkeypatch):
     system_prompt = transport.last_payload["messages"][0]["content"]
     assert "<low|medium|high|max>" in system_prompt
     assert "low, medium, high, or max" in system_prompt
+
+
+def test_the_default_effort_refuses_max():
+    """``default_effort`` is the fallback of a degraded turn, never the expensive rung.
+
+    ``max`` is a vocabulary level, so validating the knob against ``EFFORT_LEVELS`` would let a
+    hand-written config turn the decider's failure into the priciest turn — and the manifest's
+    ``choices`` never protected a config edited outside the plugin's own write path.
+    """
+    settings = settings_for({"default_effort": "max"})
+
+    assert settings.default_effort == "medium"
+    # The vocabulary still accepts it where it is a genuine choice: the operator's ceiling.
+    policy = settings_for({"platform_overrides": {"cli": {"max_effort": "max"}}}).policy_for("cli")
+    assert policy is not None
+    assert policy.max_effort == "max"
