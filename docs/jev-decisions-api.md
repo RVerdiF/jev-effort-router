@@ -61,6 +61,12 @@ map for `noul`. Questions are evaluated independently and in parallel — a deci
 on another answer at the wire level, which is why the effort question is asked independently and any
 coupling is resolved in code.
 
+When the effective grid carries a **single** model, the plugin omits `model_route` from `questions`
+and sends only `reasoning_effort`: a Choice over one option has one possible answer and a
+`confidence` of 1.0 by construction, so asking it buys a certainty at the cost of tokens and
+latency. The model is then `grid[0]` and the audit records `model_choice: "single"`. A model answer
+the endpoint volunteers for that question is ignored.
+
 ## Answer shape
 
 ```json

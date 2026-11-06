@@ -1250,13 +1250,18 @@ def test_jev_console_decider_generation_route_go_uses_the_single_model_catalog(t
     assert transport.call_count == 1
     assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
-    # Only one model was ever offered to the decider, so no alternative can exist.
-    assert list(transport.calls[0]["json"]["questions"]["model_route"]["criteria"]) == ["1"]
+    # One model is not a choice: the payload carries no model question at all, and the audit
+    # records the model as fixed by the grid rather than as a choice key.
+    questions = transport.calls[0]["json"]["questions"]
+    assert "model_route" not in questions
+    assert set(questions["reasoning_effort"]["criteria"]) == {"low", "medium", "high"}
     # The probe-confirmed top-level reasoning_effort carries the decided level on the Go wire.
     assert result["request"]["reasoning_effort"] == "high"
     record = router.tail(settings, limit=1)[0]
     assert record["event"] == "route"
     assert record["model"] == "deepseek-v4.1-flash"
+    assert record["model_choice"] == "single"
+    assert record["model_confidence"] == 1.0
     assert record["effort_requested"] == "high"
     assert record["effort"] == "high"
     assert record["fallback_reasons"] == []
@@ -1312,12 +1317,15 @@ def test_opencode_go_route_lands_every_decidable_level_on_the_wire(tmp_path, mon
 
 
 def test_opencode_go_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
-    """A widened operator grid or an invented choice cannot escape the Go catalog."""
+    """A widened operator grid cannot widen the wire.
+
+    The cap leaves a one-model grid, so the model question is not sent at all; an answer naming
+    an id the route does not serve has nowhere to land, and the request keeps the catalog's only
+    model.
+    """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
-    # Valid one-option distribution, but the chosen id is not in the (capped) grid.
     resp_payload = decision_payload(model_choice="unauthorized-model", model_confidence=0.95, grid_size=1)
-    # Both Jev variants answer the same way: the free model, then the paid fallback.
-    transport = StubTransport([StubResponse(resp_payload), StubResponse(resp_payload)])
+    transport = StubTransport([StubResponse(resp_payload)])
     router, settings = build(
         tmp_path,
         transport,
@@ -1343,12 +1351,16 @@ def test_opencode_go_route_cap_rejects_models_outside_the_catalog(tmp_path, monk
     original_before = json.dumps(original, sort_keys=True)
     result = route(router, dict(original), provider="opencode-go", model="deepseek-v4.1-flash")
 
-    assert result is None
+    assert result is not None
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
     assert json.dumps(original, sort_keys=True) == original_before
-    # Both Jev variants were asked, both answers were rejected, and the turn stayed untouched.
-    assert transport.call_count == 2
-    assert [call["json"]["model"] for call in transport.calls] == ["jev-1.13-free", "jev-1.13"]
-    assert router.tail(settings, limit=1)[0]["event"] == "skip"
+    # No model question was sent, so the invented id never had a channel to the wire.
+    assert "model_route" not in transport.calls[0]["json"]["questions"]
+    assert transport.call_count == 1
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["model"] == "deepseek-v4.1-flash"
+    assert record["model_choice"] == "single"
 
 
 def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_catalog(
@@ -1412,13 +1424,16 @@ def test_jev_console_decider_generation_route_commandcode_uses_the_namespaced_ca
     assert transport.call_count == 1
     assert transport.calls[0]["url"] == "https://opencode.ai/inference/systemone/v1/systemone"
     assert transport.calls[0]["json"]["model"] == "jev-1.13-free"
-    # Only the namespaced id was offered: the decider saw a one-option model question.
-    assert list(transport.calls[0]["json"]["questions"]["model_route"]["criteria"]) == ["1"]
+    # One model is not a choice: the namespaced id is fixed by the grid and the payload carries
+    # no model question at all.
+    questions = transport.calls[0]["json"]["questions"]
+    assert "model_route" not in questions
     # The level Jev decided is on the wire as the top-level field this endpoint accepts.
     assert result["request"]["reasoning_effort"] == "high"
     record = router.tail(settings, limit=1)[0]
     assert record["event"] == "route"
     assert record["model"] == "deepseek/deepseek-v4.1-flash"
+    assert record["model_choice"] == "single"
     assert record["effort_requested"] == "high"
     assert record["effort"] == "high"
     assert record["alternatives"] is None
@@ -1564,14 +1579,16 @@ def test_commandcode_route_lands_every_decidable_level_on_the_wire(tmp_path, mon
 
 
 def test_commandcode_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
-    """A widened operator grid or a decision naming the bare OpenCode id cannot escape the cap."""
+    """A widened operator grid cannot widen the wire (see the Go counterpart).
+
+    The cap leaves one model, the model question is not sent, and the bare OpenCode id named by
+    the answer never reaches this wire.
+    """
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "sk-console-secret")
-    # Valid one-option distribution, but the chosen id is not in the (capped) grid.
     resp_payload = decision_payload(
         model_choice="unauthorized-model", model_confidence=0.95, grid_size=1
     )
-    # Both Jev variants answer the same way: the free model, then the paid fallback.
-    transport = StubTransport([StubResponse(resp_payload), StubResponse(resp_payload)])
+    transport = StubTransport([StubResponse(resp_payload)])
     router, settings = build(
         tmp_path,
         transport,
@@ -1599,12 +1616,16 @@ def test_commandcode_route_cap_rejects_models_outside_the_catalog(tmp_path, monk
         router, dict(original), provider="commandcode", model="deepseek/deepseek-v4.1-flash"
     )
 
-    assert result is None
+    assert result is not None
+    assert result["request"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert result["request"]["model"] != "deepseek-v4.1-flash"
     assert json.dumps(original, sort_keys=True) == original_before
-    # Both Jev variants were asked, both answers were rejected, and the turn stayed untouched.
-    assert transport.call_count == 2
-    assert [call["json"]["model"] for call in transport.calls] == ["jev-1.13-free", "jev-1.13"]
-    assert router.tail(settings, limit=1)[0]["event"] == "skip"
+    assert "model_route" not in transport.calls[0]["json"]["questions"]
+    assert transport.call_count == 1
+    record = router.tail(settings, limit=1)[0]
+    assert record["event"] == "route"
+    assert record["model"] == "deepseek/deepseek-v4.1-flash"
+    assert record["model_choice"] == "single"
 
 
 def test_console_route_no_longer_applies_normal_mimo(tmp_path, monkeypatch):
@@ -1627,8 +1648,12 @@ def test_console_route_no_longer_applies_normal_mimo(tmp_path, monkeypatch):
     original_before = json.dumps(original, sort_keys=True)
     result = route(router, dict(original), provider="opencode-console", model="deepseek-v4.1-flash")
 
-    assert result is None
+    # The route carries one model, so there is no model question to answer: an answer naming a
+    # model the Console does not serve has nowhere to land, and the wire keeps the only model.
+    assert result is not None
+    assert result["request"]["model"] == "deepseek-v4.1-flash"
     assert json.dumps(original, sort_keys=True) == original_before
+    assert "model_route" not in transport.calls[0]["json"]["questions"]
 
 
 def test_opencode_go_legacy_decider_keeps_its_configured_grid(tmp_path, monkeypatch):
@@ -1832,7 +1857,8 @@ def test_memo_replay_invalidated_by_fallback_backend_or_key_env_change(tmp_path,
 def test_middleware_rejects_invented_criteria_or_outsider_choice(tmp_path, monkeypatch, caplog):
     secret_key = "test-secret-console-key-probe1"
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", secret_key)
-    p = decision_payload(model_choice="2", model_confidence=0.99, effort_choice="high", effort_confidence=0.8, grid_size=2)
+    # A multi-model grid is the only setup where a model choice exists to be validated.
+    p = decision_payload(model_choice="2", model_confidence=0.99, effort_choice="high", effort_confidence=0.8, grid_size=6)
     p["answers"]["model_route"]["choice"] = "outsider"
     p["answers"]["model_route"]["criteria"] = {"2": "outsider"}
 
@@ -1842,7 +1868,7 @@ def test_middleware_rejects_invented_criteria_or_outsider_choice(tmp_path, monke
         transport,
         config={
             "decider": "jev_console",
-            "routable_providers": ["opencode-console"],
+            "routable_providers": ["ollama-cloud"],
             "console_jev_fallback_model": "",
         },
     )
@@ -1852,7 +1878,7 @@ def test_middleware_rejects_invented_criteria_or_outsider_choice(tmp_path, monke
     req_copy = copy.deepcopy(original_req)
     req_json_before = json.dumps(original_req, sort_keys=True)
 
-    result = route(router, original_req, provider="opencode-console")
+    result = route(router, original_req, provider="ollama-cloud")
     assert result is None
     assert json.dumps(original_req, sort_keys=True) == req_json_before
     assert original_req == req_copy
@@ -1971,7 +1997,8 @@ def test_middleware_fail_open_console_negative_matrix(tmp_path, monkeypatch, cap
         transport,
         config={
             "decider": "jev_console",
-            "routable_providers": ["opencode-console"],
+            # Multi-model grid: the negative matrix exercises the model *and* effort answers.
+            "routable_providers": ["ollama-cloud"],
             "console_jev_fallback_model": "",  # fallback explicitly disabled
             "confidence_threshold": 0.70,
         },
@@ -2004,8 +2031,8 @@ def test_middleware_fail_open_console_negative_matrix(tmp_path, monkeypatch, cap
         session_id=f"session-{case_name}",
         platform="cli",
         model="deepseek-v4.1-flash",
-        provider="opencode-console",
-        base_url="https://opencode.ai/inference/openai/v1",
+        provider="ollama-cloud",
+        base_url="https://ollama.com/v1",
         api_mode="chat_completions",
         api_call_count=0,
         api_request_id=f"turn-{case_name}:api:0",

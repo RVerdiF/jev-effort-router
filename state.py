@@ -18,6 +18,12 @@ from .grid import Entry, criteria
 MODEL_QUESTION_ID = "model_route"
 EFFORT_QUESTION_ID = "reasoning_effort"
 
+#: What ``model_choice`` reports when the grid carried a single model. With one option the model
+#: question is not sent at all (a one-option Choice measures nothing and its answer would be a
+#: certainty Jev did not compute), so the audit must say the model was fixed by the grid rather
+#: than report a choice key the endpoint was never asked for.
+SINGLE_MODEL_CHOICE = "single"
+
 MODEL_INSTRUCTIONS = (
     "Which model is best suited to handle the user's request in `user_message`, given "
     "`recent_context`? Compare every option on the same axes — what the task actually needs, "
@@ -144,20 +150,30 @@ def build_state(
     return state
 
 
-def build_questions(grid: Sequence[Entry]) -> Dict[str, Any]:
-    """The two Choice questions, as the endpoint expects them."""
-    return {
-        MODEL_QUESTION_ID: {
+def build_questions(grid: Sequence[Entry], *, ask_model: Optional[bool] = None) -> Dict[str, Any]:
+    """The Choice questions, as the endpoint expects them.
+
+    ``ask_model=False`` omits the model question entirely. That is what a one-model grid calls
+    for: a Choice over a single option has one possible answer and a confidence of 1.0 by
+    construction, so asking it spends tokens and latency to learn nothing. ``None`` means the
+    grid decides; a caller with a backend that always expects both questions (the legacy
+    OpenRouter Decisions API) passes ``True`` explicitly. The effort question is always sent.
+    """
+    if ask_model is None:
+        ask_model = len(grid) > 1
+    questions: Dict[str, Any] = {}
+    if ask_model:
+        questions[MODEL_QUESTION_ID] = {
             "type": "choice",
             "instructions": MODEL_INSTRUCTIONS,
             "criteria": criteria(grid),
-        },
-        EFFORT_QUESTION_ID: {
-            "type": "choice",
-            "instructions": EFFORT_INSTRUCTIONS,
-            "criteria": dict(EFFORT_CRITERIA),
-        },
+        }
+    questions[EFFORT_QUESTION_ID] = {
+        "type": "choice",
+        "instructions": EFFORT_INSTRUCTIONS,
+        "criteria": dict(EFFORT_CRITERIA),
     }
+    return questions
 
 
 def build_payload(
@@ -168,6 +184,7 @@ def build_payload(
     context_turns: int,
     platform: str = "",
     provider: str = "",
+    ask_model: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """The complete Decisions API request body."""
     return {
@@ -178,7 +195,7 @@ def build_payload(
             platform=platform,
             provider=provider,
         ),
-        "questions": build_questions(grid),
+        "questions": build_questions(grid, ask_model=ask_model),
     }
 
 
