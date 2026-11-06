@@ -3,7 +3,7 @@
 This module is both a library and a script:
 
 * ``pytest`` imports it and compares the working tree against
-  ``tests/fixtures/legacy_0_4_0.json``;
+  ``tests/fixtures/legacy_stack_base.json``;
 * the fixture itself was produced by running this same module **against the reference commit**, so
   a difference means the change moved legacy behaviour — it can never be "fixed" by regenerating the
   expectation from the new code.
@@ -30,7 +30,7 @@ Two rules keep the comparison honest:
 
 Usage (fixture generation, run from a checkout of the reference commit)::
 
-    python tests/legacy_fixture_scenarios.py --root /path/to/reference/checkout > tests/fixtures/legacy_0_4_0.json
+    python tests/legacy_fixture_scenarios.py --root /path/to/reference/checkout > tests/fixtures/legacy_stack_base.json
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from pathlib import Path
 #: so a literal 0.4.0 byte expectation is no longer achievable (see the module docstring).
 BASE_COMMIT = "12aaeec55713b55d08a791c856cb0ebbf22dec4a"
 
-FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "legacy_0_4_0.json"
+FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "legacy_stack_base.json"
 
 #: The conversation every decider case routes. Same text as the rest of the suite.
 MESSAGES = [
@@ -343,28 +343,43 @@ _RUBRIC_MASK = "<rubric>"
 _CHAT_RUBRIC_PREFIXES = ("- low:", "- medium:", "- high:", "- max:")
 _CHAT_RULE_PREFIX = "- The effort MUST be "
 _CHAT_INSTRUCTIONS_PREFIX = "Pick the LOWEST reasoning effort"
+_CHAT_EFFORT_HEADER = "Reasoning Effort Levels:"
 
 
-def _mask_chat_prompt(text):
+def _mask_chat_prompt(text, *, system):
     """The ``openai_compatible`` prompt with the rubric's wording masked, shape preserved.
 
-    The criteria lines keep their level key (so the offered set is still pinned) and lose their
-    text; the rule line and the instructions paragraph are masked/removed. The instructions
-    paragraph is new in this card, so removing it is what lets a base payload without it compare
-    equal to a current one that carries it.
+    Masking is confined to where the rubric actually lives: the level lines inside the
+    ``Reasoning Effort Levels:`` block, and (in the system message) the rule line and the
+    instructions paragraph. A user or context line that happens to start with ``- low:`` is left
+    alone, so a regression in the conversation cannot hide behind the mask.
+
+    The criteria lines keep their level key — the offered set is still pinned — and lose their
+    text. The instructions paragraph is new in this card, so removing it is what lets a base
+    payload without it compare equal to a current one that carries it.
     """
     kept = []
+    in_effort_block = False
     for line in str(text).splitlines():
         stripped = line.strip()
-        if stripped.startswith(_CHAT_RUBRIC_PREFIXES):
-            level = stripped.split(":", 1)[0]
-            kept.append(f"{level}: {_RUBRIC_MASK}")
-        elif stripped.startswith(_CHAT_RULE_PREFIX):
-            kept.append(_RUBRIC_MASK)
-        elif stripped.startswith(_CHAT_INSTRUCTIONS_PREFIX):
-            continue
-        else:
+        if stripped == _CHAT_EFFORT_HEADER:
+            in_effort_block = True
             kept.append(line)
+            continue
+        if in_effort_block:
+            if not stripped:
+                in_effort_block = False
+            elif stripped.startswith(_CHAT_RUBRIC_PREFIXES):
+                kept.append(f"{stripped.split(':', 1)[0]}: {_RUBRIC_MASK}")
+                continue
+            kept.append(line)
+            continue
+        if system and stripped.startswith(_CHAT_RULE_PREFIX):
+            kept.append(_RUBRIC_MASK)
+            continue
+        if system and stripped.startswith(_CHAT_INSTRUCTIONS_PREFIX):
+            continue
+        kept.append(line)
     return "\n".join(kept)
 
 
@@ -386,7 +401,8 @@ def _masked_payload(payload):
     if isinstance(messages, list):
         for message in messages:
             if isinstance(message, dict) and isinstance(message.get("content"), str):
-                message["content"] = _mask_chat_prompt(message["content"])
+                system = str(message.get("role") or "").strip().lower() == "system"
+                message["content"] = _mask_chat_prompt(message["content"], system=system)
     return masked
 
 
@@ -510,7 +526,7 @@ def collect() -> dict:
         "generated_by": "tests/legacy_fixture_scenarios.py",
         "regenerate": (
             "git archive <base_commit> | tar -x -C /tmp/base && "
-            "python tests/legacy_fixture_scenarios.py --root /tmp/base > tests/fixtures/legacy_0_4_0.json"
+            "python tests/legacy_fixture_scenarios.py --root /tmp/base > tests/fixtures/legacy_stack_base.json"
         ),
         "decider": collect_decider_cases(),
         "router": collect_router_cases(),

@@ -341,7 +341,7 @@
     }
   },
   "generated_by": "tests/legacy_fixture_scenarios.py",
-  "regenerate": "git archive <base_commit> | tar -x -C /tmp/base && python tests/legacy_fixture_scenarios.py --root /tmp/base > tests/fixtures/legacy_0_4_0.json",
+  "regenerate": "git archive <base_commit> | tar -x -C /tmp/base && python tests/legacy_fixture_scenarios.py --root /tmp/base > tests/fixtures/legacy_stack_base.json",
   "router": {
     "router_console_429_then_paid": {
       "calls": [
