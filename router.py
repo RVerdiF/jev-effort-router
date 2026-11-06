@@ -241,123 +241,28 @@ class Router:
 
             decision: Optional[Decision] = None
             if memo is not None:
-                # Provenance guard: a decision made for another provider must not be replayed to this one
-                memo_prov = getattr(memo, "provider", "")
-                if memo_prov and provider and memo_prov != provider:
-                    logger.info(
-                        "jev-effort-router: memo decided for provider %r is incompatible with active provider %r; failing open",
-                        memo_prov,
-                        provider,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
+                mismatch = self._memo_mismatch(settings, memo, provider, session_id, effective)
+                if mismatch is not None:
+                    reason, detail = mismatch
+                    marker = bool(getattr(memo, "failure_reason", None))
+                    if marker and reason != REASON_NO_API_KEY:
+                        # A negative memo is not a decision: it only records that this turn
+                        # already asked the decider *for this provenance* and failed. Different
+                        # provenance means a different question, so the marker is dropped and
+                        # this request decides. Failing open instead would let a failure on one
+                        # provider silence the decider for a request to another provider in the
+                        # same turn — a turn that would have been routed before markers existed.
+                        logger.info(
+                            "jev-effort-router: negative memo belongs to another request (%s); asking the decider",
+                            detail,
+                        )
+                        memo, replayed = None, False
+                    else:
+                        logger.info("jev-effort-router: %s; failing open", detail)
+                        self._record_skip(settings, reason, where)
+                        return None
 
-                # Session guard: a decision made for another session must not be replayed to this one
-                memo_session = getattr(memo, "session_id", "")
-                if memo_session and session_id and memo_session != session_id:
-                    logger.info(
-                        "jev-effort-router: memo decided for session %r is incompatible with active session %r; failing open",
-                        memo_session,
-                        session_id,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                # Decider guard: memo decided with a different decider must not be reused
-                memo_dec = getattr(memo, "decider", "")
-                if memo_dec and memo_dec != settings.decider:
-                    logger.info(
-                        "jev-effort-router: memo decided with decider %r is incompatible with active decider %r; failing open",
-                        memo_dec,
-                        settings.decider,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                # Decider configuration guard: endpoint, decider model, fallback model, and key env
-                memo_endpoint = getattr(memo, "decider_endpoint", "")
-                curr_endpoint = settings.base_url_for(settings.decider)
-                if memo_endpoint and curr_endpoint and memo_endpoint != curr_endpoint:
-                    logger.info(
-                        "jev-effort-router: memo decider endpoint %r != active %r; failing open",
-                        memo_endpoint,
-                        curr_endpoint,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                memo_model = getattr(memo, "decider_model", "")
-                curr_model = settings.decider_model_for(settings.decider)
-                if memo_model and curr_model and memo_model != curr_model:
-                    logger.info(
-                        "jev-effort-router: memo decider model %r != active %r; failing open",
-                        memo_model,
-                        curr_model,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                memo_fallback = getattr(memo, "decider_fallback_model", "")
-                curr_fallback = (settings.console_jev_fallback_model or "").strip() if settings.decider == "jev_console" else ""
-                if memo_fallback != curr_fallback:
-                    logger.info(
-                        "jev-effort-router: memo fallback model %r != active %r; failing open",
-                        memo_fallback,
-                        curr_fallback,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                memo_key_env = getattr(memo, "decider_key_env", "")
-                curr_key_env = settings.api_key_env_for(settings.decider)
-                if memo_key_env and curr_key_env and memo_key_env != curr_key_env:
-                    logger.info(
-                        "jev-effort-router: memo key env %r != active %r; failing open",
-                        memo_key_env,
-                        curr_key_env,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                # Secondary-transport guard: the opt-in SystemOne trio is configuration identity
-                # too. Changing its endpoint, model or key variable — or turning it on/off —
-                # invalidates the replay rather than reproducing a decision the active
-                # configuration would no longer make. An inactive trio is ("", "", ""), which is
-                # what every legacy memo carries, so the legacy path is unaffected.
-                memo_secondary = (
-                    getattr(memo, "decider_commandcode_endpoint", ""),
-                    getattr(memo, "decider_commandcode_model", ""),
-                    getattr(memo, "decider_commandcode_key_env", ""),
-                )
-                if memo_secondary != (secondary.url, secondary.model, secondary.key_env):
-                    logger.info(
-                        "jev-effort-router: memo commandcode fallback %r != active %r; failing open",
-                        memo_secondary,
-                        (secondary.url, secondary.model, secondary.key_env),
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
-                    return None
-
-                if not api_key(curr_key_env) and not _secondary_key_available(secondary):
-                    logger.info(
-                        "jev-effort-router: active decider key env %r has no key; failing open",
-                        curr_key_env,
-                    )
-                    self._record_skip(settings, REASON_NO_API_KEY, where)
-                    return None
-
-                # Grid signature guard: criteria and options must match active grid. Checked
-                # before the negative memo so a marker recorded against a different grid cannot
-                # suppress a turn whose question has changed.
-                curr_grid_sig = tuple((e.model_id, e.description) for e in effective.grid)
-                memo_grid_sig = getattr(memo, "grid_signature", ())
-                if memo_grid_sig and memo_grid_sig != curr_grid_sig:
-                    logger.info(
-                        "jev-effort-router: memo grid criteria signature does not match active grid; failing open",
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
-                    return None
-
+            if memo is not None:
                 # Negative memo: this turn's decision already failed. Replay the skip instead of
                 # asking the same question again — the answer that was too weak (or too slow) is
                 # the answer the rest of the tool loop would get. Checked before the confidence
@@ -424,6 +329,11 @@ class Router:
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
                 # Leave the request exactly as the operator configured it.
+                #
+                # Deliberately NOT memoised as a negative memo, unlike ``low_confidence`` and
+                # ``timeout``: the decider answered, and what was refused is the *answer*, so the
+                # next request of the turn may still get a decision this router can use. Only the
+                # decider's own slow, repeatable failures become markers (see MEMOISABLE_FAILURES).
                 if not self._provider_has(decision.model, provider=provider, decider=settings.decider):
                     logger.warning(
                         "jev-effort-router: Jev chose %r, which is not in the provider's catalog; "
@@ -513,6 +423,78 @@ class Router:
             logger.debug("jev-effort-router: catalog check failed (%s: %s)", type(exc).__name__, exc)
             return True
         return known is not False
+
+    def _memo_mismatch(
+        self,
+        settings: Settings,
+        memo: Memo,
+        provider: str,
+        session_id: str,
+        effective: EffectiveSettings,
+    ) -> Optional[Tuple[str, str]]:
+        """Why this memo does not belong to this request, as ``(skip_reason, detail)``.
+
+        One place for the provenance comparison, because both memo kinds must answer it the same
+        way: a decision taken for another provider, session, decider or decider configuration must
+        not be replayed here, and neither may a negative memo recorded under that provenance.
+        ``None`` means the memo belongs to this request.
+
+        What differs is the caller's response. A *decision* from another provenance fails the
+        request open: leaving the operator's model alone is safer than pinning a model chosen for a
+        different wire. A *marker* is simply dropped — it holds no decision to lose, and failing
+        open would deny this request a decision the decider can still make.
+        """
+        memo_prov = getattr(memo, "provider", "")
+        if memo_prov and provider and memo_prov != provider:
+            return REASON_SKIPPED_PROVIDER, (
+                f"memo decided for provider {memo_prov!r} is incompatible with active provider {provider!r}"
+            )
+
+        memo_session = getattr(memo, "session_id", "")
+        if memo_session and session_id and memo_session != session_id:
+            return REASON_SKIPPED_PROVIDER, (
+                f"memo decided for session {memo_session!r} is incompatible with active session {session_id!r}"
+            )
+
+        memo_dec = getattr(memo, "decider", "")
+        if memo_dec and memo_dec != settings.decider:
+            return REASON_SKIPPED_PROVIDER, (
+                f"memo decided with decider {memo_dec!r} is incompatible with active decider {settings.decider!r}"
+            )
+
+        memo_endpoint = getattr(memo, "decider_endpoint", "")
+        curr_endpoint = settings.base_url_for(settings.decider)
+        if memo_endpoint and curr_endpoint and memo_endpoint != curr_endpoint:
+            return REASON_SKIPPED_PROVIDER, f"memo decider endpoint {memo_endpoint!r} != active {curr_endpoint!r}"
+
+        memo_model = getattr(memo, "decider_model", "")
+        curr_model = settings.decider_model_for(settings.decider)
+        if memo_model and curr_model and memo_model != curr_model:
+            return REASON_SKIPPED_PROVIDER, f"memo decider model {memo_model!r} != active {curr_model!r}"
+
+        memo_fallback = getattr(memo, "decider_fallback_model", "")
+        curr_fallback = (
+            (settings.console_jev_fallback_model or "").strip() if settings.decider == "jev_console" else ""
+        )
+        if memo_fallback != curr_fallback:
+            return REASON_SKIPPED_PROVIDER, f"memo fallback model {memo_fallback!r} != active {curr_fallback!r}"
+
+        memo_key_env = getattr(memo, "decider_key_env", "")
+        curr_key_env = settings.api_key_env_for(settings.decider)
+        if memo_key_env and curr_key_env and memo_key_env != curr_key_env:
+            return REASON_SKIPPED_PROVIDER, f"memo key env {memo_key_env!r} != active {curr_key_env!r}"
+
+        if not api_key(curr_key_env):
+            return REASON_NO_API_KEY, f"active decider key env {curr_key_env!r} has no key"
+
+        # Criteria and options must match the active grid: a decision or marker recorded against
+        # a question that has since changed says nothing about this one.
+        curr_grid_sig = tuple((e.model_id, e.description) for e in effective.grid)
+        memo_grid_sig = getattr(memo, "grid_signature", ())
+        if memo_grid_sig and memo_grid_sig != curr_grid_sig:
+            return REASON_SKIPPED_MODEL, "memo grid criteria signature does not match active grid"
+
+        return None
 
     def _lookup(
         self, settings: Settings, turn_id: str, session_id: str

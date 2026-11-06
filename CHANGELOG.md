@@ -86,7 +86,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   configuration fact the guards already handle. The marker is per turn only — `route_per_turn: false`
   keeps routing once per session, and suppressing a session for 24h because one request timed out
   would be a much larger change than the waste it fixes. The remembered reason survives the replay,
-  so a timeout is not relabelled `low_confidence` by the zeroed marker confidences.
+  so a timeout is not relabelled `low_confidence` by the zeroed marker confidences. The marker is also
+  scoped to the provenance that recorded it: when the next request of the turn belongs to a different
+  provider, session, decider or grid, the marker is dropped and that request decides normally — a
+  marker holds no decision to lose, and failing the request open would let one provider's timeout cost
+  another provider's turn. A *decision* from another provenance still fails open, as before.
 - **A one-model grid no longer asks the model question.** A Choice over a single option has one
   possible answer and a confidence of 1.0 by construction, so the question only cost tokens and
   latency. `state.build_questions` omits it when `len(grid) == 1` (explicit `ask_model=True` keeps the
