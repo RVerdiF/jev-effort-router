@@ -160,7 +160,7 @@ form generated from `plugin.yaml`.
 | `confidence_threshold_per_decider` | `null` | Optional map of decider backend to confidence threshold (e.g. `{jev: 0.5, openai_compatible: 0.6}`). |
 | `timeout_s` | `2.0` | Budget for the decision call. Any timeout leaves the request untouched. |
 | `default_model` | `deepseek-v4.1-flash` | Model used when the decision is below threshold. |
-| `default_effort` | `medium` | Effort used when the decision is below threshold. |
+| `default_effort` | `medium` | Effort used when the decision is below threshold. `low`/`medium`/`high` only: `max` is a ceiling for `max_effort`, never the fallback of a degraded turn. |
 | `context_turns` | `4` | Preceding turns sent to the decider as recent context. |
 | `route_per_turn` | `true` | Off routes once per session instead of once per user turn. |
 | `audit_enabled` | `true` | Append one JSONL record per turn under the plugin data directory. |

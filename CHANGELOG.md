@@ -81,6 +81,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- **An effort level the question never offered no longer reaches the wire.** `max` became a
+  vocabulary level, and `resolve_effort` still consults the *built-in* policy of a route with no
+  `effort_maps` entry — where `opencode-go`, `commandcode` and `codex` do declare `max`. A well-formed
+  but unoffered answer (`max` on a route the question asked with `low`/`medium`/`high`) therefore
+  went out as `reasoning_effort: max`: the question offered three rungs and the turn ran the fourth.
+  The applied level is now gated on the offered set in all three deciders, and on the memo replay —
+  the map may have been narrowed after the decision was written. An unoffered level is recorded in
+  `effort_requested` and omitted from the wire (`effort: null`), which is the rule the declared-map
+  path already followed: omitted, never clamped, and never a reason to lose the model decision.
+- **`default_effort: max` is refused.** The knob is the level a degraded turn falls back to, and it
+  was validated against `EFFORT_LEVELS` — which now includes `max`, so a hand-written config could
+  make the decider's failure the most expensive turn. It is validated against
+  `DEFAULT_OFFERED_LEVELS` instead, matching the `choices` the plugin manifest advertises.
 - **A failed turn still remembers its failure when the opt-in SystemOne fallback is enabled.** The
   negative memo's provenance did not include the CommandCode trio, so on a deployment with the
   fallback configured the marker looked foreign to the very configuration that wrote it, was

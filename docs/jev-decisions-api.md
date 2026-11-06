@@ -80,7 +80,10 @@ for every model on the grid). `max` is offered only where a map declares it; a r
 keeps `low`/`medium`/`high`. The answer is validated as a level and then resolved against the
 route's declaration: a level the declaration does not carry is omitted from the wire (never clamped
 to a weaker rung), and the audit keeps the asked level in `effort_requested` beside the applied
-`effort`.
+`effort`. The same holds for a level the *question* did not offer — an answer naming `max` where
+only `low`/`medium`/`high` were asked is recorded as asked and omitted from the wire, even though
+the route's built-in policy declares `max`: the offered set is the contract, on a fresh decision and
+on a memo replay alike.
 
 The optional turn signal is the only conversation state beyond `recent_context`:
 
