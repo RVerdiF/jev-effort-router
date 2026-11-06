@@ -8,6 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Four-step effort rubric, configurable, plus `max` offered only where the route declares it.**
+  `EFFORT_LEVELS` now carries `low`/`medium`/`high`/`max`, and the built-in rubric says what each
+  rung covers with an example, under the rule "pick the lowest level that covers the work; raise it
+  for uncertainty, risk or irreversibility — never for message length". The measured failure mode of
+  the old three vague levels was mass splitting between neighbours and a confidence below the
+  router's threshold, which sent the turn to the host default. Operators can reword the rubric
+  without a commit: `effort_criteria` (level → text) and `effort_instructions` (string) in
+  `plugins.entries.jev-effort-router.settings`. A knob with a level outside the vocabulary, a
+  non-string or empty text is discarded whole and the built-in rubric applies; a partial map
+  overrides only the levels it names.
+- **`max` as a real level, scoped to the route that accepts it.** `effort.offered_levels` (and
+  `offered_levels_for_grid`) derives the levels a route may be asked for from `EFFORT_LEVELS` ∩ the
+  accepted levels of the provider's `effort_maps` entry, for every model on the grid. Without a map
+  the question keeps `low`/`medium`/`high`; `max` is never offered on a route that would clamp it
+  away, and an answer outside the offered set fails the decision rather than being clamped into
+  another level. The payload question, the accepted answer keys, the `openai_compatible` prompt and
+  schema, and the Console's probability-key and echoed-criteria checks all derive from that one set.
+  `max_effort` in a platform policy now accepts `max`, and it is still the operator's ceiling on what
+  runs.
+- **The previous turn reaches the decider.** `state` carries `previous_turn`
+  (`{tool_calls: n, tools: [≤8 distinct names]}`) and `last_tool_results_excerpt` (tail ≤ 1.500
+  chars of the previous assistant turn's tool output, after `_clean` and `redact`). The decision is
+  taken once per turn, when the current turn has made no tool calls yet, so the previous turn is the
+  signal that exists; assistant reasoning remains outside the payload. `recent_context` keeps its
+  bound, and a full-context payload stays under 20K characters.
 - **Opt-in `commandcode` generation route.** A new OpenAI-compatible provider (`commandcode`, aliases
   `commandcode-chat` / `commandcode_chat`) carries its own one-model catalog, `COMMANDCODE_GRID`:
   `deepseek/deepseek-v4.1-flash`. The namespaced id was confirmed from the provider's public,
@@ -54,6 +79,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+<<<<<<< HEAD
 - **`effort_maps` now mean one thing, on every route.** The map path and the strict built-in routes
   (`opencode-console`, `opencode-go`, `commandcode`, `openai-codex`) run a single algorithm,
   `effort.resolve_declared_effort`: a requested level the declaration accepts goes out verbatim;
@@ -75,6 +101,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   used to be clamped to the nearest weaker accepted level is now omitted. Migration: declare the
   override (`overrides: {xhigh: max}`) or accept the omission; a map that wants the built-in
   vocabulary must now repeat it.
+- **`effort_requested` keeps what Jev asked for; `effort` keeps what ran.** Every decider used to
+  overwrite `effort_requested` with the value produced by the *cap* (`max_effort`), so a capped turn
+  was audited as if the stronger level had been applied. The requested level now stays in
+  `effort_requested` and the one actually handed to the wire in `effort`, on fresh decisions and on
+  replays: the replay path keeps the stored request and re-applies the cap to the wire value.
+  `recent_context`'s cap drops from 12.000 to 11.000 characters so a full payload (context, the
+  four-step rubric and the turn-signal fields) stays under 20K with the built-in rubric.
 - **A failed turn remembers the failure instead of re-asking in its own tool loop.** With
   `route_per_turn: true` a decision is memoised on the turn, but a *failure* was not: `low_confidence`
   and `timeout` returned `None` without storing anything, so every provider request of that turn's

@@ -33,7 +33,14 @@ default so a silent model swap cannot change routing behaviour under the operato
 ```json
 {
   "model": "typesafe/jev-1.13",
-  "state": { "user_message": "...", "recent_context": "...", "surface": "cli", "provider": "ollama-cloud" },
+  "state": {
+    "user_message": "...",
+    "recent_context": "...",
+    "previous_turn": { "tool_calls": 3, "tools": ["terminal", "read_file"] },
+    "last_tool_results_excerpt": "… tail of the last tool output, redacted",
+    "surface": "cli",
+    "provider": "ollama-cloud"
+  },
   "questions": {
     "model_route": {
       "type": "choice",
@@ -46,8 +53,8 @@ default so a silent model swap cannot change routing behaviour under the operato
     },
     "reasoning_effort": {
       "type": "choice",
-      "instructions": "Which level of reasoning effort does this message require?",
-      "criteria": { "low": "...", "medium": "...", "high": "..." }
+      "instructions": "Pick the LOWEST reasoning effort that fully covers the work this turn will need…",
+      "criteria": { "low": "...", "medium": "...", "high": "...", "max": "..." }
     }
   }
 }
@@ -66,6 +73,22 @@ and sends only `reasoning_effort`: a Choice over one option has one possible ans
 `confidence` of 1.0 by construction, so asking it buys a certainty at the cost of tokens and
 latency. The model is then `grid[0]` and the audit records `model_choice: "single"`. A model answer
 the endpoint volunteers for that question is ignored.
+
+`reasoning_effort` lists only the levels the route can actually be given (`effort.offered_levels`,
+the intersection of `EFFORT_LEVELS` with the accepted levels of the provider's `effort_maps` entry
+for every model on the grid). `max` is offered only where a map declares it; a route with no map
+keeps `low`/`medium`/`high`. The answer keys are validated against the same set, so a level the
+route never offered fails the decision instead of being clamped into another one.
+
+The optional turn signal is the only conversation state beyond `recent_context`:
+
+| field | content |
+|---|---|
+| `previous_turn` | `{tool_calls: n, tools: [≤8 distinct names]}` for the assistant turn that answered the previous message. Omitted on a first turn. |
+| `last_tool_results_excerpt` | tail (≤ 1.500 chars) of that turn's tool results, after `_clean` and `redact`; omitted when there is no tool output. |
+
+Assistant reasoning is never forwarded, and the decision is taken once per turn, so a count of the
+*current* turn's tool calls would always be zero — hence the previous turn.
 
 ## Answer shape
 
