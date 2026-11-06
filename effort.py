@@ -29,6 +29,10 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 #: Hermes' ladder, low to high. Used only for nearest-weaker arithmetic.
 LADDER: Tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
+#: Levels offered when the route declares no effort map. ``max`` is deliberately absent: it is
+#: only offered where a map proves the wire accepts it (see :func:`offered_levels`).
+DEFAULT_OFFERED_LEVELS: Tuple[str, ...] = ("low", "medium", "high")
+
 
 def normalise_level(value: Any) -> Optional[str]:
     """A declared or requested level, or ``None`` when the value is not one.
@@ -697,6 +701,79 @@ def model_reasoning_policy(
         omitted=True,
         decision=f"Provider {provider_key} is unmapped and lacks verified reasoning contract; omitted on wire.",
     )
+
+
+def _declared_contract(
+    provider: Optional[str],
+    model: Optional[str],
+    effort_maps: Optional[Mapping[str, Any]],
+) -> Optional[EffortContract]:
+    """The contract this route declares for ``model``, or ``None`` when it declares none.
+
+    ``None`` means "no map entry applies here" (no map at all, no entry for the provider, or an
+    entry that does not name this model) — the case where the built-in policy still governs.
+    A *matched* entry always returns a contract, even an empty one: main treats that as a
+    deliberate shadow, so it must not be mistaken for an absence.
+    """
+    _name, provider_map = _effort_map_entry(effort_maps, (provider or "").strip().lower())
+    if provider_map is None:
+        return None
+    found, spec = select_model_spec(provider_map, model)
+    if not found:
+        return None
+    return parse_effort_spec(spec)
+
+
+def offered_levels(
+    provider: Optional[str],
+    model: Optional[str],
+    effort_maps: Optional[Mapping[str, Any]] = None,
+) -> Tuple[str, ...]:
+    """The effort levels the question may offer a route, in ``EFFORT_LEVELS`` order.
+
+    A route is only asked for levels its own ``effort_maps`` entry declares: offering ``max``
+    where the declaration does not have it would spend the decision on an answer the router
+    would then omit. With no map entry for the route (or none for this model) the three-level
+    default applies — ``max`` is offered only where a map proves the route accepts it.
+
+    A declaration that shares no level with the askable vocabulary (``accepted: [minimal]``, or
+    an entry that deliberately declares nothing) is unusable *for this question*: the default
+    applies, and ``resolve_effort`` then omits whatever the answer names — it never clamps.
+
+    Imported lazily: ``config`` imports this module for the level normalisation, so a
+    module-level import here would be a cycle.
+    """
+    from .config import EFFORT_LEVELS
+
+    contract = _declared_contract(provider, model, effort_maps)
+    if contract is None or not contract.valid:
+        return DEFAULT_OFFERED_LEVELS
+    declared = set(contract.accepted)
+    offered = tuple(level for level in EFFORT_LEVELS if level in declared)
+    return offered or DEFAULT_OFFERED_LEVELS
+
+
+def offered_levels_for_grid(
+    grid: Sequence[Any],
+    provider: Optional[str],
+    effort_maps: Optional[Mapping[str, Any]] = None,
+) -> Tuple[str, ...]:
+    """The levels offered for a whole grid: those every model in it can actually be given.
+
+    The effort question is asked once, before the model is known, so a level is only offered
+    when the answer would be applicable whichever model wins. A grid the operator left without
+    maps keeps the three-level default, and an empty grid has nothing to narrow.
+    """
+    from .config import EFFORT_LEVELS
+
+    models = [entry.model_id for entry in grid]
+    if not models:
+        return DEFAULT_OFFERED_LEVELS
+    common = set(offered_levels(provider, models[0], effort_maps))
+    for model_id in models[1:]:
+        common &= set(offered_levels(provider, model_id, effort_maps))
+    offered = tuple(level for level in EFFORT_LEVELS if level in common)
+    return offered or DEFAULT_OFFERED_LEVELS
 
 
 def resolve_effort(

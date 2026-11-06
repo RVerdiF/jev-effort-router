@@ -89,6 +89,24 @@ def console_answer(choice: str = "1", confidence: float = 0.95):
     return decision_payload(choice, confidence, "medium", 0.9, grid_size=1)
 
 
+def console_weak_effort_answer():
+    """A confident model line and a weak *effort* line.
+
+    The console route's grid carries one model, so the model question is not asked (the model
+    answer is the grid's by construction) and the only dimension an answer can be unusable on is
+    the effort. A ``confidence`` lowered on the model line alone would therefore still be a valid
+    decision here.
+    """
+    return decision_payload("1", 0.95, "medium", 0.2, grid_size=1)
+
+
+def console_unknown_effort_answer():
+    """An answer whose *effort* names a level outside the vocabulary, with valid probabilities."""
+    return decision_payload(
+        "1", 0.95, "bogus", 0.9, effort_probabilities={"low": 1.0}, grid_size=1
+    )
+
+
 class _StepClock:
     """A monotonic clock that advances a fixed amount per read, so latency is exact."""
 
@@ -224,8 +242,8 @@ def test_the_prohibited_header_set_covers_x_cmd_zdr_case_insensitively(monkeypat
 @pytest.mark.parametrize(
     "answer, expected_reason",
     [
-        (console_answer(confidence=0.2), REASON_LOW_CONFIDENCE),
-        (console_answer(choice="9"), REASON_UNKNOWN_CHOICE),
+        (console_weak_effort_answer(), REASON_LOW_CONFIDENCE),
+        (console_unknown_effort_answer(), REASON_UNKNOWN_CHOICE),
     ],
 )
 def test_a_valid_but_unusable_console_answer_does_not_consult_the_fallback(answer, expected_reason):
@@ -403,8 +421,8 @@ def test_a_fallback_wire_failure_is_malformed():
 @pytest.mark.parametrize(
     "answer, expected_reason",
     [
-        (console_answer(confidence=0.2), REASON_LOW_CONFIDENCE),
-        (console_answer(choice="9"), REASON_UNKNOWN_CHOICE),
+        (console_weak_effort_answer(), REASON_LOW_CONFIDENCE),
+        (console_unknown_effort_answer(), REASON_UNKNOWN_CHOICE),
     ],
 )
 def test_a_valid_but_unroutable_fallback_answer_keeps_the_semantic_reason(
@@ -431,7 +449,7 @@ def test_a_missing_paid_answer_still_hands_the_turn_to_the_fallback():
     # but the paid attempt failed technically, and the contract requires asking the fallback.
     transport = StubTransport(
         [
-            StubResponse(console_answer(confidence=0.2)),
+            StubResponse(console_weak_effort_answer()),
             None,
             StubResponse(console_answer()),
         ]
@@ -458,8 +476,8 @@ def test_a_missing_paid_answer_still_hands_the_turn_to_the_fallback():
 def test_a_semantic_paid_answer_does_not_consult_the_fallback():
     transport = StubTransport(
         [
-            StubResponse(console_answer(confidence=0.2)),
-            StubResponse(console_answer(choice="9")),
+            StubResponse(console_weak_effort_answer()),
+            StubResponse(console_unknown_effort_answer()),
         ]
     )
     client, settings = make(transport, cc_config(console_jev_fallback_model=CONSOLE_PAID))
@@ -474,7 +492,7 @@ def test_a_semantic_paid_answer_does_not_consult_the_fallback():
 
 def test_a_missing_paid_answer_without_the_fallback_key_keeps_the_console_reason(monkeypatch):
     monkeypatch.delenv("COMMANDCODE_API_KEY")
-    transport = StubTransport([StubResponse(console_answer(confidence=0.2)), None])
+    transport = StubTransport([StubResponse(console_weak_effort_answer()), None])
     client, settings = make(transport, cc_config(console_jev_fallback_model=CONSOLE_PAID))
 
     decision, reason = ask(client, settings)
@@ -489,7 +507,7 @@ def test_a_missing_paid_answer_without_the_fallback_key_keeps_the_console_reason
 def test_without_the_opt_in_a_missing_paid_answer_keeps_the_legacy_reason():
     # The technical flag exists for the second-host decision only: with the trio empty the returned
     # reason is exactly what 0.4.0 produced for the same two responses.
-    transport = StubTransport([StubResponse(console_answer(confidence=0.2)), None])
+    transport = StubTransport([StubResponse(console_weak_effort_answer()), None])
     client, settings = make(
         transport,
         cc_config(

@@ -1,9 +1,14 @@
-"""Compatibility gate: legacy behaviour against the 0.4.0 base commit.
+"""Compatibility gate: legacy behaviour against this stack's base commit.
 
-The expectation file is **generated from the base commit**, never from the working tree (see
+The expectation file is **generated from the reference commit**, never from the working tree (see
 ``tests/legacy_fixture_scenarios.py``). A failure here means a change moved something an operator
 already depends on — installed payload bytes, call order, reason strings, audit record shape — and
 the fix is to restore the behaviour, not to regenerate the fixture.
+
+The reference commit is this stack's base (``12aaeec``), not 0.4.0: the one-model grid rule of
+``t_8cac6c92`` and the four-step rubric of ``t_0998d382`` are reviewed behaviour changes, so the
+0.4.0 bytes are not the target any more. The rubric's wording is masked in the projection; its
+shape and option keys are still pinned.
 
 The opt-in CommandCode transport is out of scope by construction: every case in the fixture runs
 with an empty trio, so these expectations are the *no-configuration* contract.
@@ -15,7 +20,7 @@ import json
 
 from legacy_fixture_scenarios import FIXTURE_PATH, collect_decider_cases, collect_router_cases
 
-BASE_COMMIT = "d42230b213515a825eec65748e2bbde0750eafc4"
+BASE_COMMIT = "12aaeec55713b55d08a791c856cb0ebbf22dec4a"
 
 
 def _fixture() -> dict:

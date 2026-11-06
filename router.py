@@ -241,7 +241,9 @@ class Router:
 
             decision: Optional[Decision] = None
             if memo is not None:
-                mismatch = self._memo_mismatch(settings, memo, provider, session_id, effective)
+                mismatch = self._memo_mismatch(
+                    settings, memo, provider, session_id, effective, secondary
+                )
                 if mismatch is not None:
                     reason, detail = mismatch
                     marker = bool(getattr(memo, "failure_reason", None))
@@ -309,18 +311,20 @@ class Router:
 
                 # Effort map guard: re-resolve effort against the active provider's map and respect active max_effort cap
                 req_effort = memo.effort_requested or memo.effort
-                if req_effort is not None and effective.max_effort:
-                    req_effort = _cap_effort(req_effort, effective.max_effort)
+                applied_effort = (
+                    _cap_effort(req_effort, effective.max_effort) if req_effort is not None else None
+                )
 
                 re_effort = resolve_effort(
                     memo.model,
-                    req_effort,
+                    applied_effort,
                     provider=provider,
                     effort_maps=settings.effort_maps,
                 )
+                # ``effort_requested`` keeps what the decision asked for: a cap applied to the
+                # replay is visible in ``effort`` (and in ``effort_requested != effort``), not by
+                # rewriting the request into the value that was actually applied.
                 decision = _decision_from_memo(memo, effort=re_effort)
-                if req_effort != memo.effort_requested:
-                    decision = replace(decision, effort_requested=req_effort)
             else:
                 fetched = self._decide(settings, effective, request, where)
                 if fetched is None:
@@ -431,6 +435,7 @@ class Router:
         provider: str,
         session_id: str,
         effective: EffectiveSettings,
+        secondary: "CommandCodeFallback",
     ) -> Optional[Tuple[str, str]]:
         """Why this memo does not belong to this request, as ``(skip_reason, detail)``.
 
@@ -484,7 +489,22 @@ class Router:
         if memo_key_env and curr_key_env and memo_key_env != curr_key_env:
             return REASON_SKIPPED_PROVIDER, f"memo key env {memo_key_env!r} != active {curr_key_env!r}"
 
-        if not api_key(curr_key_env):
+        # Secondary-transport guard: the opt-in SystemOne trio is configuration identity too.
+        # Changing its endpoint, model or key variable — or turning it on/off — invalidates the
+        # replay rather than reproducing a decision the active configuration would no longer
+        # make. An inactive trio is ("", "", ""), which is what every legacy memo carries.
+        memo_secondary = (
+            getattr(memo, "decider_commandcode_endpoint", ""),
+            getattr(memo, "decider_commandcode_model", ""),
+            getattr(memo, "decider_commandcode_key_env", ""),
+        )
+        if memo_secondary != (secondary.url, secondary.model, secondary.key_env):
+            return REASON_SKIPPED_PROVIDER, (
+                f"memo commandcode fallback {memo_secondary!r} != active "
+                f"{(secondary.url, secondary.model, secondary.key_env)!r}"
+            )
+
+        if not api_key(curr_key_env) and not _secondary_key_available(secondary):
             return REASON_NO_API_KEY, f"active decider key env {curr_key_env!r} has no key"
 
         # Criteria and options must match the active grid: a decision or marker recorded against

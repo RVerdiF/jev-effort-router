@@ -34,16 +34,18 @@ from .config import (
     redact,
     route_allowlist,
 )
-from .effort import resolve_effort
+from .effort import offered_levels_for_grid, resolve_effort
 from .grid import Entry, criteria, resolve
 from .state import (
-    EFFORT_CRITERIA,
     EFFORT_QUESTION_ID,
     MODEL_QUESTION_ID,
     SINGLE_MODEL_CHOICE,
     build_payload,
+    effort_criteria,
+    effort_instructions,
     last_user_message,
     normalise_effort_choice,
+    previous_turn_signal,
     recent_context,
 )
 
@@ -165,6 +167,27 @@ def _cap_effort(level: Optional[str], cap: Optional[str]) -> Optional[str]:
     return level if _EFFORT_ORDER[level] <= _EFFORT_ORDER[cap] else cap
 
 
+def _offered_levels(
+    effective: EffectiveSettings, provider: str, settings: Settings
+) -> Tuple[str, ...]:
+    """The levels the effort question may offer this route, and the answer may name.
+
+    Derived from the route's effort map (``effort.offered_levels_for_grid``), so the question,
+    the accepted answer keys and the applied value all come from one source: ``max`` is only
+    offered where the map declares it, and never offered and clamped away afterwards.
+    """
+    return offered_levels_for_grid(effective.grid, provider, settings.effort_maps)
+
+
+def _effort_question_kwargs(levels: Sequence[str], settings: Settings) -> Dict[str, Any]:
+    """The rubric knobs ``state.build_questions`` applies, bound to the offered levels."""
+    return {
+        "levels": tuple(levels),
+        "criteria_override": settings.effort_criteria,
+        "instructions_override": settings.effort_instructions,
+    }
+
+
 def _fallback_model(effective: EffectiveSettings) -> str:
     """Resolve the fallback model when the decider's answer was absent, off-grid or low-confidence."""
     chosen = effective.entry_for(effective.default_model)
@@ -282,6 +305,7 @@ class JevDecider(BaseDecider):
         if not api_key(key_env):
             return None, REASON_NO_API_KEY
 
+        levels = _offered_levels(effective, provider, self._settings)
         payload = build_payload(
             messages,
             effective.grid,
@@ -292,6 +316,7 @@ class JevDecider(BaseDecider):
             # The legacy Decisions API contract always carries both questions; keeping it
             # explicit is what leaves that payload byte-identical to a one-model grid or not.
             ask_model=True,
+            **_effort_question_kwargs(levels, self._settings),
         )
 
         started = time.monotonic()
@@ -358,6 +383,7 @@ class JevDecider(BaseDecider):
         model = chosen.model_id if chosen is not None else _fallback_model(effective)
 
         # -- effort ----------------------------------------------------------------
+        levels = _offered_levels(effective, provider, self._settings)
         requested: Optional[str] = None
         effort_confidence = 0.0
         effort_choice_text = ""
@@ -385,11 +411,14 @@ class JevDecider(BaseDecider):
 
         if requested is None and effective.max_effort:
             requested = effective.max_effort
-        requested = _cap_effort(requested, effective.max_effort)
+        # ``requested`` keeps what was asked for (Jev's answer, or the configured default) and
+        # ``applied`` what the owner's cap allows: the audit has to show both, or a capped turn
+        # reads as if the stronger level had run.
+        applied = _cap_effort(requested, effective.max_effort)
 
         effort = resolve_effort(
             model,
-            requested,
+            applied,
             provider=provider,
             effort_maps=self._settings.effort_maps,
         )
@@ -482,7 +511,20 @@ class OpenAICompatibleDecider(BaseDecider):
         ctx = recent_context(messages, self._settings.context_turns)
 
         single_model = len(effective.grid) == 1
-        effort_lines = [f"- {lvl}: {desc}" for lvl, desc in EFFORT_CRITERIA.items()]
+        levels = _offered_levels(effective, provider, self._settings)
+        effort_lines = [
+            f"- {lvl}: {desc}"
+            for lvl, desc in effort_criteria(levels, self._settings.effort_criteria).items()
+        ]
+        # The schema and the rule name exactly the levels this route was offered: a level the
+        # wire would clamp away must never appear in the prompt, or the model spends the answer
+        # on a value the router cannot apply.
+        effort_enum = "|".join(levels)
+        if len(levels) == 1:
+            effort_rule = f"- The effort MUST be {levels[0]}."
+        else:
+            effort_rule = f"- The effort MUST be {', '.join(levels[:-1])}, or {levels[-1]}."
+        effort_scope = effort_instructions(self._settings.effort_instructions)
 
         if single_model:
             grid_lines: List[str] = []
@@ -494,11 +536,12 @@ class OpenAICompatibleDecider(BaseDecider):
                 "Given the user request and recent context, select the appropriate reasoning effort level.\n"
                 "Return valid JSON ONLY matching exactly this schema:\n"
                 "{\n"
-                '  "effort": "<low|medium|high>",\n'
+                f'  "effort": "<{effort_enum}>",\n'
                 '  "confidence": <float between 0.0 and 1.0>\n'
                 "}\n"
                 "Rules:\n"
-                "- The effort MUST be low, medium, or high.\n"
+                f"{effort_rule}\n"
+                f"{effort_scope}\n"
                 "- Return JSON only, with no commentary, markdown or extra text."
             )
         else:
@@ -510,12 +553,13 @@ class OpenAICompatibleDecider(BaseDecider):
                 "Return valid JSON ONLY matching exactly this schema:\n"
                 "{\n"
                 '  "model": "<model_id>",\n'
-                '  "effort": "<low|medium|high>",\n'
+                f'  "effort": "<{effort_enum}>",\n'
                 '  "confidence": <float between 0.0 and 1.0>\n'
                 "}\n"
                 "Rules:\n"
                 "- The model MUST be one of the IDs from the Available Models list.\n"
-                "- The effort MUST be low, medium, or high.\n"
+                f"{effort_rule}\n"
+                f"{effort_scope}\n"
                 "- Return JSON only, with no commentary, markdown or extra text."
             )
 
@@ -524,6 +568,9 @@ class OpenAICompatibleDecider(BaseDecider):
             user_prompt_parts.append(f"User Request:\n{user_msg}")
         if ctx:
             user_prompt_parts.append(f"Recent Context:\n{ctx}")
+        signal = previous_turn_signal(messages)
+        if signal:
+            user_prompt_parts.append("Previous Turn:\n" + json.dumps(signal, ensure_ascii=False))
         if platform:
             user_prompt_parts.append(f"Platform: {platform}")
         if provider:
@@ -677,17 +724,18 @@ class OpenAICompatibleDecider(BaseDecider):
         if effort_raw is None or not isinstance(effort_raw, str):
             return None, REASON_MALFORMED
         effort_choice_text = effort_raw.strip()
+        levels = _offered_levels(effective, provider, self._settings)
         candidate = normalise_effort_choice(effort_choice_text)
         if candidate is None:
             return None, REASON_UNKNOWN_CHOICE
 
+        # What was asked for stays visible; what the cap allows is what runs.
         requested: Optional[str] = candidate
-        if effective.max_effort:
-            requested = _cap_effort(requested, effective.max_effort)
+        applied = _cap_effort(requested, effective.max_effort)
 
         effort = resolve_effort(
             chosen.model_id,
-            requested,
+            applied,
             provider=provider,
             effort_maps=self._settings.effort_maps,
         )
@@ -835,6 +883,9 @@ class JevConsoleDecider(BaseDecider):
         # in the returned value (which is what a failed primary alone has always reported). Only
         # the second-host decision needs the distinction.
         last_technical = True
+        # ``started`` is the chain's clock, handed in by ``decide``: the recorded latency covers
+        # every attempt, so a new clock here would restart it mid-chain.
+        levels = _offered_levels(effective, provider, self._settings)
 
         for model_name in models_to_try:
             payload = build_payload(
@@ -847,6 +898,7 @@ class JevConsoleDecider(BaseDecider):
                 # One model is not a choice: asking the model question over a single option
                 # spends the answer on a certainty, and Jev cannot express anything else.
                 ask_model=len(effective.grid) > 1,
+                **_effort_question_kwargs(levels, self._settings),
             )
             try:
                 response, _ = self._post_one(url, payload, headers)
@@ -1116,6 +1168,11 @@ class JevConsoleDecider(BaseDecider):
             return None, REASON_UNKNOWN_CHOICE
 
         # -- effort ----------------------------------------------------------------
+        # The criteria and the accepted keys are derived from the levels this route was offered,
+        # which is the same set the payload put in the question — an echoed criteria or a
+        # probability key outside it is a malformed answer, not a new option.
+        levels = _offered_levels(effective, provider, self._settings)
+        sent_effort_criteria = effort_criteria(levels, self._settings.effort_criteria)
         requested: Optional[str] = None
         effort_confidence = 0.0
         effort_choice_text = ""
@@ -1145,7 +1202,12 @@ class JevConsoleDecider(BaseDecider):
             e_probs_raw = effort_answer["probabilities"]
             if not isinstance(e_probs_raw, dict) or not e_probs_raw:
                 return None, REASON_MALFORMED
-            allowed_effort_keys = set(EFFORT_LEVELS) | {"1", "2", "3"}
+            # Probability keys name the criteria that were sent *and* the vocabulary: the answer
+            # is validated as a level and only then resolved against the route's declaration, so
+            # a level the route would omit is still a well-formed answer here (main's rule).
+            allowed_effort_keys = set(EFFORT_LEVELS) | {
+                str(position) for position in range(1, len(levels) + 1)
+            }
             e_prob_sum = 0.0
             for k, v in e_probs_raw.items():
                 k_str = str(k).strip().lower()
@@ -1165,7 +1227,6 @@ class JevConsoleDecider(BaseDecider):
             if e_criteria is not None:
                 if not isinstance(e_criteria, dict):
                     return None, REASON_MALFORMED
-                sent_effort_criteria = dict(EFFORT_CRITERIA)
                 for k, v in e_criteria.items():
                     k_str = str(k).strip().lower()
                     if k_str not in sent_effort_criteria or str(v).strip() != sent_effort_criteria[k_str]:
@@ -1181,12 +1242,13 @@ class JevConsoleDecider(BaseDecider):
                 return None, REASON_LOW_CONFIDENCE
             requested = candidate
 
-        if requested is not None:
-            requested = _cap_effort(requested, effective.max_effort)
+        # ``requested`` is what Jev asked for and ``applied`` what the owner's cap allows; the
+        # decision carries both so the audit can tell a capped turn from an uncapped one.
+        applied = _cap_effort(requested, effective.max_effort)
 
         effort = resolve_effort(
             model,
-            requested,
+            applied,
             provider=provider,
             effort_maps=self._settings.effort_maps,
         )

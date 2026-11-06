@@ -46,6 +46,7 @@ config_schema:
     default: medium
     choices: [low, medium, high]
     label: Fallback effort
+    description: 'Effort applied when the decider answer is unusable. Deliberately excludes max — a degraded turn must not be the expensive one.'
   context_turns:
     type: int
     default: 4
@@ -159,6 +160,16 @@ config_schema:
     default: null
     label: Per-provider effort maps
     description: Optional map of provider id to effort mapping.
+  effort_criteria:
+    type: dict
+    default: null
+    label: Effort rubric
+    description: 'Optional map of effort level (low/medium/high/max) to the text the effort question shows for it. Overrides the built-in rubric level by level; an unknown level or empty text discards the whole knob and the built-in text applies.'
+  effort_instructions:
+    type: str
+    default: ""
+    label: Effort instructions
+    description: Optional override of the effort question's instructions. Empty keeps the built-in rule ("lowest level that covers; raise for uncertainty, risk or irreversibility — never for size").
   confidence_threshold_per_decider:
     type: dict
     default: null

@@ -60,7 +60,12 @@ def test_payload_matches_the_documented_shape(monkeypatch):
 
 
 def test_default_jev_payload_is_frozen(monkeypatch):
-    """The legacy Jev request body must not drift when the decider becomes pluggable."""
+    """The legacy Jev request body must not drift when the decider becomes pluggable.
+
+    The hash pins the wire contract of this build. It moved once, deliberately, with the
+    four-step rubric and the route-scoped effort levels; any further move is drift and has to be
+    justified by a decision, not by a refactor.
+    """
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     transport = StubTransport([StubResponse(decision_payload())])
     client, settings = make(transport)
@@ -74,7 +79,7 @@ def test_default_jev_payload_is_frozen(monkeypatch):
         separators=(",", ":"),
     )
     assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == (
-        "f6e505a715f828b0c4c7be839c0d08e8e5af38b8ff8b76d5e66e688d7f28884b"
+        "3e67ac642c4ee5183cf26b321e056c46b3a4a5371f21cc82bd57deaf44bbe62e"
     )
 
 
@@ -317,10 +322,10 @@ def test_an_off_grid_answer_degrades_to_the_policy_grid(monkeypatch):
     assert REASON_UNKNOWN_CHOICE in decision.fallback_reasons
 
 
-def test_a_cap_lowers_a_high_answer_and_leaves_low_and_medium_untouched(monkeypatch):
+def test_a_cap_lowers_the_applied_effort_and_keeps_the_request_visible(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     cases = [("low", "low"), ("medium", "medium"), ("high", "medium")]
-    for answer, expected in cases:
+    for answer, applied in cases:
         transport = StubTransport([StubResponse(decision_payload("1", 0.9, answer, 0.9))])
         client, settings = make(transport, config=_policy_config(max_effort="medium"))
 
@@ -328,9 +333,9 @@ def test_a_cap_lowers_a_high_answer_and_leaves_low_and_medium_untouched(monkeypa
         decision, _ = client.decide(MESSAGES, effective, platform="cron")
 
         assert decision.model == "deepseek-v4.1-flash"
-        assert decision.effort_requested == expected, answer
-        # DeepSeek V4.1 accepts the three levels, so the emitted value is the requested one.
-        assert decision.effort == expected
+        # The audit keeps both: what Jev answered and what the cap let through.
+        assert decision.effort_requested == answer
+        assert decision.effort == applied
 
 
 def test_a_cap_lowers_the_default_effort_fallback_too(monkeypatch):
@@ -344,7 +349,9 @@ def test_a_cap_lowers_the_default_effort_fallback_too(monkeypatch):
     effective = settings.effective(settings.policy_for("cron"))
     decision, _ = client.decide(MESSAGES, effective, platform="cron")
 
-    assert decision.effort_requested == "low"
+    # The weak answer falls back to the configured default ("high"); the cap applies to it, and
+    # the record shows the requested level next to the one that ran.
+    assert decision.effort_requested == "high"
     assert decision.effort == "low"
     assert REASON_LOW_CONFIDENCE in decision.fallback_reasons
 

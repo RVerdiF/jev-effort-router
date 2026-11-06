@@ -45,7 +45,7 @@ wheels = [
 [[package]]
 name = "hermes-plugin-jev-effort-router"
 version = "0.4.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "httpx" },
 ]

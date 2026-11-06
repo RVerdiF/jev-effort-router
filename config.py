@@ -102,7 +102,11 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 #: (Anthropic Messages, Bedrock Converse) builds somewhere else and is left alone.
 ROUTED_API_MODES = ("chat_completions", "codex_responses")
 
-EFFORT_LEVELS: Tuple[str, ...] = ("low", "medium", "high")
+#: The levels the router may *ask* Jev for. ``max`` is part of the vocabulary — it can be
+#: requested, accepted, capped by ``max_effort`` and audited — but it is offered by a route only
+#: where its effort map declares it (``effort.offered_levels``), so no answer is asked for and
+#: then clamped away.
+EFFORT_LEVELS: Tuple[str, ...] = ("low", "medium", "high", "max")
 
 DECIDERS: Tuple[str, ...] = ("jev", "openai_compatible", "jev_console")
 DEFAULT_DECIDER = "jev"
@@ -482,6 +486,13 @@ class Settings:
     confidence_threshold_per_decider: Mapping[str, float] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    #: Operator overrides of the built-in effort rubric (level → text) and of its instructions.
+    #: Empty means "use the built-in text"; the merge happens where the question is built, so a
+    #: single level can be reworded without losing the others.
+    effort_criteria: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    effort_instructions: str = ""
 
     def __hash__(self) -> int:
         """Hash the snapshot, treating read-only mappings as frozensets.
@@ -775,6 +786,35 @@ def parse_confidence_threshold_per_decider(raw: Any) -> Mapping[str, float]:
     return MappingProxyType(result)
 
 
+def parse_effort_criteria(raw: Any) -> Mapping[str, str]:
+    """Parse the ``effort_criteria`` knob: a level → text override of the built-in rubric.
+
+    A knob is the whole mapping or nothing. A level outside :data:`EFFORT_LEVELS`, a non-string
+    text or an empty one makes the whole knob unusable, and it then falls back to the built-in
+    rubric rather than shipping a half-edited vocabulary to the decider. A *partial* mapping of
+    valid levels is kept: it overrides only those levels, and the built-in text covers the rest.
+    """
+    if not isinstance(raw, dict):
+        return MappingProxyType({})
+    criteria: Dict[str, str] = {}
+    for key, value in raw.items():
+        level = str(key or "").strip().lower()
+        if level not in EFFORT_LEVELS or not isinstance(value, str):
+            return MappingProxyType({})
+        text = value.strip()
+        if not text:
+            return MappingProxyType({})
+        criteria[level] = text
+    return MappingProxyType(criteria) if criteria else MappingProxyType({})
+
+
+def parse_effort_instructions(raw: Any) -> str:
+    """Parse the ``effort_instructions`` knob; anything unusable falls back to the built-in text."""
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
+
+
 def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
     """Build a :class:`Settings` from ``ctx.get_config`` (or from no config at all)."""
     read = get_config if callable(get_config) else (lambda _key, default=None: default)
@@ -844,6 +884,8 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         routable_providers=routable_providers if routable_providers else DEFAULT_ROUTABLE_PROVIDERS,
         grids=parse_grids(read("grids", None)),
         effort_maps=parse_effort_maps(read("effort_maps", None)),
+        effort_criteria=parse_effort_criteria(read("effort_criteria", None)),
+        effort_instructions=parse_effort_instructions(read("effort_instructions", "")),
         confidence_threshold_per_decider=parse_confidence_threshold_per_decider(
             read("confidence_threshold_per_decider", None)
         ),

@@ -1,12 +1,23 @@
-"""Behaviour that has to stay byte-identical to the 0.4.0 base commit.
+"""Behaviour that has to stay byte-identical to the stack's base commit.
 
 This module is both a library and a script:
 
 * ``pytest`` imports it and compares the working tree against
   ``tests/fixtures/legacy_0_4_0.json``;
-* the fixture itself was produced by running this same module **against the base commit**, so a
-  difference means the change moved legacy behaviour — it can never be "fixed" by regenerating the
+* the fixture itself was produced by running this same module **against the reference commit**, so
+  a difference means the change moved legacy behaviour — it can never be "fixed" by regenerating the
   expectation from the new code.
+
+The reference moved from ``d42230b`` (0.4.0) to ``12aaeec`` because of two *deliberate* decisions
+reviewed in this stack, neither of which can be byte-identical to 0.4.0:
+
+1. ``t_8cac6c92`` stopped asking the model question on a one-model grid, so the opt-in Console
+   route's payload and its low-confidence decision changed by design;
+2. ``t_0998d382`` replaced the effort rubric with the four-step one, so the rubric's *wording* is
+   masked in the projection below while its shape and option keys stay pinned.
+
+Everything else — URLs, headers, timeouts, decision fields, reason strings, audit records — is
+still compared byte-for-byte against the reference.
 
 Two rules keep the comparison honest:
 
@@ -17,9 +28,9 @@ Two rules keep the comparison honest:
 2. The clock is frozen, so ``latency_ms`` is 0 on both sides and a scheduling hiccup cannot make
    the comparison flaky.
 
-Usage (fixture generation, run from a checkout of the base commit)::
+Usage (fixture generation, run from a checkout of the reference commit)::
 
-    python tests/legacy_fixture_scenarios.py --root /path/to/base/checkout > tests/fixtures/legacy_0_4_0.json
+    python tests/legacy_fixture_scenarios.py --root /path/to/reference/checkout > tests/fixtures/legacy_0_4_0.json
 """
 
 from __future__ import annotations
@@ -31,7 +42,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-BASE_COMMIT = "d42230b213515a825eec65748e2bbde0750eafc4"
+#: The commit the fixture was generated from: this stack's base (the parent card's head), not
+#: 0.4.0 — the one-model grid rule and the rubric rewrite are deliberate and reviewed changes,
+#: so a literal 0.4.0 byte expectation is no longer achievable (see the module docstring).
+BASE_COMMIT = "12aaeec55713b55d08a791c856cb0ebbf22dec4a"
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "legacy_0_4_0.json"
 
@@ -320,8 +334,64 @@ def _decision_projection(decision):
     }
 
 
+#: The effort question's text was deliberately replaced by card ``t_0998d382`` (the four-step
+#: rubric, and criteria filtered to the levels a route offers). Its *presence*, its ``type`` and
+#: its option keys are still part of the gate; only the wording is out of scope, because pinning
+#: it here would make every rubric iteration a "legacy break". Everything else in the payload is
+#: hashed byte-for-byte.
+_RUBRIC_MASK = "<rubric>"
+_CHAT_RUBRIC_PREFIXES = ("- low:", "- medium:", "- high:", "- max:")
+_CHAT_RULE_PREFIX = "- The effort MUST be "
+_CHAT_INSTRUCTIONS_PREFIX = "Pick the LOWEST reasoning effort"
+
+
+def _mask_chat_prompt(text):
+    """The ``openai_compatible`` prompt with the rubric's wording masked, shape preserved.
+
+    The criteria lines keep their level key (so the offered set is still pinned) and lose their
+    text; the rule line and the instructions paragraph are masked/removed. The instructions
+    paragraph is new in this card, so removing it is what lets a base payload without it compare
+    equal to a current one that carries it.
+    """
+    kept = []
+    for line in str(text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_CHAT_RUBRIC_PREFIXES):
+            level = stripped.split(":", 1)[0]
+            kept.append(f"{level}: {_RUBRIC_MASK}")
+        elif stripped.startswith(_CHAT_RULE_PREFIX):
+            kept.append(_RUBRIC_MASK)
+        elif stripped.startswith(_CHAT_INSTRUCTIONS_PREFIX):
+            continue
+        else:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _masked_payload(payload):
+    """``payload`` with the deliberately reworded effort rubric's text replaced."""
+    import copy
+
+    masked = copy.deepcopy(payload)
+    if not isinstance(masked, dict):
+        return masked
+    questions = masked.get("questions")
+    effort = questions.get("reasoning_effort") if isinstance(questions, dict) else None
+    if isinstance(effort, dict):
+        if "instructions" in effort:
+            effort["instructions"] = _RUBRIC_MASK
+        if isinstance(effort.get("criteria"), dict):
+            effort["criteria"] = {key: _RUBRIC_MASK for key in effort["criteria"]}
+    messages = masked.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                message["content"] = _mask_chat_prompt(message["content"])
+    return masked
+
+
 def _call_projection(call):
-    serialized = json.dumps(call["json"], ensure_ascii=False)
+    serialized = json.dumps(_masked_payload(call["json"]), ensure_ascii=False)
     return {
         "url": call["url"],
         "headers": dict(call["headers"] or {}),
