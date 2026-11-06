@@ -1316,7 +1316,7 @@ def test_opencode_go_route_lands_every_decidable_level_on_the_wire(tmp_path, mon
     assert transport.call_count == 1
 
 
-def test_opencode_go_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
+def test_opencode_go_route_cap_leaves_one_model_and_no_question(tmp_path, monkeypatch):
     """A widened operator grid cannot widen the wire.
 
     The cap leaves a one-model grid, so the model question is not sent at all; an answer naming
@@ -1578,7 +1578,7 @@ def test_commandcode_route_lands_every_decidable_level_on_the_wire(tmp_path, mon
     assert transport.call_count == 1
 
 
-def test_commandcode_route_cap_rejects_models_outside_the_catalog(tmp_path, monkeypatch):
+def test_commandcode_route_cap_leaves_one_model_and_no_question(tmp_path, monkeypatch):
     """A widened operator grid cannot widen the wire (see the Go counterpart).
 
     The cap leaves one model, the model question is not sent, and the bare OpenCode id named by
