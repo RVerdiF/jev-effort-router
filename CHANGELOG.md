@@ -79,6 +79,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   match in both directions. This also fixes a pre-existing asymmetry: a declared `opencode-go` never
   matched the `opencode_go` the host reports, so the route was skipped silently.
 
+### Fixed
+
+- **A failed turn still remembers its failure when the opt-in SystemOne fallback is enabled.** The
+  negative memo's provenance did not include the CommandCode trio, so on a deployment with the
+  fallback configured the marker looked foreign to the very configuration that wrote it, was
+  dropped, and the decider was asked again on every provider request of the turn — exactly the cost
+  the marker removed. `failure_marker` now carries the trio and `_remember_failure` fills it from
+  the active settings.
+- **`max_effort: max` is a ceiling, not a target.** With `max` now a legal cap, the no-effort-answer
+  path (which uses the cap as its level, the existing contract) would have run the most expensive
+  level on the turn the decider failed to classify. An explicit cap of `max` now falls back to the
+  configured `default_effort`; every other cap value keeps the existing behaviour.
+- **The turn-signal excerpt also scrubs the plugin's own CommandCode key.** `config.redact` covered
+  the OpenRouter, Go and Console variables but not `COMMANDCODE_API_KEY`, which the excerpt would
+  have forwarded verbatim to the decider. Other credential formats remain the operator's call; the
+  excerpt passes through the same `redact` the audit uses.
+
 ### Changed
 
 - **`effort_maps` now mean one thing, on every route.** The map path and the strict built-in routes
