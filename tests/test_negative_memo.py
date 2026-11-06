@@ -118,6 +118,67 @@ def test_the_marker_does_not_suppress_a_session_when_routing_per_session(tmp_pat
     assert transport.call_count == 2
 
 
+def test_a_marker_from_one_provider_does_not_silence_the_next_one(tmp_path, monkeypatch):
+    """A failure recorded on one wire is not a failure of another wire's turn.
+
+    A marker holds no decision, only "this turn already asked *here* and failed". When the next
+    request of the same turn goes to a different provider, the provenance no longer matches and
+    the marker must be dropped so that request can be routed — failing open would let one
+    provider's timeout cost another provider's turn, which is worse than the retries the marker
+    was introduced to avoid.
+    """
+    transport = StubTransport(
+        [
+            ReadTimeout("slow decider"),
+            StubResponse(decision_payload(model_choice="2", model_confidence=0.95, grid_size=2)),
+        ]
+    )
+    router, settings = _build(
+        tmp_path,
+        monkeypatch,
+        transport,
+        config={
+            "decider": "jev_console",
+            "routable_providers": ["provider-a", "provider-b"],
+            "console_jev_fallback_model": "",
+            # Both providers serve the same two models, so the provider is the *only* thing the
+            # marker's provenance disagrees with here.
+            "grids": {
+                "provider-a": ["shared: the usual choice", "only-b: complex code"],
+                "provider-b": ["shared: the usual choice", "only-b: complex code"],
+            },
+        },
+    )
+
+    request = {"model": "shared", "messages": [{"role": "user", "content": "refactor the module"}]}
+    first = route(
+        router,
+        request=dict(request),
+        model="shared",
+        provider="provider-a",
+        base_url="https://provider-a.example/v1",
+        turn_id="turn-providers",
+    )
+    second = route(
+        router,
+        request=dict(request),
+        model="shared",
+        provider="provider-b",
+        base_url="https://provider-b.example/v1",
+        turn_id="turn-providers",
+        api_call_count=1,
+    )
+
+    assert first is None
+    assert second is not None
+    assert second["request"]["model"] == "only-b"
+    assert transport.call_count == 2
+    records = router.tail(settings, limit=20)
+    assert [record["event"] for record in records] == ["skip", "route"]
+    assert records[0]["reason"] == "timeout"
+    assert records[1]["provider"] == "provider-b"
+
+
 def test_a_replayed_marker_is_a_skip_record_without_a_decision(tmp_path, monkeypatch):
     """The record proves the difference between the first failure and its replay."""
     transport = _low_confidence_transport()
