@@ -28,6 +28,7 @@ from .client import (
     REASON_SKIPPED_PROVIDER,
     REASON_SKIPPED_UNKNOWN_MODEL,
     REASON_SURFACE_DISABLED,
+    REASON_TIMEOUT,
     REASON_USER_DATA,
     Decision,
     JevClient,
@@ -43,7 +44,7 @@ from .config import (
     route_catalog,
 )
 from .effort import resolve_effort
-from .memo import Memo, TurnMemo
+from .memo import Memo, TurnMemo, failure_marker
 from .state import last_user_message
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,13 @@ logger = logging.getLogger(__name__)
 EFFORT_WIRE_KEY = "reasoning_effort"
 RESPONSES_API_MODE = "codex_responses"
 RESPONSES_REASONING_KEY = "reasoning"
+
+#: Failures a turn may remember. Both are slow and repeatable: a decider that answered below the
+#: confidence threshold will answer the same way to the same question, and a timeout inside one
+#: turn's tool loop used to cost a full ``timeout_s`` on every request of that loop. Everything
+#: else (a missing key, an unroutable provider, a malformed body) is either a configuration fact
+#: resolved by the guards or a one-off worth retrying, so it is not memoised.
+MEMOISABLE_FAILURES = frozenset({REASON_LOW_CONFIDENCE, REASON_TIMEOUT})
 
 
 def conversation_messages(payload: Any) -> List[Dict[str, Any]]:
@@ -315,6 +323,33 @@ class Router:
                     self._record_skip(settings, REASON_NO_API_KEY, where)
                     return None
 
+                # Grid signature guard: criteria and options must match active grid. Checked
+                # before the negative memo so a marker recorded against a different grid cannot
+                # suppress a turn whose question has changed.
+                curr_grid_sig = tuple((e.model_id, e.description) for e in effective.grid)
+                memo_grid_sig = getattr(memo, "grid_signature", ())
+                if memo_grid_sig and memo_grid_sig != curr_grid_sig:
+                    logger.info(
+                        "jev-effort-router: memo grid criteria signature does not match active grid; failing open",
+                    )
+                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
+                    return None
+
+                # Negative memo: this turn's decision already failed. Replay the skip instead of
+                # asking the same question again — the answer that was too weak (or too slow) is
+                # the answer the rest of the tool loop would get. Checked before the confidence
+                # guard, whose zeroed confidences would otherwise relabel a remembered timeout as
+                # ``low_confidence`` and hide what actually happened. The record says ``replayed``
+                # so a reader can tell the first failure from its replays.
+                failure_reason = getattr(memo, "failure_reason", None)
+                if failure_reason:
+                    logger.info(
+                        "jev-effort-router: turn already failed (%s); replaying the skip without asking the decider",
+                        failure_reason,
+                    )
+                    self._record_skip(settings, failure_reason, where, extra={"replayed": True})
+                    return None
+
                 # Policy confidence threshold guard: replayed confidence must meet active threshold
                 has_effort_conf = getattr(memo, "has_effort_confidence", None)
                 if has_effort_conf is None:
@@ -340,16 +375,6 @@ class Router:
                         "jev-effort-router: memo model %r is not in grid for provider %r; failing open",
                         memo.model,
                         provider,
-                    )
-                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
-                    return None
-
-                # Grid signature guard: criteria and options must match active grid
-                curr_grid_sig = tuple((e.model_id, e.description) for e in effective.grid)
-                memo_grid_sig = getattr(memo, "grid_signature", ())
-                if memo_grid_sig and memo_grid_sig != curr_grid_sig:
-                    logger.info(
-                        "jev-effort-router: memo grid criteria signature does not match active grid; failing open",
                     )
                     self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                     return None
@@ -506,9 +531,50 @@ class Router:
             if reason == REASON_NO_API_KEY:
                 key_env = settings.api_key_env_for(settings.decider)
                 logger.info("jev-effort-router: %s is not set; turns keep the configured model", key_env)
+            self._remember_failure(settings, effective, where, reason or REASON_EXCEPTION)
             self._record_skip(settings, reason or REASON_EXCEPTION, where)
             return None
         return decision
+
+    def _remember_failure(
+        self, settings: Settings, effective: EffectiveSettings, where: "_Where", reason: str
+    ) -> None:
+        """Memoise a failed decision for the rest of the turn (a *negative* memo).
+
+        Without this, ``low_confidence`` and ``timeout`` were re-asked on every provider request
+        of the turn's tool loop: same state, same question, same unusable answer — measured at
+        ~9 decider calls per failing turn. The marker carries no model or effort; it only records
+        that this turn already asked and failed, with the provenance the replay guards compare.
+
+        Per-turn only: ``route_per_turn: false`` memoises per session, and suppressing a session
+        for 24h because one request timed out would be a far larger behaviour change than the
+        waste it fixes. The store is a best-effort optimisation — a failure here never changes
+        the outcome of the turn.
+        """
+        if not settings.route_per_turn or reason not in MEMOISABLE_FAILURES or not where.turn_id:
+            return
+        try:
+            self._memo.put_turn(
+                where.turn_id,
+                failure_marker(
+                    reason,
+                    provider=where.provider,
+                    session_id=where.session_id,
+                    decider=settings.decider,
+                    decider_endpoint=settings.base_url_for(settings.decider),
+                    decider_model=settings.decider_model_for(settings.decider),
+                    decider_fallback_model=(
+                        (settings.console_jev_fallback_model or "").strip()
+                        if settings.decider == "jev_console"
+                        else ""
+                    ),
+                    decider_key_env=settings.api_key_env_for(settings.decider),
+                    grid_signature=tuple((e.model_id, e.description) for e in effective.grid),
+                    confidence_threshold=effective.confidence_threshold,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - remembering a failure is optional
+            logger.debug("jev-effort-router: could not memoise the turn failure (%s)", exc)
 
     def _apply(
         self,
