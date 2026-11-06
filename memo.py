@@ -68,6 +68,11 @@ class Memo:
     decider_key_env: str = ""
     grid_signature: tuple = ()
     has_effort_confidence: Optional[bool] = None
+    #: Set only on a **negative memo**: the reason this turn's decision failed. A marker carries
+    #: no model and no effort; its job is to stop the rest of the turn's tool loop from asking
+    #: the decider the same question again (``router._decide`` stores it, the replay path reads
+    #: it and records a skip). ``None`` on a decision that actually routed.
+    failure_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.has_effort_confidence is None:
@@ -76,6 +81,46 @@ class Memo:
                 "has_effort_confidence",
                 bool(self.effort_confidence > 0.0 or self.effort_requested is not None),
             )
+
+
+def failure_marker(
+    reason: str,
+    *,
+    provider: str = "",
+    session_id: str = "",
+    decider: str = "",
+    decider_endpoint: str = "",
+    decider_model: str = "",
+    decider_fallback_model: str = "",
+    decider_key_env: str = "",
+    grid_signature: tuple = (),
+    confidence_threshold: float = 0.0,
+) -> Memo:
+    """A negative memo: the turn's decision failed, and the rest of the turn must not retry it.
+
+    Carries no model and no effort — it is not a decision — plus the provenance fields the
+    replay guards compare, so a marker recorded for one provider/decider/session cannot suppress
+    a request belonging to another.
+    """
+    return Memo(
+        model="",
+        effort=None,
+        effort_requested=None,
+        model_confidence=0.0,
+        effort_confidence=0.0,
+        choice="",
+        fallback_reasons=(reason,),
+        decider=decider,
+        provider=provider,
+        session_id=session_id,
+        decider_endpoint=decider_endpoint,
+        decider_model=decider_model,
+        decider_fallback_model=decider_fallback_model,
+        decider_key_env=decider_key_env,
+        grid_signature=grid_signature,
+        confidence_threshold=confidence_threshold,
+        failure_reason=reason,
+    )
 
 
 class TurnMemo:
