@@ -269,11 +269,10 @@ def previous_turn_signal(messages: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     assistant_messages = [message for message in segment if _role(message) == "assistant"]
     tool_messages = [message for message in segment if _role(message) == "tool"]
     names = [name for message in assistant_messages for name in _tool_call_names(message)]
-    # A turn with neither a tool call nor a tool result says nothing the decider can act on — and
-    # on the Responses wire the transport has already projected function calls away, so reporting
-    # ``tool_calls: 0`` there would claim the previous turn used no tools when it may have used
-    # several. Omit the field instead of emitting a number that can be wrong.
-    if names or tool_messages:
+    # The count is only reported when the calls are actually visible. The preview projections
+    # (Responses wire, a host that stores results but not calls) drop them, and a zero there would
+    # claim the previous turn used no tools when it may have used several.
+    if names:
         tools: List[str] = []
         for name in names:
             if name and name not in tools:

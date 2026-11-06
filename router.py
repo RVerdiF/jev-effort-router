@@ -582,6 +582,7 @@ class Router:
         """
         if not settings.route_per_turn or reason not in MEMOISABLE_FAILURES or not where.turn_id:
             return
+        secondary = settings.active_commandcode_fallback()
         try:
             self._memo.put_turn(
                 where.turn_id,
@@ -598,6 +599,11 @@ class Router:
                         else ""
                     ),
                     decider_key_env=settings.api_key_env_for(settings.decider),
+                    # The SystemOne trio is provenance too; leaving it empty makes the marker
+                    # foreign on every deployment with the fallback enabled.
+                    decider_commandcode_endpoint=secondary.url,
+                    decider_commandcode_model=secondary.model,
+                    decider_commandcode_key_env=secondary.key_env,
                     grid_signature=tuple((e.model_id, e.description) for e in effective.grid),
                     confidence_threshold=effective.confidence_threshold,
                 ),

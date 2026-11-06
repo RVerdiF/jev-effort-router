@@ -76,6 +76,35 @@ def test_a_timed_out_turn_calls_the_decider_once(tmp_path, monkeypatch):
     assert all(skip["replayed"] is True for skip in skips[1:])
 
 
+def test_a_failed_turn_with_the_second_host_enabled_still_asks_once(tmp_path, monkeypatch):
+    """The marker's provenance includes the SystemOne trio, so it is not discarded as foreign."""
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "cc-test-key")
+    transport = StubTransport(
+        [StubResponse(decision_payload(model_choice="2", model_confidence=0.2, grid_size=6))]
+    )
+    router, settings = _build(
+        tmp_path,
+        monkeypatch,
+        transport,
+        config=dict(
+            CONSOLE_CONFIG,
+            console_jev_commandcode_base_url="https://api.commandcode.ai/provider/v1/systemone",
+            console_jev_commandcode_api_key_env="COMMANDCODE_API_KEY",
+            console_jev_commandcode_model="typesafe/jev",
+        ),
+    )
+
+    results = [route(router, turn_id="turn-trio", api_call_count=index) for index in range(4)]
+
+    assert results == [None] * 4
+    # One console call for the turn: the marker recorded under the same trio replays for the rest
+    # of the tool loop instead of being dropped as belonging to another configuration.
+    assert transport.call_count == 1
+    skips = _skips(router, settings)
+    assert [skip["reason"] for skip in skips] == ["low_confidence"] * 4
+    assert all(skip["replayed"] is True for skip in skips[1:])
+
+
 def test_each_turn_asks_again(tmp_path, monkeypatch):
     """The marker is per turn: a new user turn is a new question and must be routed."""
     transport = _low_confidence_transport(calls=2)

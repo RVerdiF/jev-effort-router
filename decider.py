@@ -383,7 +383,9 @@ class JevDecider(BaseDecider):
         model = chosen.model_id if chosen is not None else _fallback_model(effective)
 
         # -- effort ----------------------------------------------------------------
-        levels = _offered_levels(effective, provider, self._settings)
+        # The answer is validated against the vocabulary and resolved against the route's own
+        # declaration inside ``resolve_effort`` — the offered set shapes the question, not the
+        # validation (main's declared-vocabulary rule).
         requested: Optional[str] = None
         effort_confidence = 0.0
         effort_choice_text = ""
@@ -407,10 +409,17 @@ class JevDecider(BaseDecider):
                 requested = candidate
 
         if requested is None and answered:
+            # A weak or unknown answer still routes: fall back to the configured default.
             requested = effective.default_effort
 
         if requested is None and effective.max_effort:
-            requested = effective.max_effort
+            # Without any effort block the cap doubles as the level (main's contract), but `max`
+            # is a ceiling, not a target: emitting it here would run the priciest level on the
+            # turn the decider failed to classify, so an explicit cap of `max` falls back to the
+            # configured default instead.
+            requested = (
+                effective.default_effort if effective.max_effort == "max" else effective.max_effort
+            )
         # ``requested`` keeps what was asked for (Jev's answer, or the configured default) and
         # ``applied`` what the owner's cap allows: the audit has to show both, or a capped turn
         # reads as if the stronger level had run.
@@ -724,7 +733,6 @@ class OpenAICompatibleDecider(BaseDecider):
         if effort_raw is None or not isinstance(effort_raw, str):
             return None, REASON_MALFORMED
         effort_choice_text = effort_raw.strip()
-        levels = _offered_levels(effective, provider, self._settings)
         candidate = normalise_effort_choice(effort_choice_text)
         if candidate is None:
             return None, REASON_UNKNOWN_CHOICE

@@ -356,6 +356,22 @@ def test_a_cap_lowers_the_default_effort_fallback_too(monkeypatch):
     assert REASON_LOW_CONFIDENCE in decision.fallback_reasons
 
 
+def test_a_max_cap_is_not_used_as_the_fallback_level(monkeypatch):
+    """`max` is a ceiling, not a target: an absent effort block must not land on it."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    transport = StubTransport([StubResponse(decision_payload(include_effort=False))])
+    client, settings = make(
+        transport, config={**_policy_config(max_effort="max"), "default_effort": "medium"}
+    )
+
+    effective = settings.effective(settings.policy_for("cron"))
+    decision, _ = client.decide(MESSAGES, effective, platform="cron")
+
+    assert decision.effort_requested == "medium"
+    assert decision.effort == "medium"
+    assert REASON_MALFORMED in decision.fallback_reasons
+
+
 def test_a_cap_never_raises_a_confident_low_answer(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     transport = StubTransport([StubResponse(decision_payload("1", 0.9, "low", 0.9))])

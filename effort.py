@@ -734,7 +734,10 @@ def offered_levels(
     A route is only asked for levels its own ``effort_maps`` entry declares: offering ``max``
     where the declaration does not have it would spend the decision on an answer the router
     would then omit. With no map entry for the route (or none for this model) the three-level
-    default applies — ``max`` is offered only where a map proves the route accepts it.
+    default applies — ``max`` is offered only where a map proves the route accepts it. The
+    built-in policies are deliberately *not* consulted here, even where they declare ``max``
+    (``opencode-go``, ``commandcode``, ``codex``): the decision for this card is that a level
+    stronger than ``high`` is offered only under an explicit operator declaration.
 
     A declaration that shares no level with the askable vocabulary (``accepted: [minimal]``, or
     an entry that deliberately declares nothing) is unusable *for this question*: the default

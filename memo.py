@@ -93,6 +93,9 @@ def failure_marker(
     decider_model: str = "",
     decider_fallback_model: str = "",
     decider_key_env: str = "",
+    decider_commandcode_endpoint: str = "",
+    decider_commandcode_model: str = "",
+    decider_commandcode_key_env: str = "",
     grid_signature: tuple = (),
     confidence_threshold: float = 0.0,
 ) -> Memo:
@@ -100,7 +103,9 @@ def failure_marker(
 
     Carries no model and no effort — it is not a decision — plus the provenance fields the
     replay guards compare, so a marker recorded for one provider/decider/session cannot suppress
-    a request belonging to another.
+    a request belonging to another. The opt-in SystemOne trio is part of that provenance too: a
+    marker that left it empty would be discarded as foreign on every deployment that enables the
+    fallback, and the whole turn would re-ask the decider — the cost this marker exists to avoid.
     """
     return Memo(
         model="",
@@ -117,6 +122,9 @@ def failure_marker(
         decider_model=decider_model,
         decider_fallback_model=decider_fallback_model,
         decider_key_env=decider_key_env,
+        decider_commandcode_endpoint=decider_commandcode_endpoint,
+        decider_commandcode_model=decider_commandcode_model,
+        decider_commandcode_key_env=decider_commandcode_key_env,
         grid_signature=grid_signature,
         confidence_threshold=confidence_threshold,
         failure_reason=reason,

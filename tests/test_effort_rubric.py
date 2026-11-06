@@ -307,6 +307,30 @@ def test_a_tool_output_larger_than_the_window_still_reports_its_tail(monkeypatch
     assert "[REDACTED]" in excerpt
 
 
+def test_a_tool_result_without_a_visible_call_reports_no_fake_zero():
+    """A preview projection can drop the call while keeping the result: no invented count."""
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "tool", "content": "output of an unseen call"},
+        {"role": "user", "content": "second"},
+    ]
+
+    state = build_state(messages, context_turns=4)
+
+    assert "previous_turn" not in state
+    assert state["last_tool_results_excerpt"] == "output of an unseen call"
+
+
+def test_the_plugin_own_commandcode_key_is_redacted_from_the_excerpt(monkeypatch):
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "cc-secret-for-this-test")
+    content = "x" * 4000 + " cc-secret-for-this-test END"
+
+    state = build_state(_history_with_tools(["terminal"], tool_content=content), context_turns=2)
+
+    assert "cc-secret-for-this-test" not in state["last_tool_results_excerpt"]
+    assert "[REDACTED]" in state["last_tool_results_excerpt"]
+
+
 def test_reasoning_is_never_forwarded():
     messages = [
         {"role": "user", "content": "first"},
@@ -341,7 +365,8 @@ def test_the_payload_fits_the_budget_with_a_full_context():
             "role": "assistant",
             "content": "working",
             "tool_calls": [
-                {"id": str(index), "function": {"name": "n" * 200}} for index in range(8)
+                {"id": str(index), "function": {"name": f"t{index}" + "n" * 200}}
+                for index in range(8)
             ],
         }
     )
@@ -358,7 +383,10 @@ def test_the_payload_fits_the_budget_with_a_full_context():
         levels=EFFORT_LEVELS,
     )
 
-    assert payload["state"]["previous_turn"]["tools"][0] == "n" * 64
+    # Eight distinct names, each truncated to the cap.
+    tools = payload["state"]["previous_turn"]["tools"]
+    assert len(tools) == 8
+    assert tools[0] == "t0" + "n" * 62
     assert len(json.dumps(payload, ensure_ascii=False)) <= 20000
 
 
@@ -519,6 +547,53 @@ def test_the_rubric_knobs_reach_the_question_the_decider_sends(tmp_path, monkeyp
     assert question["instructions"] == "our own routing rule"
     assert question["criteria"]["high"] == "our own high-effort text"
     assert question["criteria"]["low"] == EFFORT_CRITERIA["low"]
+
+
+def test_the_openai_compatible_cap_keeps_the_requested_level(monkeypatch):
+    """The third decider's cap follows the same audit contract: asked ``max``, applied ``high``."""
+    from client import JevClient
+    from stubs import StubResponse, StubTransport
+
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-ope...-123")
+    transport = StubTransport(
+        [
+            StubResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {"model": "deepseek-v4.1-flash", "effort": "max", "confidence": 0.95}
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    config = {
+        "decider": "openai_compatible",
+        "decider_base_url": "https://opencode.ai/zen/go/v1",
+        "decider_model": "deepseek-v4.1-flash",
+        "decider_api_key_env": "OPENCODE_GO_API_KEY",
+        "routable_providers": ["opencode-go"],
+        "platform_overrides": {"cron": {"max_effort": "high"}},
+    }
+    settings = settings_for(config)
+    client = JevClient(settings, transport=transport)
+
+    decision, reason = client.decide(
+        [{"role": "user", "content": "plan the migration"}],
+        settings.effective(settings.policy_for("cron"), provider="opencode-go"),
+        platform="cron",
+        provider="opencode-go",
+    )
+
+    assert reason is None
+    assert decision is not None
+    assert decision.effort_requested == "max"
+    assert decision.effort == "high"
 
 
 def test_max_effort_policy_accepts_max():

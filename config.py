@@ -786,13 +786,21 @@ def parse_confidence_threshold_per_decider(raw: Any) -> Mapping[str, float]:
     return MappingProxyType(result)
 
 
+#: Bounds on the rubric knobs. The payload budget is measured with the built-in text; an operator
+#: override longer than this is refused (the whole knob falls back) rather than allowed to blow
+#: past the endpoint's context.
+MAX_EFFORT_CRITERION_CHARS = 2000
+MAX_EFFORT_INSTRUCTIONS_CHARS = 4000
+
+
 def parse_effort_criteria(raw: Any) -> Mapping[str, str]:
     """Parse the ``effort_criteria`` knob: a level → text override of the built-in rubric.
 
     A knob is the whole mapping or nothing. A level outside :data:`EFFORT_LEVELS`, a non-string
-    text or an empty one makes the whole knob unusable, and it then falls back to the built-in
-    rubric rather than shipping a half-edited vocabulary to the decider. A *partial* mapping of
-    valid levels is kept: it overrides only those levels, and the built-in text covers the rest.
+    text, an empty one or one longer than :data:`MAX_EFFORT_CRITERION_CHARS` makes the whole knob
+    unusable, and it then falls back to the built-in rubric rather than shipping a half-edited
+    vocabulary to the decider. A *partial* mapping of valid levels is kept: it overrides only those
+    levels, and the built-in text covers the rest.
     """
     if not isinstance(raw, dict):
         return MappingProxyType({})
@@ -802,7 +810,7 @@ def parse_effort_criteria(raw: Any) -> Mapping[str, str]:
         if level not in EFFORT_LEVELS or not isinstance(value, str):
             return MappingProxyType({})
         text = value.strip()
-        if not text:
+        if not text or len(text) > MAX_EFFORT_CRITERION_CHARS:
             return MappingProxyType({})
         criteria[level] = text
     return MappingProxyType(criteria) if criteria else MappingProxyType({})
@@ -812,7 +820,8 @@ def parse_effort_instructions(raw: Any) -> str:
     """Parse the ``effort_instructions`` knob; anything unusable falls back to the built-in text."""
     if not isinstance(raw, str):
         return ""
-    return raw.strip()
+    text = raw.strip()
+    return text if len(text) <= MAX_EFFORT_INSTRUCTIONS_CHARS else ""
 
 
 def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
@@ -930,6 +939,9 @@ def redact(value: Any, limit: int = 200, env_name: Optional[str] = None) -> str:
     k_console = api_key("OPENCODE_CONSOLE_API_KEY")
     if k_console:
         keys_to_redact.add(k_console)
+    k_commandcode = api_key("COMMANDCODE_API_KEY")
+    if k_commandcode:
+        keys_to_redact.add(k_commandcode)
 
     for key in keys_to_redact:
         text = text.replace(key, "[REDACTED]")
