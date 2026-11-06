@@ -44,7 +44,7 @@ from .config import (
     api_key,
     route_catalog,
 )
-from .effort import resolve_effort
+from .effort import offered_levels_for_grid, resolve_effort
 from .memo import Memo, TurnMemo, failure_marker
 from .state import last_user_message
 
@@ -309,11 +309,27 @@ class Router:
                     self._record_skip(settings, REASON_SKIPPED_MODEL, where)
                     return None
 
-                # Effort map guard: re-resolve effort against the active provider's map and respect active max_effort cap
+                # Effort map guard: re-resolve effort against the active provider's map and respect
+                # active max_effort cap.
                 req_effort = memo.effort_requested or memo.effort
                 applied_effort = (
                     _cap_effort(req_effort, effective.max_effort) if req_effort is not None else None
                 )
+                # The replayed level must also be one this route still offers. The map may have
+                # been narrowed since the decision was written, and ``resolve_effort`` would then
+                # consult the route's built-in policy, which declares ``max`` for ``opencode-go``,
+                # ``commandcode`` and ``codex``: the turn would run a level its question never
+                # offered. Omitting the field keeps the memoised model and leaves effort to the
+                # host instead of to a level nobody asked for.
+                if applied_effort is not None and applied_effort not in offered_levels_for_grid(
+                    effective.grid, provider, settings.effort_maps
+                ):
+                    logger.info(
+                        "jev-effort-router: memo effort %r is not offered by %r anymore; omitting it",
+                        applied_effort,
+                        provider,
+                    )
+                    applied_effort = None
 
                 re_effort = resolve_effort(
                     memo.model,

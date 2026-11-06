@@ -416,10 +416,11 @@ def build_payload(
 def normalise_effort_choice(raw: Any) -> Optional[str]:
     """Coerce Jev's effort answer onto the vocabulary ``EFFORT_LEVELS``.
 
-    Whether the route can *apply* it is ``effort.resolve_effort``'s job: a level its map does not
-    declare is omitted there, never clamped. Refusing the whole decision instead would fail a
-    turn over a level the decider was never offered — and the audit already separates the asked
-    level (``effort_requested``) from the applied one (``effort``).
+    Well-formed is not the same as *offered*: the question lists only the levels this route's
+    ``effort_maps`` entry declares, so a level outside that set is still a level here. Gating it
+    is the deciders' job, because only they hold the offered set (``_offered_wire_effort``), and
+    ``effort.resolve_effort`` keeps the last word on whether an offered level goes on the wire —
+    omitted, never clamped, with ``effort_requested`` recording what Jev asked for.
     """
     text = str(raw or "").strip().lower()
     return text if text in EFFORT_LEVELS else None

@@ -188,6 +188,21 @@ def _effort_question_kwargs(levels: Sequence[str], settings: Settings) -> Dict[s
     }
 
 
+def _offered_wire_effort(applied: Optional[str], levels: Sequence[str]) -> Optional[str]:
+    """The level to resolve onto the wire, or ``None`` when the question never offered it.
+
+    ``max`` joined ``EFFORT_LEVELS``, but a route only *offers* the levels its ``effort_maps``
+    entry declares — while ``resolve_effort`` still consults the *built-in* policy of an unmapped
+    route, and ``opencode-go``, ``commandcode`` and ``codex`` declare ``max`` there. Validating the
+    answer against the vocabulary alone is therefore not enough: a well-formed but unoffered level
+    would reach the wire, and the turn would run the priciest rung on a question that never named
+    it. ``effort_requested`` keeps what Jev answered; only the wire drops it.
+    """
+    if applied is None or applied in levels:
+        return applied
+    return None
+
+
 def _fallback_model(effective: EffectiveSettings) -> str:
     """Resolve the fallback model when the decider's answer was absent, off-grid or low-confidence."""
     chosen = effective.entry_for(effective.default_model)
@@ -347,10 +362,18 @@ class JevDecider(BaseDecider):
             )
             return None, REASON_MALFORMED
 
-        return self._interpret(data, effective, latency_ms=latency_ms, provider=provider)
+        return self._interpret(
+            data, effective, latency_ms=latency_ms, provider=provider, levels=levels
+        )
 
     def _interpret(
-        self, data: Any, effective: EffectiveSettings, *, latency_ms: int, provider: str = ""
+        self,
+        data: Any,
+        effective: EffectiveSettings,
+        *,
+        latency_ms: int,
+        provider: str = "",
+        levels: Sequence[str],
     ) -> Tuple[Optional[Decision], Optional[str]]:
         if not isinstance(data, dict):
             return None, REASON_MALFORMED
@@ -383,9 +406,10 @@ class JevDecider(BaseDecider):
         model = chosen.model_id if chosen is not None else _fallback_model(effective)
 
         # -- effort ----------------------------------------------------------------
-        # The answer is validated against the vocabulary and resolved against the route's own
-        # declaration inside ``resolve_effort`` — the offered set shapes the question, not the
-        # validation (main's declared-vocabulary rule).
+        # The answer is validated against the vocabulary and then dropped from the wire if this
+        # route never offered it (``_offered_wire_effort``): ``max`` is well-formed everywhere but
+        # an *option* only where the map declares it, while the built-in policy of an unmapped
+        # route still accepts it.
         requested: Optional[str] = None
         effort_confidence = 0.0
         effort_choice_text = ""
@@ -422,8 +446,8 @@ class JevDecider(BaseDecider):
             )
         # ``requested`` keeps what was asked for (Jev's answer, or the configured default) and
         # ``applied`` what the owner's cap allows: the audit has to show both, or a capped turn
-        # reads as if the stronger level had run.
-        applied = _cap_effort(requested, effective.max_effort)
+        # reads as if the stronger level had run. Only a level the question offered goes further.
+        applied = _offered_wire_effort(_cap_effort(requested, effective.max_effort), levels)
 
         effort = resolve_effort(
             model,
@@ -680,7 +704,14 @@ class OpenAICompatibleDecider(BaseDecider):
         if not isinstance(parsed, dict):
             return None, REASON_MALFORMED
 
-        return self._interpret(parsed, effective, latency_ms=latency_ms, provider=provider, endpoint=url)
+        return self._interpret(
+            parsed,
+            effective,
+            latency_ms=latency_ms,
+            provider=provider,
+            endpoint=url,
+            levels=levels,
+        )
 
     def _interpret(
         self,
@@ -690,6 +721,7 @@ class OpenAICompatibleDecider(BaseDecider):
         latency_ms: int,
         provider: str = "",
         endpoint: str = "",
+        levels: Sequence[str],
     ) -> Tuple[Optional[Decision], Optional[str]]:
         if not isinstance(parsed, dict):
             return None, REASON_MALFORMED
@@ -728,7 +760,9 @@ class OpenAICompatibleDecider(BaseDecider):
         if conf_float < effective.confidence_threshold:
             return None, REASON_LOW_CONFIDENCE
 
-        # Effort validation
+        # Effort validation: the answer must be a vocabulary level, and it only reaches the wire
+        # if the prompt offered it. ``max`` is well-formed everywhere but an *option* only on a
+        # route whose map declares it, and an unmapped route's built-in policy accepts it.
         effort_raw = parsed.get("effort") or parsed.get("reasoning_effort")
         if effort_raw is None or not isinstance(effort_raw, str):
             return None, REASON_MALFORMED
@@ -737,9 +771,10 @@ class OpenAICompatibleDecider(BaseDecider):
         if candidate is None:
             return None, REASON_UNKNOWN_CHOICE
 
-        # What was asked for stays visible; what the cap allows is what runs.
+        # What was asked for stays visible; what the cap allows is what runs — and only a level
+        # the prompt actually offered survives to the wire.
         requested: Optional[str] = candidate
-        applied = _cap_effort(requested, effective.max_effort)
+        applied = _offered_wire_effort(_cap_effort(requested, effective.max_effort), levels)
 
         effort = resolve_effort(
             chosen.model_id,
@@ -1178,7 +1213,8 @@ class JevConsoleDecider(BaseDecider):
         # -- effort ----------------------------------------------------------------
         # The criteria and the accepted keys are derived from the levels this route was offered,
         # which is the same set the payload put in the question — an echoed criteria or a
-        # probability key outside it is a malformed answer, not a new option.
+        # probability key outside it is a malformed answer, not a new option. The chosen level is
+        # recorded as asked and dropped from the wire when the route never offered it.
         levels = _offered_levels(effective, provider, self._settings)
         sent_effort_criteria = effort_criteria(levels, self._settings.effort_criteria)
         requested: Optional[str] = None
@@ -1211,8 +1247,9 @@ class JevConsoleDecider(BaseDecider):
             if not isinstance(e_probs_raw, dict) or not e_probs_raw:
                 return None, REASON_MALFORMED
             # Probability keys name the criteria that were sent *and* the vocabulary: the answer
-            # is validated as a level and only then resolved against the route's declaration, so
+            # is validated as a level and then resolved against the route's declaration, so
             # a level the route would omit is still a well-formed answer here (main's rule).
+            # A well-formed level the *question* did not offer is dropped from the wire below.
             allowed_effort_keys = set(EFFORT_LEVELS) | {
                 str(position) for position in range(1, len(levels) + 1)
             }
@@ -1251,8 +1288,9 @@ class JevConsoleDecider(BaseDecider):
             requested = candidate
 
         # ``requested`` is what Jev asked for and ``applied`` what the owner's cap allows; the
-        # decision carries both so the audit can tell a capped turn from an uncapped one.
-        applied = _cap_effort(requested, effective.max_effort)
+        # decision carries both so the audit can tell a capped turn from an uncapped one. A level
+        # this route never offered stops here: it is recorded, never resolved onto the wire.
+        applied = _offered_wire_effort(_cap_effort(requested, effective.max_effort), levels)
 
         effort = resolve_effort(
             model,
