@@ -77,8 +77,10 @@ the endpoint volunteers for that question is ignored.
 `reasoning_effort` lists only the levels the route can actually be given (`effort.offered_levels`,
 the intersection of `EFFORT_LEVELS` with the accepted levels of the provider's `effort_maps` entry
 for every model on the grid). `max` is offered only where a map declares it; a route with no map
-keeps `low`/`medium`/`high`. The answer keys are validated against the same set, so a level the
-route never offered fails the decision instead of being clamped into another one.
+keeps `low`/`medium`/`high`. The answer is validated as a level and then resolved against the
+route's declaration: a level the declaration does not carry is omitted from the wire (never clamped
+to a weaker rung), and the audit keeps the asked level in `effort_requested` beside the applied
+`effort`.
 
 The optional turn signal is the only conversation state beyond `recent_context`:
 

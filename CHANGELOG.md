@@ -21,18 +21,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **`max` as a real level, scoped to the route that accepts it.** `effort.offered_levels` (and
   `offered_levels_for_grid`) derives the levels a route may be asked for from `EFFORT_LEVELS` ∩ the
   accepted levels of the provider's `effort_maps` entry, for every model on the grid. Without a map
-  the question keeps `low`/`medium`/`high`; `max` is never offered on a route that would clamp it
-  away, and an answer outside the offered set fails the decision rather than being clamped into
-  another level. The payload question, the accepted answer keys, the `openai_compatible` prompt and
-  schema, and the Console's probability-key and echoed-criteria checks all derive from that one set.
+  the question keeps `low`/`medium`/`high`; `max` is never asked for on a route whose declaration
+  does not carry it. The payload question, the `openai_compatible` prompt and schema, and the
+  Console's probability-key and echoed-criteria checks all derive from that one set. The answer is
+  still validated as a level and then resolved against the declaration — omitted, never clamped —
+  with the asked level in `effort_requested` and the applied one in `effort`.
   `max_effort` in a platform policy now accepts `max`, and it is still the operator's ceiling on what
   runs.
 - **The previous turn reaches the decider.** `state` carries `previous_turn`
   (`{tool_calls: n, tools: [≤8 distinct names]}`) and `last_tool_results_excerpt` (tail ≤ 1.500
   chars of the previous assistant turn's tool output, after `_clean` and `redact`). The decision is
   taken once per turn, when the current turn has made no tool calls yet, so the previous turn is the
-  signal that exists; assistant reasoning remains outside the payload. `recent_context` keeps its
-  bound, and a full-context payload stays under 20K characters.
+  signal that exists; assistant reasoning remains outside the payload. Tool names are capped at 64
+  characters and the excerpt is taken from a bounded tail window, so the payload stays under 20K
+  characters with a full context and the built-in rubric.
 - **Opt-in `commandcode` generation route.** A new OpenAI-compatible provider (`commandcode`, aliases
   `commandcode-chat` / `commandcode_chat`) carries its own one-model catalog, `COMMANDCODE_GRID`:
   `deepseek/deepseek-v4.1-flash`. The namespaced id was confirmed from the provider's public,
@@ -79,7 +81,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-<<<<<<< HEAD
 - **`effort_maps` now mean one thing, on every route.** The map path and the strict built-in routes
   (`opencode-console`, `opencode-go`, `commandcode`, `openai-codex`) run a single algorithm,
   `effort.resolve_declared_effort`: a requested level the declaration accepts goes out verbatim;
