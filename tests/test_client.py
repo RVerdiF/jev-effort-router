@@ -671,7 +671,11 @@ def test_jev_console_decider_happy_path(monkeypatch):
     assert decision is not None
     assert decision.decider == "jev_console"
     assert decision.model == "deepseek-v4.1-flash"
-    assert decision.model_confidence == 0.9
+    # One model on the grid is not a choice: the payload carries no model question, the model is
+    # the only option, and the audit says so instead of echoing a key nobody asked for.
+    assert decision.model_confidence == 1.0
+    assert decision.model_choice == "single"
+    assert decision.model_probabilities == {}
     assert decision.decider_model == "jev-1.13-free"
     assert decision.decider_fallback_reason is None
 
@@ -682,7 +686,9 @@ def test_jev_console_decider_happy_path(monkeypatch):
     assert call["headers"]["Content-Type"] == "application/json"
     assert call["json"]["model"] == "jev-1.13-free"
     assert "state" in call["json"]
-    assert "questions" in call["json"]
+    questions = call["json"]["questions"]
+    assert "model_route" not in questions
+    assert questions["reasoning_effort"]["type"] == "choice"
 
 
 def test_jev_console_decider_fallback_to_paid_jev(monkeypatch):
@@ -765,7 +771,9 @@ def test_jev_console_decider_malformed_json(monkeypatch):
 
 def test_jev_console_decider_low_confidence_degrades(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
-    resp_payload = decision_payload(model_choice="1", model_confidence=0.2, grid_size=1)
+    # A multi-model grid is where the model question exists at all — with one model the model
+    # confidence is 1.0 by construction and the threshold can only bite on the effort answer.
+    resp_payload = decision_payload(model_choice="2", model_confidence=0.2, grid_size=6)
     transport = StubTransport([StubResponse(resp_payload)])
     client, settings = make(
         transport,
@@ -777,8 +785,8 @@ def test_jev_console_decider_low_confidence_degrades(monkeypatch):
     )
     decision, reason = client.decide(
         MESSAGES,
-        settings.effective(None, provider="opencode-console"),
-        provider="opencode-console",
+        settings.effective(None, provider="ollama-cloud"),
+        provider="ollama-cloud",
     )
     assert decision is None
     assert reason == REASON_LOW_CONFIDENCE
@@ -858,12 +866,13 @@ def test_jev_console_decider_response_defined_probability_domain(monkeypatch):
         config={
             "decider": "jev_console",
             "console_jev_fallback_model": "",
+            "grids": {"ollama-cloud": ["deepseek-v4.1-flash: routine", "kimi-k3: code"]},
         },
     )
     decision, reason = client.decide(
         MESSAGES,
-        settings.effective(None, provider="opencode-console"),
-        provider="opencode-console",
+        settings.effective(None, provider="ollama-cloud"),
+        provider="ollama-cloud",
     )
     assert decision is None
     assert reason == REASON_MALFORMED
@@ -871,14 +880,15 @@ def test_jev_console_decider_response_defined_probability_domain(monkeypatch):
 
 def test_jev_console_decider_invalid_types_and_float_choice(monkeypatch):
     monkeypatch.setenv("OPENCODE_CONSOLE_API_KEY", "test-console-key-123")
+    # The model question only exists on a multi-model grid.
     # Float choice
-    payload_float = decision_payload("1", 0.99, "high", 0.8, grid_size=1)
+    payload_float = decision_payload("1", 0.99, "high", 0.8, grid_size=6)
     payload_float["answers"]["model_route"]["choice"] = 1.0
     # Non-choice type
-    payload_bad_type = decision_payload("1", 0.99, "high", 0.8, grid_size=1)
+    payload_bad_type = decision_payload("1", 0.99, "high", 0.8, grid_size=6)
     payload_bad_type["answers"]["model_route"]["type"] = "free_text"
     # Numeric effort choice
-    payload_bad_effort = decision_payload("1", 0.99, "high", 0.8, grid_size=1)
+    payload_bad_effort = decision_payload("1", 0.99, "high", 0.8, grid_size=6)
     payload_bad_effort["answers"]["reasoning_effort"]["choice"] = 3
     payload_bad_effort["answers"]["reasoning_effort"]["probabilities"] = {"3": 1.0}
 
@@ -895,17 +905,17 @@ def test_jev_console_decider_invalid_types_and_float_choice(monkeypatch):
         },
     )
     # 1: float choice -> unknown choice
-    dec1, r1 = client.decide(MESSAGES, settings.effective(None, provider="opencode-console"), provider="opencode-console")
+    dec1, r1 = client.decide(MESSAGES, settings.effective(None, provider="ollama-cloud"), provider="ollama-cloud")
     assert dec1 is None
     assert r1 == REASON_UNKNOWN_CHOICE
 
     # 2: bad type -> malformed
-    dec2, r2 = client.decide(MESSAGES, settings.effective(None, provider="opencode-console"), provider="opencode-console")
+    dec2, r2 = client.decide(MESSAGES, settings.effective(None, provider="ollama-cloud"), provider="ollama-cloud")
     assert dec2 is None
     assert r2 == REASON_MALFORMED
 
     # 3: bad effort -> unknown choice
-    dec3, r3 = client.decide(MESSAGES, settings.effective(None, provider="opencode-console"), provider="opencode-console")
+    dec3, r3 = client.decide(MESSAGES, settings.effective(None, provider="ollama-cloud"), provider="ollama-cloud")
     assert dec3 is None
     assert r3 == REASON_UNKNOWN_CHOICE
 

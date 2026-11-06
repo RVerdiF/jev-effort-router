@@ -39,6 +39,7 @@ from .state import (
     EFFORT_CRITERIA,
     EFFORT_QUESTION_ID,
     MODEL_QUESTION_ID,
+    SINGLE_MODEL_CHOICE,
     build_payload,
     last_user_message,
     normalise_effort_choice,
@@ -235,6 +236,9 @@ class JevDecider(BaseDecider):
             context_turns=self._settings.context_turns,
             platform=platform,
             provider=provider,
+            # The legacy Decisions API contract always carries both questions; keeping it
+            # explicit is what leaves that payload byte-identical to a one-model grid or not.
+            ask_model=True,
         )
 
         started = time.monotonic()
@@ -424,24 +428,43 @@ class OpenAICompatibleDecider(BaseDecider):
         user_msg = last_user_message(messages)
         ctx = recent_context(messages, self._settings.context_turns)
 
-        grid_lines = [f"- {entry.model_id}: {entry.description}" for entry in effective.grid]
+        single_model = len(effective.grid) == 1
         effort_lines = [f"- {lvl}: {desc}" for lvl, desc in EFFORT_CRITERIA.items()]
 
-        system_prompt = (
-            "You are an expert model and effort router for an AI coding assistant.\n"
-            "Given the user request, recent context, available models and reasoning effort levels, "
-            "select the single best model from the available grid and the appropriate reasoning effort level.\n"
-            "Return valid JSON ONLY matching exactly this schema:\n"
-            "{\n"
-            '  "model": "<model_id>",\n'
-            '  "effort": "<low|medium|high>",\n'
-            '  "confidence": <float between 0.0 and 1.0>\n'
-            "}\n"
-            "Rules:\n"
-            "- The model MUST be one of the IDs from the Available Models list.\n"
-            "- The effort MUST be low, medium, or high.\n"
-            "- Return JSON only, with no commentary, markdown or extra text."
-        )
+        if single_model:
+            grid_lines: List[str] = []
+            # One model is not a choice: the model block, its rule and its JSON field are all
+            # withheld, so the answer is only the effort. Asking "pick the model" over a single
+            # option buys a certainty at the cost of tokens and latency.
+            system_prompt = (
+                "You are an expert reasoning-effort router for an AI coding assistant.\n"
+                "Given the user request and recent context, select the appropriate reasoning effort level.\n"
+                "Return valid JSON ONLY matching exactly this schema:\n"
+                "{\n"
+                '  "effort": "<low|medium|high>",\n'
+                '  "confidence": <float between 0.0 and 1.0>\n'
+                "}\n"
+                "Rules:\n"
+                "- The effort MUST be low, medium, or high.\n"
+                "- Return JSON only, with no commentary, markdown or extra text."
+            )
+        else:
+            grid_lines = [f"- {entry.model_id}: {entry.description}" for entry in effective.grid]
+            system_prompt = (
+                "You are an expert model and effort router for an AI coding assistant.\n"
+                "Given the user request, recent context, available models and reasoning effort levels, "
+                "select the single best model from the available grid and the appropriate reasoning effort level.\n"
+                "Return valid JSON ONLY matching exactly this schema:\n"
+                "{\n"
+                '  "model": "<model_id>",\n'
+                '  "effort": "<low|medium|high>",\n'
+                '  "confidence": <float between 0.0 and 1.0>\n'
+                "}\n"
+                "Rules:\n"
+                "- The model MUST be one of the IDs from the Available Models list.\n"
+                "- The effort MUST be low, medium, or high.\n"
+                "- Return JSON only, with no commentary, markdown or extra text."
+            )
 
         user_prompt_parts = []
         if user_msg:
@@ -452,9 +475,12 @@ class OpenAICompatibleDecider(BaseDecider):
             user_prompt_parts.append(f"Platform: {platform}")
         if provider:
             user_prompt_parts.append(f"Provider: {provider}")
-        user_prompt_parts.append("Available Models:\n" + "\n".join(grid_lines))
+        if not single_model:
+            user_prompt_parts.append("Available Models:\n" + "\n".join(grid_lines))
         user_prompt_parts.append("Reasoning Effort Levels:\n" + "\n".join(effort_lines))
-        user_prompt_parts.append("Pick the model and effort. Output JSON only.")
+        user_prompt_parts.append(
+            "Pick the effort. Output JSON only." if single_model else "Pick the model and effort. Output JSON only."
+        )
         user_prompt = "\n\n".join(user_prompt_parts)
 
         payload = {
@@ -559,18 +585,25 @@ class OpenAICompatibleDecider(BaseDecider):
         if not isinstance(parsed, dict):
             return None, REASON_MALFORMED
 
-        # Model validation: strict schema and grid membership
-        model_raw = parsed.get("model") or parsed.get("model_id") or parsed.get("choice")
-        if model_raw is None or not isinstance(model_raw, str):
-            return None, REASON_MALFORMED
-        model_choice_text = model_raw.strip()
-        if not model_choice_text:
-            return None, REASON_MALFORMED
+        # Model: with one option the question is not part of the prompt, so the only entry is
+        # the answer by construction (confidence 1.0). A model field the model volunteers
+        # anyway is ignored — it was not asked for.
+        single_model = len(effective.grid) == 1
+        if single_model:
+            chosen = effective.grid[0]
+            model_choice_text = SINGLE_MODEL_CHOICE
+        else:
+            model_raw = parsed.get("model") or parsed.get("model_id") or parsed.get("choice")
+            if model_raw is None or not isinstance(model_raw, str):
+                return None, REASON_MALFORMED
+            model_choice_text = model_raw.strip()
+            if not model_choice_text:
+                return None, REASON_MALFORMED
 
-        grid_models = {entry.model_id: entry for entry in effective.grid}
-        chosen = grid_models.get(model_choice_text)
-        if chosen is None:
-            return None, REASON_UNKNOWN_CHOICE
+            grid_models = {entry.model_id: entry for entry in effective.grid}
+            chosen = grid_models.get(model_choice_text)
+            if chosen is None:
+                return None, REASON_UNKNOWN_CHOICE
 
         # Confidence validation: must be finite float in [0.0, 1.0]
         conf_raw = parsed.get("confidence")
@@ -615,11 +648,11 @@ class OpenAICompatibleDecider(BaseDecider):
                 model=chosen.model_id,
                 effort=effort,
                 effort_requested=requested,
-                model_confidence=conf_float,
+                model_confidence=1.0 if single_model else conf_float,
                 effort_confidence=conf_float,
                 model_choice=model_choice_text,
                 effort_choice=effort_choice_text,
-                model_probabilities={chosen.model_id: conf_float},
+                model_probabilities={} if single_model else {chosen.model_id: conf_float},
                 effort_probabilities={effort_choice_text: conf_float},
                 alternatives=alternatives,
                 latency_ms=latency_ms,
@@ -698,6 +731,9 @@ class JevConsoleDecider(BaseDecider):
                 context_turns=self._settings.context_turns,
                 platform=platform,
                 provider=provider,
+                # One model is not a choice: asking the model question over a single option
+                # spends the answer on a certainty, and Jev cannot express anything else.
+                ask_model=len(effective.grid) > 1,
             )
             try:
                 response, _ = self._post_one(url, payload, headers)
@@ -772,77 +808,90 @@ class JevConsoleDecider(BaseDecider):
         if not isinstance(answers, dict):
             return None, REASON_MALFORMED
 
-        if MODEL_QUESTION_ID not in answers:
-            return None, REASON_MALFORMED
-        model_answer = answers[MODEL_QUESTION_ID]
-        if not isinstance(model_answer, dict):
-            return None, REASON_MALFORMED
-
-        # Specific wire validation: type must be explicitly present, string, and 'choice'
-        if "type" not in model_answer or not isinstance(model_answer["type"], str):
-            return None, REASON_MALFORMED
-        if model_answer["type"].strip().lower() != "choice":
-            return None, REASON_MALFORMED
-
-        conf_raw = model_answer.get("confidence")
-        if conf_raw is None or isinstance(conf_raw, bool) or not isinstance(conf_raw, (int, float)):
-            return None, REASON_MALFORMED
-        try:
-            model_confidence = float(conf_raw)
-        except (TypeError, ValueError):
-            return None, REASON_MALFORMED
-        if not math.isfinite(model_confidence) or model_confidence < 0.0 or model_confidence > 1.0:
-            return None, REASON_MALFORMED
-
-        model_probabilities: Dict[str, float] = {}
-        if "probabilities" not in model_answer or model_answer["probabilities"] is None:
-            return None, REASON_MALFORMED
-        probs_raw = model_answer["probabilities"]
-        if not isinstance(probs_raw, dict) or not probs_raw:
-            return None, REASON_MALFORMED
-        grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
-        grid_model_ids = {entry.model_id for entry in effective.grid}
-        allowed_prob_keys = grid_positions | grid_model_ids
-        prob_sum = 0.0
-        for k, v in probs_raw.items():
-            k_str = str(k).strip()
-            if k_str not in allowed_prob_keys:
+        # -- model -----------------------------------------------------------------
+        # A one-model grid is not a choice: ``state.build_questions`` withholds the model
+        # question, the model is fixed to the only option, and its confidence is 1.0 by
+        # construction. A model answer the endpoint volunteers anyway is ignored — it was not
+        # asked, and honouring it would reintroduce the question the payload just dropped.
+        single_model = len(effective.grid) == 1
+        if single_model:
+            model = effective.grid[0].model_id
+            model_confidence = 1.0
+            model_choice_text = SINGLE_MODEL_CHOICE
+            model_probabilities: Dict[str, float] = {}
+        else:
+            if MODEL_QUESTION_ID not in answers:
                 return None, REASON_MALFORMED
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
+            model_answer = answers[MODEL_QUESTION_ID]
+            if not isinstance(model_answer, dict):
                 return None, REASON_MALFORMED
-            vf = float(v)
-            if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
-                return None, REASON_MALFORMED
-            model_probabilities[k_str] = vf
-            prob_sum += vf
-        if abs(prob_sum - 1.0) > 0.02:
-            return None, REASON_MALFORMED
 
-        if "choice" not in model_answer or model_answer["choice"] is None:
-            return None, REASON_MALFORMED
-        model_choice_text = str(model_answer["choice"]).strip()
-        if not model_choice_text:
-            return None, REASON_MALFORMED
-
-        # Resolve choice strictly against sent criteria and options (rejecting invented/remapped criteria)
-        sent_criteria = criteria(effective.grid)
-        echoed_criteria = model_answer.get("criteria")
-        if echoed_criteria is not None:
-            if not isinstance(echoed_criteria, dict):
+            # Specific wire validation: type must be explicitly present, string, and 'choice'
+            if "type" not in model_answer or not isinstance(model_answer["type"], str):
                 return None, REASON_MALFORMED
-            for k, v in echoed_criteria.items():
+            if model_answer["type"].strip().lower() != "choice":
+                return None, REASON_MALFORMED
+
+            conf_raw = model_answer.get("confidence")
+            if conf_raw is None or isinstance(conf_raw, bool) or not isinstance(conf_raw, (int, float)):
+                return None, REASON_MALFORMED
+            try:
+                model_confidence = float(conf_raw)
+            except (TypeError, ValueError):
+                return None, REASON_MALFORMED
+            if not math.isfinite(model_confidence) or model_confidence < 0.0 or model_confidence > 1.0:
+                return None, REASON_MALFORMED
+
+            model_probabilities = {}
+            if "probabilities" not in model_answer or model_answer["probabilities"] is None:
+                return None, REASON_MALFORMED
+            probs_raw = model_answer["probabilities"]
+            if not isinstance(probs_raw, dict) or not probs_raw:
+                return None, REASON_MALFORMED
+            grid_positions = {str(i) for i in range(1, len(effective.grid) + 1)}
+            grid_model_ids = {entry.model_id for entry in effective.grid}
+            allowed_prob_keys = grid_positions | grid_model_ids
+            prob_sum = 0.0
+            for k, v in probs_raw.items():
                 k_str = str(k).strip()
-                v_str = str(v).strip()
-                if k_str not in sent_criteria or v_str != sent_criteria[k_str]:
-                    return None, REASON_UNKNOWN_CHOICE
+                if k_str not in allowed_prob_keys:
+                    return None, REASON_MALFORMED
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    return None, REASON_MALFORMED
+                vf = float(v)
+                if not math.isfinite(vf) or vf < 0.0 or vf > 1.0:
+                    return None, REASON_MALFORMED
+                model_probabilities[k_str] = vf
+                prob_sum += vf
+            if abs(prob_sum - 1.0) > 0.02:
+                return None, REASON_MALFORMED
 
-        chosen = resolve(sent_criteria, model_choice_text, effective.grid)
-        if chosen is None:
-            return None, REASON_UNKNOWN_CHOICE
-        if model_confidence < effective.confidence_threshold:
-            return None, REASON_LOW_CONFIDENCE
+            if "choice" not in model_answer or model_answer["choice"] is None:
+                return None, REASON_MALFORMED
+            model_choice_text = str(model_answer["choice"]).strip()
+            if not model_choice_text:
+                return None, REASON_MALFORMED
 
-        model = chosen.model_id
+            # Resolve choice strictly against sent criteria and options (rejecting invented/remapped criteria)
+            sent_criteria = criteria(effective.grid)
+            echoed_criteria = model_answer.get("criteria")
+            if echoed_criteria is not None:
+                if not isinstance(echoed_criteria, dict):
+                    return None, REASON_MALFORMED
+                for k, v in echoed_criteria.items():
+                    k_str = str(k).strip()
+                    v_str = str(v).strip()
+                    if k_str not in sent_criteria or v_str != sent_criteria[k_str]:
+                        return None, REASON_UNKNOWN_CHOICE
+
+            chosen = resolve(sent_criteria, model_choice_text, effective.grid)
+            if chosen is None:
+                return None, REASON_UNKNOWN_CHOICE
+            if model_confidence < effective.confidence_threshold:
+                return None, REASON_LOW_CONFIDENCE
+
+            model = chosen.model_id
+
         allowlist = route_allowlist(provider, self._settings.decider)
         if allowlist is not None and model not in allowlist:
             return None, REASON_UNKNOWN_CHOICE

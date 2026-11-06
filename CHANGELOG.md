@@ -54,6 +54,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **A failed turn remembers the failure instead of re-asking in its own tool loop.** With
+  `route_per_turn: true` a decision is memoised on the turn, but a *failure* was not: `low_confidence`
+  and `timeout` returned `None` without storing anything, so every provider request of that turn's
+  tool loop asked the decider again — the same state, the same question, the same unusable answer
+  (the live audit showed ~9 calls per failing turn). `router._decide` now stores a **negative memo**
+  (`memo.failure_marker`) carrying the reason plus the provenance the replay guards compare, and the
+  replay path records a skip with `replayed: true` without calling the decider. Only `low_confidence`
+  and `timeout` are memoised: a 500, a malformed body or a missing key is worth retrying or is a
+  configuration fact the guards already handle. The marker is per turn only — `route_per_turn: false`
+  keeps routing once per session, and suppressing a session for 24h because one request timed out
+  would be a much larger change than the waste it fixes. The remembered reason survives the replay,
+  so a timeout is not relabelled `low_confidence` by the zeroed marker confidences.
+- **A one-model grid no longer asks the model question.** A Choice over a single option has one
+  possible answer and a confidence of 1.0 by construction, so the question only cost tokens and
+  latency. `state.build_questions` omits it when `len(grid) == 1` (explicit `ask_model=True` keeps the
+  legacy OpenRouter payload byte-identical), `jev_console` does not send it, and `openai_compatible`
+  drops the model block, its rule and the `model` JSON field from the prompt. The decider then fixes
+  `model=grid[0]`, `model_confidence=1.0` and `model_choice="single"` in the audit, and ignores a
+  model answer the endpoint volunteers for a question that was not asked. Multi-model grids are
+  unchanged, including the strict validation of the model answer.
 - **`opencode-go` now applies the decided level as `reasoning_effort`.** The built-in policy for
   `deepseek-v4.1-flash` on that route stops claiming "no confirmed contract": a probe of
   `POST https://opencode.ai/zen/go/v1/chat/completions` (mandatory `x-opencode-session` header) on
@@ -74,8 +94,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   sent".
 - **Every generation catalog now names a single model.** `OPENCODE_GO_MODELS` is
   `("deepseek-v4.1-flash",)`; `mimo-v2.6-flash` was removed from all grids, allowlists and catalogs.
-  With one model per route the model question is degenerate by construction and the decider
-  effectively chooses only the reasoning level.
+  With one model per route the model question is degenerate by construction, and it is no longer
+  sent at all (see the single-model entry above); the decider effectively chooses only the reasoning
+  level.
 - **`commandcode` now applies the decided level as `reasoning_effort`, beside the profile's `thinking`
   toggle.** The route's reasoning contract has two components with two authors: the provider profile keeps
   emitting `extra_body.thinking` (CommandCode delegates `deepseek/*` ids to the DeepSeek profile, whose
