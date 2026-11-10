@@ -63,6 +63,17 @@ EFFORT_WIRE_KEY = "reasoning_effort"
 RESPONSES_API_MODE = "codex_responses"
 RESPONSES_REASONING_KEY = "reasoning"
 
+#: The Anthropic Messages payload shape (``api_mode="anthropic_messages"``). Same story as the
+#: Responses route, one level deeper: the transport decodes the params-level ``reasoning_config``
+#: into ``thinking: {type: adaptive, display: summarized}`` plus ``output_config: {effort: ...}``
+#: while it *builds* the body (``agent/anthropic_adapter.py::_thinking_kwargs``, reached from
+#: ``agent/transports/anthropic.py::build_kwargs``), and this middleware runs after that build.
+#: A top-level ``reasoning_effort`` is not a Messages field; ``output_config`` is (``format`` and,
+#: for adaptive thinking, ``effort``).
+ANTHROPIC_API_MODE = "anthropic_messages"
+ANTHROPIC_OUTPUT_CONFIG_KEY = "output_config"
+ANTHROPIC_EFFORT_KEY = "effort"
+
 #: Failures a turn may remember. Both are slow and repeatable: a decider that answered below the
 #: confidence threshold will answer the same way to the same question, and a timeout inside one
 #: turn's tool loop used to cost a full ``timeout_s`` on every request of that loop. Everything
@@ -650,12 +661,15 @@ class Router:
         unexpected keyword argument 'reasoning_config'" — a hard turn failure, not a degraded
         route.
 
-        On ``codex_responses`` the field is nested instead — see :meth:`_apply_responses_reasoning`.
+        On ``codex_responses`` the field is nested instead — see :meth:`_apply_responses_reasoning`,
+        and on ``anthropic_messages`` inside ``output_config`` — see :meth:`_apply_anthropic_effort`.
         """
         routed = dict(original_request)
         routed["model"] = wire_model or decision.model
         if api_mode == RESPONSES_API_MODE:
             return self._apply_responses_reasoning(routed, decision.effort)
+        if api_mode == ANTHROPIC_API_MODE:
+            return self._apply_anthropic_effort(routed, decision.effort)
         if decision.effort:
             routed[EFFORT_WIRE_KEY] = decision.effort
         else:
@@ -684,18 +698,56 @@ class Router:
         return routed
 
     @staticmethod
+    def _apply_anthropic_effort(routed: Dict[str, Any], effort: Optional[str]) -> Dict[str, Any]:
+        """Rewrite ``output_config.effort`` on an already-built Anthropic Messages body.
+
+        The transport is the author of that object: it emits
+        ``thinking: {type: adaptive, display: summarized}`` plus ``output_config: {effort: ...}``
+        for adaptive-thinking models, ``thinking: {type: disabled}`` (and no ``output_config``) when
+        the session turned reasoning off, and nothing at all for a family it classifies as
+        pre-adaptive-thinking. The plugin therefore writes **inside** an ``output_config`` that
+        already carries an ``effort``, and adds neither the object nor the key: an invented
+        ``output_config`` on a route the transport judged field-less is exactly the 400 class the
+        ``reasoning`` guard avoids on the Responses route.
+
+        ``thinking`` and any other ``output_config`` key (``format``, for structured output) are
+        the transport's and are copied through untouched. An omitted level removes the ``effort``
+        key — a Messages body is valid without it (the model then uses its default) — and an
+        ``output_config`` left empty by that removal is dropped rather than sent as ``{}``.
+        """
+        output_config = routed.get(ANTHROPIC_OUTPUT_CONFIG_KEY)
+        if not isinstance(output_config, dict) or ANTHROPIC_EFFORT_KEY not in output_config:
+            return routed
+        updated = dict(output_config)
+        if effort:
+            updated[ANTHROPIC_EFFORT_KEY] = effort
+        else:
+            updated.pop(ANTHROPIC_EFFORT_KEY, None)
+        if updated:
+            routed[ANTHROPIC_OUTPUT_CONFIG_KEY] = updated
+        else:
+            routed.pop(ANTHROPIC_OUTPUT_CONFIG_KEY, None)
+        return routed
+
+    @staticmethod
     def _applied_decision(decision: Decision, routed: Dict[str, Any], api_mode: str) -> Decision:
         """The decision as it actually reached the payload.
 
-        A Responses route the transport judged as taking no reasoning field carries no
-        ``reasoning`` object, and this router will not invent one. The audit then reports the
-        level as *not* sent (``effort: null``) while ``effort_requested`` keeps Jev's choice — a
-        null effort is a statement about the wire, never about what the model executed.
+        A nested route the transport judged as taking no effort field carries no container to
+        write into (no ``reasoning`` object on the Responses body, no ``output_config`` on the
+        Messages body), and this router will not invent one. The audit then reports the level as
+        *not* sent (``effort: null``) while ``effort_requested`` keeps Jev's choice — a null effort
+        is a statement about the wire, never about what the model executed.
         """
-        if api_mode != RESPONSES_API_MODE or not decision.effort:
+        if not decision.effort:
             return decision
-        reasoning = routed.get(RESPONSES_REASONING_KEY)
-        if isinstance(reasoning, dict) and reasoning.get("effort") == decision.effort:
+        if api_mode == RESPONSES_API_MODE:
+            container, effort_key = routed.get(RESPONSES_REASONING_KEY), "effort"
+        elif api_mode == ANTHROPIC_API_MODE:
+            container, effort_key = routed.get(ANTHROPIC_OUTPUT_CONFIG_KEY), ANTHROPIC_EFFORT_KEY
+        else:
+            return decision
+        if isinstance(container, dict) and container.get(effort_key) == decision.effort:
             return decision
         return replace(decision, effort=None)
 

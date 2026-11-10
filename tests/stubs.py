@@ -165,6 +165,42 @@ def codex_request(
     }
 
 
+def anthropic_request(
+    *,
+    model: str = "claude-sonnet-5-5",
+    messages: Optional[List[Dict[str, Any]]] = None,
+    effort: str = "medium",
+    thinking: bool = True,
+    output_config: bool = True,
+    output_config_extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """An Anthropic Messages body, as ``anthropic_messages`` hands it to the middleware.
+
+    The transport has already turned the params-level ``reasoning_config`` into
+    ``thinking: {type: adaptive, display: summarized}`` plus ``output_config: {effort}``
+    (``core/agent/anthropic_adapter.py::_thinking_kwargs``); the conversation is the converted
+    ``messages`` list, and there is no ``reasoning_effort`` and no ``reasoning_config`` key.
+
+    ``thinking=False`` reproduces a session that disabled reasoning (or a family the core treats as
+    pre-adaptive-thinking): the body then carries neither the thinking block nor ``output_config``.
+    ``output_config_extra`` models the structured-output key (``format``) sharing the object.
+    """
+    request: Dict[str, Any] = {
+        "model": model,
+        "messages": messages if messages is not None else [{"role": "user", "content": "hello"}],
+        "max_tokens": 64000,
+        "system": "you are a test",
+        "tools": [],
+    }
+    if thinking:
+        request["thinking"] = {"type": "adaptive", "display": "summarized"}
+        if output_config:
+            config: Dict[str, Any] = dict(output_config_extra or {})
+            config["effort"] = effort
+            request["output_config"] = config
+    return request
+
+
 class Registration:
     def __init__(self, kind: str, name: str) -> None:
         self.kind = kind

@@ -1,12 +1,12 @@
 name: jev-effort-router
-version: 0.4.0
+version: 0.5.0
 manifest_version: 2
 api_version: 1
 description: Route user turns to the best model and reasoning effort via pluggable deciders (TypeSafe Jev or OpenAI-compatible).
 author: AlphaPerseii3000 (forked by RVerdiF)
 license: MIT
 homepage: https://github.com/RVerdiF/jev-effort-router
-tags: [routing, models, reasoning, ollama-cloud, decisions, opencode]
+tags: [routing, models, reasoning, ollama-cloud, decisions, opencode, anthropic]
 provides_middleware:
   - llm_request
 provides_hooks:

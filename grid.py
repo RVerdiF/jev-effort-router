@@ -165,6 +165,43 @@ CODEX_GRID: Tuple[Entry, ...] = (
 )
 
 
+#: The generation catalog of the opt-in ``anthropic`` route (Anthropic Messages API).
+#:
+#: One entry per Claude family, each at the newest version the provider's own model list carries.
+#: **Source of the ids:** the Hermes provider-model cache for ``anthropic``
+#: (``<HERMES_HOME>/provider_models_cache.json`` → ``anthropic.models``, read 2026-11-10), which is
+#: the cached answer of the provider profile's ``/v1/models`` call
+#: (``core/plugins/model-providers/anthropic/__init__.py::fetch_models``). The ids are copied
+#: verbatim from that list — never composed from a family name — so no entry here can name a
+#: model the endpoint does not serve (the dead-turn bug this module exists to prevent).
+#:
+#: The families are genuinely different options: they differ in what they are good at *and* in
+#: the effort range this plugin offers them (``config.ANTHROPIC_MODEL_LEVELS``: Haiku up to
+#: ``max``, Sonnet/Opus only up to ``high``). All three are adaptive-thinking families, so the
+#: transport puts the level in ``output_config.effort`` (``core/agent/anthropic_adapter.py::
+#: _thinking_kwargs``); a Claude an operator grid names outside this catalog is still routed
+#: through the transport's own judgement, and a pre-adaptive-thinking model gets no such field —
+#: the level is then omitted, never invented.
+#:
+#: ``claude-sonnet-5-5`` is also the route's default model (``config.ROUTE_DEFAULT_MODELS``).
+ANTHROPIC_GRID: Tuple[Entry, ...] = (
+    Entry(
+        "claude-haiku-5-5",
+        "routine and well-scoped agentic coding, quick edits, summaries, extraction, "
+        "classification and other high-volume chores",
+    ),
+    Entry(
+        "claude-sonnet-5-5",
+        "human-facing messages and writing, careful single-file or refined code changes, "
+        "code review",
+    ),
+    Entry(
+        "claude-opus-5-5",
+        "planning, orchestration, architecture, multi-step debugging and deep analysis",
+    ),
+)
+
+
 def parse_entry(raw: Any) -> Optional[Entry]:
     """Parse ``"model-id: description"`` (or a ``{model_id, description}`` mapping)."""
     if isinstance(raw, dict):

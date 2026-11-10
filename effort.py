@@ -3,7 +3,7 @@
 Two contracts live here, and only one of them guesses.
 
 * **Declared** — an operator ``effort_maps`` entry and every strict built-in route
-  (``opencode-console``, ``opencode-go``, ``commandcode``, ``openai-codex``). The declaration is
+  (``opencode-console``, ``opencode-go``, ``commandcode``, ``openai-codex``, ``anthropic``). The declaration is
   authoritative: a requested level that the declaration accepts goes out verbatim; otherwise a
   *declared* override whose target is itself accepted is used; otherwise the field is omitted.
   There is no ordering, no nearest-weaker clamp and no anti-escalation rule: ``xhigh → max``
@@ -218,11 +218,17 @@ def _custom_wire_parameter(provider: str) -> str:
     """The field a custom contract's level rides in — metadata, not a transport selector.
 
     ``reasoning`` for the Codex Responses route (the transport nests the level there),
-    ``reasoning_effort`` for every other custom contract. The router still picks the payload
-    shape from ``api_mode``; nothing here can create a ``reasoning`` object.
+    ``output_config.effort`` for the Anthropic Messages route (the transport nests it inside the
+    thinking block's ``output_config``), ``reasoning_effort`` for every other custom contract.
+    The router still picks the payload shape from ``api_mode``; nothing here can create a
+    ``reasoning`` object or an ``output_config`` one.
     """
     canonical = _canonical_provider(provider)
-    return "reasoning" if canonical == "openai-codex" else "reasoning_effort"
+    if canonical == "openai-codex":
+        return "reasoning"
+    if canonical == "anthropic":
+        return "output_config.effort"
+    return "reasoning_effort"
 
 
 def _effort_map_entry(
@@ -366,6 +372,13 @@ class ModelReasoningPolicy:
     #: Such a policy is resolved with :func:`clamp` — nearest weaker, never stronger — while every
     #: declared policy (operator map or strict built-in) uses :func:`resolve_declared_effort`.
     legacy_clamp: bool = False
+    #: Levels this route offers by default, taken from its own built-in declaration.
+    #:
+    #: Empty means "not declared", and :func:`offered_levels` keeps the three-level default — the
+    #: rule every route has followed so far: ``max`` is offered only under an explicit
+    #: declaration, never offered and then clamped away. Only a route whose contract the planner
+    #: re-decided sets this field, so adding it cannot widen an existing route's question.
+    offered: Tuple[str, ...] = ()
 
 
 #: Explicit reasoning policies for the opt-in OpenCode routes. Support on one provider is never
@@ -558,6 +571,84 @@ CODEX_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
 }
 
 
+#: ``(model id, accepted levels)`` for the ids the opt-in ``anthropic`` route serves, and the
+#: range this plugin offers each family. The ids are the ones the provider's model cache lists
+#: (``grid.ANTHROPIC_GRID``) — one per family, newest version.
+#:
+#: **Caps decided for this route** (not a wire limit): Opus and Sonnet stop at ``high``, because a
+#: ``max``/``xhigh`` turn on those families costs several times a ``high`` one and this deployment
+#: has no measured need for it; an operator who wants it declares it in ``effort_maps``. Haiku is
+#: the high-volume family, so ``max`` is offered for it — the wire accepts it
+#: (``ADAPTIVE_EFFORT_MAP`` maps ``max``→``max``) and the cap is what keeps the other two down.
+#: ``default_effort`` still excludes ``max``, so a degraded turn is never the expensive one.
+ANTHROPIC_MODEL_LEVELS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("claude-opus-5-5", ("low", "medium", "high")),
+    ("claude-sonnet-5-5", ("low", "medium", "high")),
+    ("claude-haiku-5-5", ("low", "medium", "high", "max")),
+)
+
+#: Explicit reasoning policies for the ``anthropic`` route (Anthropic Messages API).
+#:
+#: ``wire_parameter`` names the field the level rides in. On this route that is **not** a
+#: top-level kwarg and not the Responses ``reasoning`` object either: the transport decodes the
+#: params-level ``reasoning_config`` into ``thinking: {type: adaptive, display: summarized}`` plus
+#: ``output_config: {effort: …}`` while it *builds* the Messages body
+#: (``core/agent/anthropic_adapter.py::_thinking_kwargs``, reached from
+#: ``agent/transports/anthropic.py::build_kwargs``), and the ``llm_request`` middleware runs after
+#: that build. The level therefore lands in ``output_config.effort``, and only there.
+#:
+#: Two consequences the policy encodes:
+#:
+#: * the transport decides whether the route takes the field at all. A Claude the core classifies
+#:   as pre-adaptive-thinking (``_is_pre_thinking_haiku``: Haiku through 4.5) gets no ``thinking``
+#:   and no ``output_config``, and a session with reasoning disabled gets ``thinking: disabled``;
+#:   in both cases the router omits the level instead of inventing an ``output_config``.
+#: * the vocabulary is the core's: ``ADAPTIVE_EFFORT_MAP`` carries
+#:   ``max/xhigh/high/medium/low`` (``ultra``→``max``, ``minimal``→``low``). This plugin declares
+#:   the subset the caps allow and sends it verbatim; anything else is omitted, never clamped.
+#:
+#: Captured live on 2026-11-10 (``HERMES_DUMP_REQUESTS=1``, ``--provider anthropic``) — see
+#: ``docs/EVIDENCIAS_OPERACIONAIS.md`` §11: the request body carried
+#: ``"thinking": {"type": "adaptive", "display": "summarized"}`` and
+#: ``"output_config": {"effort": …}``, with no top-level ``reasoning_effort`` and no
+#: ``reasoning_config``. Turn-level validation on the three ids returned HTTP 200.
+ANTHROPIC_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
+    model_id: ModelReasoningPolicy(
+        provider="anthropic",
+        model_id=model_id,
+        wire_parameter="output_config.effort",
+        accepted_levels=levels,
+        evidence=(
+            "Declared by the Hermes core for the Anthropic Messages route: "
+            "agent/anthropic_adapter.py::_thinking_kwargs maps reasoning_config.effort onto "
+            "output_config.effort for adaptive-thinking families, using ADAPTIVE_EFFORT_MAP "
+            "(ultra→max, max→max, xhigh→xhigh, high→high, medium→medium, low→low, minimal→low); "
+            "families the core classifies as pre-adaptive-thinking get no thinking request and no "
+            "output_config at all. The wire contract was captured live on 2026-11-10 with "
+            "HERMES_DUMP_REQUESTS=1 for --provider anthropic: the body carries "
+            "thinking.type=adaptive, thinking.display=summarized and output_config.effort, with no "
+            "top-level reasoning_effort and no reasoning_config. The caps in this table are this "
+            "plugin's decision, not a wire limit: Opus/Sonnet high is the ceiling this deployment "
+            "pays for, Haiku keeps max."
+        ),
+        omitted=False,
+        decision=(
+            f"The level chosen by Jev is written as output_config.effort on the Messages body for "
+            f"{model_id}: low/medium/high verbatim, plus max verbatim where this row declares it. "
+            "Anything else (minimal, ultra, an xhigh nobody declared, an unknown string) is "
+            "omitted, never invented and never clamped onto another rung — the operator's "
+            "effort_maps is the supported way to widen a family. The output_config object and the "
+            "whole thinking block are the transport's: the plugin rewrites the effort value inside "
+            "an output_config the transport already built, and when the transport judged the route "
+            "as taking no such field (pre-adaptive-thinking Claude, reasoning disabled) not even "
+            "that is added, so the plugin can adjust a level but never a field."
+        ),
+        offered=levels,
+    )
+    for model_id, levels in ANTHROPIC_MODEL_LEVELS
+}
+
+
 def model_reasoning_policy(
     model_id: Optional[str],
     *,
@@ -676,6 +767,21 @@ def model_reasoning_policy(
             decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
         )
 
+    # anthropic built-in policy: bare family ids, Messages wire, level inside output_config.
+    if provider_key in ("anthropic", "claude", "claude-code"):
+        found, policy = select_model_spec(ANTHROPIC_REASONING_POLICIES, model_id)
+        if found:
+            return policy
+        return ModelReasoningPolicy(
+            provider=provider_key,
+            model_id=model_id or "",
+            wire_parameter=None,
+            accepted_levels=(),
+            evidence="Model not in the anthropic catalog; unconfirmed reasoning support.",
+            omitted=True,
+            decision=f"Model {model_id} has no confirmed reasoning contract on {provider_key}; omitted on wire.",
+        )
+
     # ollama-cloud built-in policy: the legacy family table, and the only remaining clamp.
     if not provider_key or provider_key in ("ollama-cloud", "ollama_cloud"):
         fam = family_for(model_id, provider=provider_key)
@@ -734,10 +840,16 @@ def offered_levels(
     A route is only asked for levels its own ``effort_maps`` entry declares: offering ``max``
     where the declaration does not have it would spend the decision on an answer the router
     would then omit. With no map entry for the route (or none for this model) the three-level
-    default applies — ``max`` is offered only where a map proves the route accepts it. The
-    built-in policies are deliberately *not* consulted here, even where they declare ``max``
-    (``opencode-go``, ``commandcode``, ``codex``): the decision for this card is that a level
-    stronger than ``high`` is offered only under an explicit operator declaration.
+    default applies — ``max`` is offered only where a declaration proves the route accepts it.
+    Built-in policies are deliberately *not* consulted here, even where they declare ``max``
+    (``opencode-go``, ``commandcode``, ``codex``): a level stronger than ``high`` is offered only
+    under an explicit declaration, and for those routes that declaration is the operator's.
+
+    The one exception is a built-in policy that carries its **own** offered set
+    (``ModelReasoningPolicy.offered``). Only the ``anthropic`` route ships one — the planner
+    re-decided that route's ceiling family by family (Haiku up to ``max``, Sonnet/Opus up to
+    ``high``) — so this branch cannot widen any other route's question: every other policy leaves
+    the field empty and keeps the three-level default.
 
     A declaration that shares no level with the askable vocabulary (``accepted: [minimal]``, or
     an entry that deliberately declares nothing) is unusable *for this question*: the default
@@ -749,11 +861,20 @@ def offered_levels(
     from .config import EFFORT_LEVELS
 
     contract = _declared_contract(provider, model, effort_maps)
-    if contract is None or not contract.valid:
-        return DEFAULT_OFFERED_LEVELS
-    declared = set(contract.accepted)
-    offered = tuple(level for level in EFFORT_LEVELS if level in declared)
-    return offered or DEFAULT_OFFERED_LEVELS
+    if contract is not None:
+        if not contract.valid:
+            return DEFAULT_OFFERED_LEVELS
+        declared = set(contract.accepted)
+        offered = tuple(level for level in EFFORT_LEVELS if level in declared)
+        return offered or DEFAULT_OFFERED_LEVELS
+
+    if model:
+        policy = model_reasoning_policy(model, provider=provider or "", effort_maps=effort_maps)
+        if policy.offered:
+            declared = set(policy.offered)
+            offered = tuple(level for level in EFFORT_LEVELS if level in declared)
+            return offered or DEFAULT_OFFERED_LEVELS
+    return DEFAULT_OFFERED_LEVELS
 
 
 def offered_levels_for_grid(

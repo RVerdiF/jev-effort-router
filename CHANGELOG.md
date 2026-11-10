@@ -4,9 +4,36 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-10
 
 ### Added
+
+- **Opt-in `anthropic` generation route with per-family effort caps.** A new provider (`anthropic`,
+  aliases `claude` / `claude-code`, mirroring the core's own provider table) with its own catalog,
+  `ANTHROPIC_GRID`: `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` — one id per family,
+  copied verbatim from the provider's model list (the Hermes cache at
+  `<HERMES_HOME>/provider_models_cache.json` → `anthropic`, i.e. `/v1/models`), never composed from a
+  family name. It is the second route whose payload shape is not `chat_completions`: the provider
+  speaks `api_mode="anthropic_messages"`, so `ROUTED_API_MODES` now carries that mode and `_apply()`
+  writes the level as **`output_config.effort`** — inside the `output_config` the transport already
+  built from the params-level `reasoning_config`
+  (`core/agent/anthropic_adapter.py::_thinking_kwargs`). The plugin adds neither the container nor the
+  key: a body the transport left without an `output_config` (a pre-adaptive-thinking Claude, a session
+  with reasoning disabled, or a container carrying only `format` for structured output) gets no field
+  invented, and the audit then reports `effort: null` while keeping `effort_requested`. `thinking`,
+  `system`, `max_tokens` and the tool block are the transport's and survive untouched; an omitted
+  level removes the `effort` key (an `output_config` left empty is dropped, not sent as `{}`). The
+  caps are per family and are this plugin's decision, not a wire limit: `low`/`medium`/`high` on
+  Sonnet and Opus (a `max`/`xhigh` turn there costs several times a `high` one and this deployment has
+  no measured need for it), plus `max` on Haiku. `ModelReasoningPolicy` gained an `offered` field for
+  exactly this: a route may declare the levels its question asks for, and only `anthropic` ships one,
+  so no other route's question widens. A level outside a family's cap (`max` on Opus/Sonnet, `xhigh`,
+  `minimal`, `ultra`, an unknown string) is **omitted**, never clamped onto `high`. The cap is the same
+  opt-in mechanism as Go/CommandCode/Codex (`route_allowlist` / `route_catalog` under
+  `decider: jev_console`), the route's default model is `claude-sonnet-5-5` (a degraded turn keeps a
+  general-purpose family, not the cheapest one), and both aliases are routable through `_GRID_ALIASES`.
+  Captured live with `HERMES_DUMP_REQUESTS=1 --provider anthropic`, and one routed turn per family
+  returned HTTP 200.
 
 - **Four-step effort rubric, configurable, plus `max` offered only where the route declares it.**
   `EFFORT_LEVELS` now carries `low`/`medium`/`high`/`max`, and the built-in rubric says what each

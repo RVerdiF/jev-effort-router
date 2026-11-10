@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 #: lookup), so this direction cannot cycle.
 from .effort import DEFAULT_OFFERED_LEVELS, normalise_level, normalise_levels, normalise_overrides
 from .grid import (
+    ANTHROPIC_GRID,
     CODEX_GRID,
     COMMANDCODE_GRID,
     DEFAULT_GRID,
@@ -57,6 +58,13 @@ COMMANDCODE_PROVIDER_ALIASES = ("commandcode-chat", "commandcode_chat")
 CODEX_PROVIDER = "openai-codex"
 CODEX_PROVIDER_ALIASES = ("codex", "openai_codex")
 
+#: Anthropic provider and aliases: the opt-in Claude route. Its payload is the Anthropic Messages
+#: body (``api_mode="anthropic_messages"``), where the level rides in ``output_config.effort``,
+#: so the router has to know a third payload shape. The aliases mirror the core's own provider
+#: table (``core/hermes_cli/providers.py``: ``"anthropic": ("claude", "claude-code")``).
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_PROVIDER_ALIASES = ("claude", "claude-code")
+
 #: Console serves generation for the one normal (non-free) id its public model list carries.
 #: The free variant was refused by the owner and is absent from every catalog.
 OPENCODE_CONSOLE_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash",)
@@ -81,6 +89,20 @@ COMMANDCODE_ALLOWLIST = frozenset(COMMANDCODE_MODELS)
 CODEX_MODELS: Tuple[str, ...] = tuple(entry.model_id for entry in CODEX_GRID)
 CODEX_ALLOWLIST = frozenset(CODEX_MODELS)
 
+#: The ``anthropic`` route's catalog: the ids its Messages API serves, taken from the route's own
+#: grid so the cap and the built-in catalog cannot drift apart. The ids are the bare ones the
+#: provider's model cache lists (no ``anthropic/`` prefix, no date suffix on the 5.5 families).
+ANTHROPIC_MODELS: Tuple[str, ...] = tuple(entry.model_id for entry in ANTHROPIC_GRID)
+ANTHROPIC_ALLOWLIST = frozenset(ANTHROPIC_MODELS)
+
+#: The model a route degrades to when the operator's ``default_model`` is not in its catalog.
+#: ``anthropic`` defaults to Sonnet — the middle family — instead of the first grid entry
+#: (Haiku), because a turn that loses its decision should keep a general-purpose model rather
+#: than the cheapest one. Every other route keeps the first-catalog-entry behaviour.
+ROUTE_DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
+    {ANTHROPIC_PROVIDER: "claude-sonnet-5-5"}
+)
+
 #: The provider/alias pairs an operator grid may be declared under. The same table drives the
 #: alias normalisation in :meth:`Settings.is_provider_routable`, so a route cannot be known to
 #: the grid lookups while its aliases are forgotten by the routable check.
@@ -90,6 +112,7 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (OPENCODE_GO_PROVIDER, OPENCODE_GO_PROVIDER_ALIASES),
     (COMMANDCODE_PROVIDER, COMMANDCODE_PROVIDER_ALIASES),
     (CODEX_PROVIDER, CODEX_PROVIDER_ALIASES),
+    (ANTHROPIC_PROVIDER, ANTHROPIC_PROVIDER_ALIASES),
 )
 
 #: API modes this router understands, keyed by the payload shape each one hands the middleware.
@@ -98,9 +121,13 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 #: ``codex_responses`` is the OpenAI Responses shape: the transport has already turned the
 #: params-level ``reasoning_config`` into ``reasoning: {effort, summary}`` and the conversation
 #: into ``input``, so the router reads and writes a different payload (see
-#: ``router.conversation_messages`` / ``router.RESPONSES_REASONING_KEY``). Any other mode
-#: (Anthropic Messages, Bedrock Converse) builds somewhere else and is left alone.
-ROUTED_API_MODES = ("chat_completions", "codex_responses")
+#: ``router.conversation_messages`` / ``router.RESPONSES_REASONING_KEY``).
+#: ``anthropic_messages`` is the Anthropic Messages body: the transport has already turned
+#: ``reasoning_config`` into ``thinking`` plus ``output_config: {effort}``
+#: (``core/agent/anthropic_adapter.py::_thinking_kwargs``), so the level is rewritten there and
+#: nowhere else (see ``router._apply_anthropic_effort``). Bedrock Converse builds somewhere else
+#: and is left alone.
+ROUTED_API_MODES = ("chat_completions", "codex_responses", "anthropic_messages")
 
 #: The levels the router may *ask* Jev for. ``max`` is part of the vocabulary — it can be
 #: requested, accepted, capped by ``max_effort`` and audited — but it is offered by a route only
@@ -252,9 +279,9 @@ def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
     """The allowlist that pins ``provider``'s catalog, or ``None`` when it has none.
 
     ``opencode-console`` is pinned at all times: its models are the Console's own. The
-    ``opencode-go``, ``commandcode`` and ``openai-codex`` caps are **opt-in** — they are in force
-    only while the ``jev_console`` decider is active, so a legacy ``jev``/``openai_compatible``
-    setup keeps whatever grid the operator configured, unchanged.
+    ``opencode-go``, ``commandcode``, ``openai-codex`` and ``anthropic`` caps are **opt-in** — they
+    are in force only while the ``jev_console`` decider is active, so a legacy
+    ``jev``/``openai_compatible`` setup keeps whatever grid the operator configured, unchanged.
     """
     key = (provider or "").strip().lower()
     if key in (OPENCODE_CONSOLE_PROVIDER, *OPENCODE_CONSOLE_PROVIDER_ALIASES):
@@ -265,6 +292,8 @@ def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
         return COMMANDCODE_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
     if key in (CODEX_PROVIDER, *CODEX_PROVIDER_ALIASES):
         return CODEX_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
+    if key in (ANTHROPIC_PROVIDER, *ANTHROPIC_PROVIDER_ALIASES):
+        return ANTHROPIC_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
     return None
 
 
@@ -279,7 +308,21 @@ def route_catalog(provider: str) -> Optional[Tuple[Entry, ...]]:
         return COMMANDCODE_GRID
     if key in (CODEX_PROVIDER, *CODEX_PROVIDER_ALIASES):
         return CODEX_GRID
+    if key in (ANTHROPIC_PROVIDER, *ANTHROPIC_PROVIDER_ALIASES):
+        return ANTHROPIC_GRID
     return None
+
+
+def route_default_model(provider: str) -> Optional[str]:
+    """The route's own degrade-to model, or ``None`` when it uses its first catalog entry.
+
+    Only a route that declares one (see :data:`ROUTE_DEFAULT_MODELS`) overrides the generic
+    "first entry of the catalog" rule that the other opt-in routes follow.
+    """
+    key = (provider or "").strip().lower()
+    return ROUTE_DEFAULT_MODELS.get(key) or ROUTE_DEFAULT_MODELS.get(
+        canonical_provider_name(key) or ""
+    )
 
 
 def _capped(
@@ -643,7 +686,9 @@ class Settings:
         base_threshold = self.confidence_threshold_for(self.decider)
         default_model = self.default_model
         if allowlist is not None and default_model not in allowlist:
-            default_model = base_grid[0].model_id if base_grid else DEFAULT_MODEL
+            default_model = (
+                route_default_model(key) or (base_grid[0].model_id if base_grid else DEFAULT_MODEL)
+            )
         if policy is None:
             return EffectiveSettings(
                 grid=base_grid,

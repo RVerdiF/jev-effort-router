@@ -381,8 +381,11 @@ def test_a_raising_client_never_breaks_the_turn(tmp_path):
     "overrides",
     [
         {"provider": "openrouter"},
+        # Not in ``routable_providers`` (the default is ollama-cloud only): the anthropic route
+        # is opt-in, so an undeclared provider stays untouched even though the router now owns
+        # its payload shape — see ``tests/test_anthropic_route.py``.
         {"provider": "anthropic"},
-        {"api_mode": "anthropic_messages"},
+        {"api_mode": "bedrock_converse"},
         {"model": "gpt-9-ultra"},
     ],
 )
