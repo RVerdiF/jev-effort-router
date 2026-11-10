@@ -940,3 +940,84 @@ com a grade de três modelos. `hermes plugin update` pós-merge continua sendo e
 - **Turnos de cron com `provider: openai-codex` deixam de ser pulados** com esta config, exatamente como
   no §9.9: o alcance não é só o CLI.
 
+## 11. Rota `anthropic` (Messages API) — 3 turnos reais e reprodução do corpo (`t_173d3150`)
+
+Rodado em 2026-11-10 entre 19:25 e 20:02 (-03) no `rafael-notebook`, pelo card de operação
+`t_21bd35bd` (board `homelab`), a pedido do card de código `t_173d3150`. **Nenhum restart** de
+`hermes-gateway.service`, `hermes-dashboard` ou `hermes-relay`: `MainPID=4008646` e
+`ActiveEnterTimestamp=2026-11-09 12:32:38 -03` iguais antes e depois, e o plugin entrou no processo
+vivo por `reload-plugins` (`{"reloaded": true, "adapters_rewired": 2}`, com `jev-effort-router` na
+lista e `hooks: [on_session_end, post_llm_call]`).
+
+Estado vivo neste teste: clone do perfil `code` em `ffafb23` (detached, tree limpo, `plugin.yaml`
+0.5.0), `config.yaml` com exatamente +5 linhas — `anthropic` em `routable_providers` e as 4 linhas de
+`grids.anthropic` (Haiku/Sonnet/Opus); `decider`, `model.default`, `effort_maps` e `max_effort`
+intocados. Backup e evidências brutas em
+`/home/rafael/hermes/backups/pre-anthropic-gate-20261110-1925/`.
+
+### 11.1 Os três turnos roteados
+
+Cada rodada usou `grids.anthropic` com **uma** entrada e um `reload-plugins` entre elas, terminando
+com a grade de três entradas restaurada e novo reload (também `reloaded: true`). O decider escolheu
+`effort=low` nas três (o nível é dele, não do teste).
+
+| Modelo | ts (UTC) | Audit (`event=route`) | API call real | HTTP |
+|---|---|---|---|---|
+| `claude-haiku-5-5` | 22:55:23 | `provider=anthropic, wire_model=claude-haiku-5-5, effort=low, effort_requested=low` | `API call #1: model=claude-haiku-5-5 in=36946 out=4` | 200 |
+| `claude-sonnet-5-5` | 22:57:10 | `provider=anthropic, wire_model=claude-sonnet-5-5, effort=low, effort_requested=low` | `API call #1: model=claude-sonnet-5-5 in=36782 out=4` | 200 |
+| `claude-opus-5-5` | 22:57:55 | `provider=anthropic, wire_model=claude-opus-5-5, effort=low, effort_requested=low` | `API call #1: model=claude-opus-5-5 in=36780 out=4` | 200 |
+
+Nenhum registro `skip` nessas rodadas; `effort` não nulo em todas; `Turn ended:
+reason=text_response(finish_reason=stop)` em cada turno, resposta `ok` impressa, e nenhum HTTP
+4xx/5xx no `logs/errors.log` do perfil na janela (só os WARNING pré-existentes de
+`provides_middleware` do manifest). Registros brutos: `evidence/audit-3-routes.jsonl`,
+`evidence/api-calls-live.txt`, `evidence/round{1,2,3}-*-cli.txt`.
+
+Prova de que o código novo estava vivo e não o pin antigo: `jev_effort_router_status` devolve
+`routable_providers` com `anthropic` e `grids.anthropic` com as três entradas — nada disso existe
+em `6c71ea2`, só em `ffafb23` (`evidence/jev-status-cli.txt`).
+
+### 11.2 O corpo: **reprodução, não captura ao vivo**
+
+`HERMES_DUMP_REQUESTS=1` **não produziu dump** neste host, e o motivo é estrutural: o turno de
+`hermes chat -q` não roda no processo do cliente — a chamada ao provider acontece no **managed
+worker**. Passar a variável só ao CLI não chega ao worker, e adicioná-la ao `.env` do perfil e abrir
+novo turno também não gerou `request_dump_*` (`find` em `/home/rafael` por 10 min: zero; a linha foi
+removida do `.env` ao final). Patches in-process no cliente (SDK Anthropic, `httpx`,
+`apply_llm_request_middleware`, `turn_api_request.env_var_enabled`) nunca disparam — ver
+`evidence/capture-{haiku,http-haiku,mw-haiku}.txt` e `evidence/diag-dump.txt`.
+
+O que se entrega no lugar é o corpo que o core monta para os mesmos modelo e nível, via
+`agent.anthropic_adapter.build_anthropic_kwargs` (`evidence/body-repro-<modelo>.json`):
+
+```json
+{
+  "model": "claude-haiku-5-5",
+  "messages": [{"role": "user", "content": "Reply with only: ok"}],
+  "max_tokens": 32000,
+  "thinking": {"type": "adaptive", "display": "summarized"},
+  "output_config": {"effort": "low"}
+}
+```
+
+Idêntico em forma para `claude-sonnet-5-5` e `claude-opus-5-5`: `thinking` do transporte,
+`output_config.effort` com o nível decidido, **sem** `reasoning_effort` top-level e **sem**
+`reasoning_config`. O plugin reescreve apenas o valor de `output_config.effort` em um
+`output_config` que o transporte já criou (`Router._apply_anthropic_effort`); não inventa o
+container nem a chave. Isso fecha a lacuna entre a reprodução e o que foi enviado nos turnos acima —
+mas **não é uma captura ao vivo** e não deve ser descrito como tal.
+
+### 11.3 Limitações e pendências
+
+- **Sem dump ao vivo nesta rota:** o contrato é declarado pelo core (`_thinking_kwargs` +
+  `ADAPTIVE_EFFORT_MAP`) e reproduzido aqui; um ambiente onde `HERMES_DUMP_REQUESTS` alcance o
+  worker ainda é o teste definitivo.
+- **HTTP 200 não gradua nada:** os turnos provam que o endpoint aceita o corpo e que o nível
+  decidido foi o registrado no audit, não que a profundidade mude.
+- **Caps são decisão do plugin, não limite do wire:** Opus/Sonnet até `high`, Haiku até `max`; um
+  nível fora do cap é omitido, nunca clampado, e `effort_maps` do operador é o caminho suportado
+  para alargar uma família.
+- **O deploy final é do card de operação:** o clone instalado no perfil `code` está em `ffafb23`;
+  se o branch mudar, `hermes plugin update`/install + `reload-plugins` precisam rodar de novo.
+  Rollback em `evidence/RESUMO.md`.
+

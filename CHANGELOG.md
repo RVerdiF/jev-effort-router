@@ -32,8 +32,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   opt-in mechanism as Go/CommandCode/Codex (`route_allowlist` / `route_catalog` under
   `decider: jev_console`), the route's default model is `claude-sonnet-5-5` (a degraded turn keeps a
   general-purpose family, not the cheapest one), and both aliases are routable through `_GRID_ALIASES`.
-  Captured live with `HERMES_DUMP_REQUESTS=1 --provider anthropic`, and one routed turn per family
-  returned HTTP 200.
+  Three real routed turns on 2026-11-10 (one per family, `--provider anthropic`) returned HTTP 200
+  with the decided level in the audit; the Messages body was **reproduced** from
+  `agent.anthropic_adapter.build_anthropic_kwargs`, not captured live — `HERMES_DUMP_REQUESTS=1`
+  does not reach the managed worker that performs the call on this host
+  (`docs/EVIDENCIAS_OPERACIONAIS.md` §11).
 
 - **Four-step effort rubric, configurable, plus `max` offered only where the route declares it.**
   `EFFORT_LEVELS` now carries `low`/`medium`/`high`/`max`, and the built-in rubric says what each

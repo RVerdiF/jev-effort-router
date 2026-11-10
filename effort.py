@@ -607,11 +607,14 @@ ANTHROPIC_MODEL_LEVELS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 #:   ``max/xhigh/high/medium/low`` (``ultra``→``max``, ``minimal``→``low``). This plugin declares
 #:   the subset the caps allow and sends it verbatim; anything else is omitted, never clamped.
 #:
-#: Captured live on 2026-11-10 (``HERMES_DUMP_REQUESTS=1``, ``--provider anthropic``) — see
-#: ``docs/EVIDENCIAS_OPERACIONAIS.md`` §11: the request body carried
+#: Contract evidence, 2026-11-10 (``docs/EVIDENCIAS_OPERACIONAIS.md`` §11): three real routed
+#: turns, one per id, ran against ``--provider anthropic`` and returned HTTP 200 with the decided
+#: level recorded in the audit. The Messages body itself was **reproduced**, not live-dumped:
+#: ``agent.anthropic_adapter.build_anthropic_kwargs`` for the same model and level yields
 #: ``"thinking": {"type": "adaptive", "display": "summarized"}`` and
 #: ``"output_config": {"effort": …}``, with no top-level ``reasoning_effort`` and no
-#: ``reasoning_config``. Turn-level validation on the three ids returned HTTP 200.
+#: ``reasoning_config``. ``HERMES_DUMP_REQUESTS=1`` does not reach the managed worker that
+#: performs the call on this host, so no live request dump exists for this route.
 ANTHROPIC_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
     model_id: ModelReasoningPolicy(
         provider="anthropic",
@@ -624,10 +627,14 @@ ANTHROPIC_REASONING_POLICIES: Dict[str, ModelReasoningPolicy] = {
             "output_config.effort for adaptive-thinking families, using ADAPTIVE_EFFORT_MAP "
             "(ultra→max, max→max, xhigh→xhigh, high→high, medium→medium, low→low, minimal→low); "
             "families the core classifies as pre-adaptive-thinking get no thinking request and no "
-            "output_config at all. The wire contract was captured live on 2026-11-10 with "
-            "HERMES_DUMP_REQUESTS=1 for --provider anthropic: the body carries "
+            "output_config at all. The wire contract is the one the core builds: "
             "thinking.type=adaptive, thinking.display=summarized and output_config.effort, with no "
-            "top-level reasoning_effort and no reasoning_config. The caps in this table are this "
+            "top-level reasoning_effort and no reasoning_config. On 2026-11-10 three real routed "
+            "turns, one per id and one per family, ran against --provider anthropic and returned "
+            "HTTP 200 with the decided level in the audit; the Messages body was reproduced from "
+            "agent.anthropic_adapter.build_anthropic_kwargs for each id, not captured live, "
+            "because HERMES_DUMP_REQUESTS=1 does not reach the managed worker on this host "
+            "(docs/EVIDENCIAS_OPERACIONAIS.md §11). The caps in this table are this "
             "plugin's decision, not a wire limit: Opus/Sonnet high is the ceiling this deployment "
             "pays for, Haiku keeps max."
         ),
