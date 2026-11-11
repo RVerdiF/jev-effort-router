@@ -200,7 +200,7 @@ plugins:
 
 #### Key differences between backends:
 - **Route catalogs under `jev_console`**: the example above uses the legacy `openai_compatible` decider, so its `grids.opencode-go` is taken verbatim. With `decider: jev_console` the same route is capped to `deepseek-v4.1-flash`, and the opt-in `commandcode` route is capped to `deepseek/deepseek-v4.1-flash`; any other entry is dropped rather than offered to the decider.
-- **The Responses route (`openai-codex`)**: the ChatGPT OAuth provider speaks `codex_responses`, not `chat_completions`, so it is the one route whose payload shape differs. It is declared like any other:
+- **The Responses route (`openai-codex`)**: the ChatGPT OAuth provider speaks `codex_responses`, not `chat_completions`, so it is one of the routes whose payload shape is not a chat-completions body. It is declared like any other:
   ```yaml
           routable_providers:
             - openai-codex
