@@ -35,6 +35,7 @@ from .client import (
     _cap_effort,
 )
 from .config import (
+    NATIVE_ANTHROPIC_PROVIDERS,
     ROUTED_API_MODES,
     ROUTED_PROVIDER,
     ROUTED_PROVIDER_ALIASES,
@@ -50,6 +51,8 @@ from .config import (
 )
 from .effort import offered_levels_for_grid, resolve_effort
 from .memo import Memo, TurnMemo, failure_marker
+from .selection import SELECTION_SOURCE_SESSION_ROW, Selection, SelectionReader
+from .selection import profile_home as selection_profile_home
 from .state import last_user_message
 
 logger = logging.getLogger(__name__)
@@ -146,6 +149,34 @@ def wire_model_for(provider: str, effective: EffectiveSettings, model_id: str) -
     return resolved.wire_model if resolved is not None else model_id
 
 
+def wire_effort(payload: Any, provider: str = "", api_mode: str = "") -> Optional[str]:
+    """The reasoning level a payload carries right now, wherever its route puts it.
+
+    The read side of the same table :meth:`Router._apply` writes through: the level sits at the
+    top of a ``chat_completions`` body, in ``reasoning`` on the Responses body, in
+    ``output_config`` on the Messages body and in ``extra_body.reasoning`` on the subscription
+    body. Reading it here — instead of in each caller — is what lets a divergence comparison and
+    an audit record agree with the wire.
+    """
+    if not isinstance(payload, dict):
+        return None
+    style = wire_style(provider, api_mode)
+    level: Any
+    if style == WIRE_STYLE_RESPONSES:
+        container = payload.get(RESPONSES_REASONING_KEY)
+        level = container.get(EFFORT_KEY) if isinstance(container, dict) else None
+    elif style == WIRE_STYLE_OUTPUT_CONFIG:
+        container = payload.get(ANTHROPIC_OUTPUT_CONFIG_KEY)
+        level = container.get(ANTHROPIC_EFFORT_KEY) if isinstance(container, dict) else None
+    elif style == WIRE_STYLE_EXTRA_BODY_REASONING:
+        extra = payload.get(EXTRA_BODY_KEY)
+        reasoning = extra.get(REASONING_KEY) if isinstance(extra, dict) else None
+        level = reasoning.get(EFFORT_KEY) if isinstance(reasoning, dict) else None
+    else:
+        level = payload.get(EFFORT_WIRE_KEY)
+    return level if isinstance(level, str) and level else None
+
+
 class Router:
     """Stateful routing engine: one instance per loaded plugin."""
 
@@ -159,6 +190,12 @@ class Router:
         self._client = None
         self._client_key: Optional[tuple] = None
         self._catalog = catalog if catalog is not None else ModelCatalog()
+        #: The session-row reader, with its per-turn cache (see ``selection.SelectionReader``).
+        self._selections = SelectionReader()
+        #: Turn ids whose session-selection events were already recorded. The row is stable inside
+        #: a turn, so recording the divergence on every provider request of a tool loop would
+        #: repeat one fact once per request; bounded, because turns are unbounded.
+        self._turn_events: Dict[str, None] = {}
 
     # -- wiring ------------------------------------------------------------------
 
@@ -238,6 +275,11 @@ class Router:
         # -- skip gates: anything the router does not own goes out untouched ---------
         provider_key = (provider or "").strip().lower()
         if not settings.is_provider_routable(provider_key):
+            # Out of the race the agent can already be on the native (per-token) Anthropic route.
+            # Nothing here can move it back: the provider is not routable, so the request leaves
+            # exactly as built and the turn is billed. The only honest answer is the warning the
+            # session row makes possible.
+            self._note_native_selection(settings, where, provider_key)
             self._record_skip(settings, REASON_SKIPPED_PROVIDER, where)
             return None
         if api_mode and api_mode not in ROUTED_API_MODES:
@@ -253,11 +295,37 @@ class Router:
             return None
         effective = settings.effective(policy, provider=provider)
 
+        # -- the session's own selection ----------------------------------------------
+        # Read only after every gate above has run, and only when the mode and the platform opt
+        # in: with ``session_selection.mode: off`` the row is never touched and this call is a
+        # no-op (``_read_selection`` returns before opening the database). A selection that is not
+        # applicable to *this* request is reported once per turn and then treated as absent.
+        selection = self._eligible_selection(
+            settings, effective, self._read_selection(settings, where), provider=provider, where=where
+        )
+        if selection is not None:
+            self._note_divergence(
+                settings,
+                selection,
+                original_request if isinstance(original_request, dict) else request,
+                provider=provider,
+                api_mode=api_mode,
+                where=where,
+            )
+
         # A surface's grid is a structural cap: a configured model outside it degrades to a
         # skip that keeps that configured model on the wire, rather than being re-pinned.
         if effective.entry_for(model) is None:
-            self._record_skip(settings, REASON_SKIPPED_MODEL, where)
-            return None
+            return self._fail_open(
+                settings,
+                REASON_SKIPPED_MODEL,
+                where,
+                effective=effective,
+                provider=provider,
+                api_mode=api_mode,
+                original_request=original_request,
+                selection=selection,
+            )
         if not isinstance(request, dict) or not isinstance(original_request, dict):
             self._record_skip(settings, REASON_USER_DATA, where)
             return None
@@ -290,8 +358,21 @@ class Router:
                         memo, replayed = None, False
                     else:
                         logger.info("jev-effort-router: %s; failing open", detail)
-                        self._record_skip(settings, reason, where)
-                        return None
+                        # A memo that belongs to another provenance is a fail-open like any other,
+                        # whatever reason code it carries: the request *is* routable (the gates
+                        # above passed), so the session's own selection is the right fallback. The
+                        # `provider_not_routed` this branch may report is not the gate of the same
+                        # name at the top of the method — that one returns untouched, always.
+                        return self._fail_open(
+                            settings,
+                            reason,
+                            where,
+                            effective=effective,
+                            provider=provider,
+                            api_mode=api_mode,
+                            original_request=original_request,
+                            selection=selection,
+                        )
 
             if memo is not None:
                 # Negative memo: this turn's decision already failed. Replay the skip instead of
@@ -306,8 +387,17 @@ class Router:
                         "jev-effort-router: turn already failed (%s); replaying the skip without asking the decider",
                         failure_reason,
                     )
-                    self._record_skip(settings, failure_reason, where, extra={"replayed": True})
-                    return None
+                    return self._fail_open(
+                        settings,
+                        failure_reason,
+                        where,
+                        effective=effective,
+                        provider=provider,
+                        api_mode=api_mode,
+                        original_request=original_request,
+                        selection=selection,
+                        extra={"replayed": True},
+                    )
 
                 # Policy confidence threshold guard: replayed confidence must meet active threshold
                 has_effort_conf = getattr(memo, "has_effort_confidence", None)
@@ -325,8 +415,16 @@ class Router:
                         memo.effort_confidence,
                         effective.confidence_threshold,
                     )
-                    self._record_skip(settings, REASON_LOW_CONFIDENCE, where)
-                    return None
+                    return self._fail_open(
+                        settings,
+                        REASON_LOW_CONFIDENCE,
+                        where,
+                        effective=effective,
+                        provider=provider,
+                        api_mode=api_mode,
+                        original_request=original_request,
+                        selection=selection,
+                    )
 
                 # Grid guard: the replayed model must exist in the active provider's grid
                 if effective.entry_for(memo.model) is None:
@@ -335,8 +433,16 @@ class Router:
                         memo.model,
                         provider,
                     )
-                    self._record_skip(settings, REASON_SKIPPED_MODEL, where)
-                    return None
+                    return self._fail_open(
+                        settings,
+                        REASON_SKIPPED_MODEL,
+                        where,
+                        effective=effective,
+                        provider=provider,
+                        api_mode=api_mode,
+                        original_request=original_request,
+                        selection=selection,
+                    )
 
                 # Effort map guard: re-resolve effort against the active provider's map and respect
                 # active max_effort cap.
@@ -371,9 +477,18 @@ class Router:
                 # rewriting the request into the value that was actually applied.
                 decision = _decision_from_memo(memo, effort=re_effort)
             else:
-                fetched = self._decide(settings, effective, request, where)
+                fetched, skip_reason = self._decide(settings, effective, request, where)
                 if fetched is None:
-                    return None
+                    return self._fail_open(
+                        settings,
+                        skip_reason or REASON_EXCEPTION,
+                        where,
+                        effective=effective,
+                        provider=provider,
+                        api_mode=api_mode,
+                        original_request=original_request,
+                        selection=selection,
+                    )
                 decision = fetched
                 # A decision naming a model the provider does not have is worse than no decision:
                 # asking for it turns a degraded turn into a dead one (HTTP 404, no response).
@@ -389,9 +504,17 @@ class Router:
                         "leaving the turn on the configured model",
                         decision.model,
                     )
-                    self._record_skip(settings, REASON_SKIPPED_UNKNOWN_MODEL, where,
-                                      extra={"chosen_model": decision.model})
-                    return None
+                    return self._fail_open(
+                        settings,
+                        REASON_SKIPPED_UNKNOWN_MODEL,
+                        where,
+                        effective=effective,
+                        provider=provider,
+                        api_mode=api_mode,
+                        original_request=original_request,
+                        selection=selection,
+                        extra={"chosen_model": decision.model},
+                    )
                 memo = Memo(
                     model=decision.model,
                     effort=decision.effort,
@@ -453,8 +576,16 @@ class Router:
                 type(exc).__name__,
                 exc,
             )
-            self._record_skip(settings, REASON_EXCEPTION, where)
-            return None
+            return self._fail_open(
+                settings,
+                REASON_EXCEPTION,
+                where,
+                effective=effective,
+                provider=provider,
+                api_mode=api_mode,
+                original_request=original_request,
+                selection=selection,
+            )
 
     # -- decision plumbing -------------------------------------------------------
 
@@ -584,11 +715,18 @@ class Router:
 
     def _decide(
         self, settings: Settings, effective: EffectiveSettings, request: Dict[str, Any], where: "_Where"
-    ) -> Optional[Decision]:
+    ) -> Tuple[Optional[Decision], Optional[str]]:
+        """Ask the decider for one decision, and say why when it could not be had.
+
+        Returns ``(decision, None)`` on success and ``(None, reason)`` otherwise. The reason is
+        *returned* rather than recorded here because the caller owns the fail-open response: whether
+        a failed decision leaves the request untouched or reconciles it with the session's own
+        selection is decided in one place (:meth:`_fail_open`), and a skip recorded here could not
+        carry what was actually sent.
+        """
         messages = conversation_messages(request)
         if not messages or not last_user_message(messages).strip():
-            self._record_skip(settings, REASON_SKIPPED_NO_MESSAGE, where)
-            return None
+            return None, REASON_SKIPPED_NO_MESSAGE
 
         try:
             decision, reason = self.client(settings).decide(
@@ -599,17 +737,15 @@ class Router:
             )
         except Exception as exc:  # noqa: BLE001 - belt and braces around the client
             logger.warning("jev-effort-router: decision call failed (%s); leaving request untouched", exc)
-            self._record_skip(settings, REASON_EXCEPTION, where)
-            return None
+            return None, REASON_EXCEPTION
 
         if decision is None:
             if reason == REASON_NO_API_KEY:
                 key_env = settings.api_key_env_for(settings.decider)
                 logger.info("jev-effort-router: %s is not set; turns keep the configured model", key_env)
             self._remember_failure(settings, effective, where, reason or REASON_EXCEPTION)
-            self._record_skip(settings, reason or REASON_EXCEPTION, where)
-            return None
-        return decision
+            return None, reason or REASON_EXCEPTION
+        return decision, None
 
     def _remember_failure(
         self, settings: Settings, effective: EffectiveSettings, where: "_Where", reason: str
@@ -670,13 +806,34 @@ class Router:
 
         Working from ``original_request`` keeps this router idempotent when more than one
         middleware rewrites the same call, and makes "the request is unchanged" literally true
-        on the no-route path.
+        on the no-route path. The payload branch is the one :meth:`_rewrite` documents.
+        """
+        return self._rewrite(
+            original_request,
+            model=wire_model or decision.model,
+            effort=decision.effort,
+            provider=provider,
+            api_mode=api_mode,
+        )
+
+    def _rewrite(
+        self,
+        original_request: Dict[str, Any],
+        *,
+        model: str,
+        effort: Optional[str],
+        provider: str = "",
+        api_mode: str = "",
+    ) -> Dict[str, Any]:
+        """Put ``model`` and ``effort`` on the pre-middleware payload, in the route's own shape.
 
         The branch is chosen by :func:`config.wire_style`, which answers the **route's** declared
         style first and the ``api_mode`` default second. The router therefore never tests a
         provider id here: declaring a route in ``config.ROUTE_WIRE_STYLES`` is what puts its body in
         the ``extra_body.reasoning`` branch, and every other route keeps the branch its payload
-        shape implies.
+        shape implies. Both callers — a decision (:meth:`_apply`) and a reconciled fail-open turn
+        (:meth:`_reconciled`) — go through this one place, so the session's selection cannot reach
+        the wire in a shape the decider's own choice would not.
 
         On the top-level style only ``reasoning_effort`` is written. ``reasoning_config`` is a
         *params-level* input that the provider profile consumes to derive that top-level field
@@ -692,16 +849,16 @@ class Router:
         :meth:`_apply_extra_body_reasoning`.
         """
         routed = dict(original_request)
-        routed["model"] = wire_model or decision.model
+        routed["model"] = model
         style = wire_style(provider, api_mode)
         if style == WIRE_STYLE_RESPONSES:
-            return self._apply_responses_reasoning(routed, decision.effort)
+            return self._apply_responses_reasoning(routed, effort)
         if style == WIRE_STYLE_OUTPUT_CONFIG:
-            return self._apply_anthropic_effort(routed, decision.effort)
+            return self._apply_anthropic_effort(routed, effort)
         if style == WIRE_STYLE_EXTRA_BODY_REASONING:
-            return self._apply_extra_body_reasoning(routed, decision.effort)
-        if decision.effort:
-            routed[EFFORT_WIRE_KEY] = decision.effort
+            return self._apply_extra_body_reasoning(routed, effort)
+        if effort:
+            routed[EFFORT_WIRE_KEY] = effort
         else:
             routed.pop(EFFORT_WIRE_KEY, None)
         return routed
@@ -839,6 +996,337 @@ class Router:
             return decision
         return replace(decision, effort=None)
 
+    # -- the session's own selection ---------------------------------------------
+
+    def _read_selection(self, settings: Settings, where: "_Where") -> Optional[Selection]:
+        """The session row's selection, when this deployment and surface ask for it.
+
+        The mode is checked first — before the profile home is even resolved — so ``mode: off``
+        never opens the database (``sqlite3.connect`` is unreachable) and every observable of the
+        request path stays what it was before this feature existed.
+        """
+        config = settings.session_selection
+        if not config.enabled or not where.session_id:
+            return None
+        if not config.applies_to(where.platform):
+            return None
+        home = selection_profile_home(self._data_dir())
+        if home is None:
+            logger.debug("jev-effort-router: no profile home; no session selection")
+            return None
+        return self._selections.read(home, where.session_id, where.turn_id)
+
+    def _eligible_selection(
+        self,
+        settings: Settings,
+        effective: EffectiveSettings,
+        selection: Optional[Selection],
+        *,
+        provider: str,
+        where: "_Where",
+    ) -> Optional[Selection]:
+        """The selection this request may use, or ``None`` with the reason in the audit.
+
+        Eligible means all three: the selection's provider translates to *this* request's provider,
+        its model is in the route's catalog (where the route pins one) and in the surface's grid.
+        Anything else is ``selection_unmappable`` and no action — a selection naming a model the
+        route would reject turns a degraded turn into a dead one, which is the outcome this plugin
+        exists to avoid.
+        """
+        if selection is None:
+            return None
+        provider_key = (provider or "").strip().lower()
+        mapped = settings.session_selection.provider_for(selection.provider)
+        catalog = tuple(entry.model_id for entry in (route_catalog(provider_key) or ()))
+        reason = ""
+        if mapped != provider_key:
+            reason = "provider_mismatch"
+        elif catalog and selection.model not in catalog:
+            reason = "model_outside_catalog"
+        elif effective.entry_for(selection.model) is None:
+            reason = "model_outside_grid"
+        if not reason:
+            return selection
+
+        if self._first_for_turn(where.turn_id, "unmappable"):
+            self._record_session_event(
+                settings,
+                "selection_unmappable",
+                where,
+                {
+                    "reason": reason,
+                    "session_model": selection.model,
+                    "session_provider": selection.provider,
+                    "session_effort": selection.effort,
+                    "mapped_provider": mapped,
+                    "request_model": where.model,
+                },
+            )
+        logger.debug(
+            "jev-effort-router: session selection %r does not apply to %r (%s)",
+            selection.model,
+            provider_key,
+            reason,
+        )
+        return None
+
+    def _note_divergence(
+        self,
+        settings: Settings,
+        selection: Selection,
+        payload: Any,
+        *,
+        provider: str,
+        api_mode: str,
+        where: "_Where",
+    ) -> None:
+        """Record — once per turn — that the session's row and this request disagree.
+
+        ``warn`` and ``apply`` both raise a ``WARNING``: the divergence is the symptom of the build
+        race, and a deployment that only wants to watch it still needs it in the log. The audit
+        record names both sides and what the plugin did about them, so a later reader can tell a
+        reconciled turn from one that was only watched.
+        """
+        request_effort = wire_effort(payload, provider, api_mode)
+        model_differs = bool(selection.model) and selection.model != (where.model or "")
+        effort_differs = (
+            selection.enabled is not False
+            and selection.effort is not None
+            and selection.effort != request_effort
+        )
+        if not (model_differs or effort_differs):
+            return
+        if not self._first_for_turn(where.turn_id, "divergence"):
+            return
+
+        config = settings.session_selection
+        action = "reconcile_on_fail_open" if config.applies else "watch"
+        self._record_session_event(
+            settings,
+            "selection_divergence",
+            where,
+            {
+                "session_model": selection.model,
+                "session_provider": selection.provider,
+                "session_effort": selection.effort,
+                "mapped_provider": config.provider_for(selection.provider),
+                "request_model": where.model,
+                "request_effort": request_effort,
+                "action": action,
+            },
+        )
+        if config.warns:
+            logger.warning(
+                "jev-effort-router: the session chose %s/%s (effort %s) but this request is %s/%s "
+                "(effort %s); %s",
+                selection.model,
+                selection.provider,
+                selection.effort,
+                where.model,
+                provider,
+                request_effort,
+                "a fail-open turn is reconciled with it"
+                if config.applies
+                else "leaving the request untouched",
+            )
+
+    def _note_native_selection(
+        self, settings: Settings, where: "_Where", provider_key: str
+    ) -> None:
+        """Say — once per turn — that the live agent sits on the native (per-token) Anthropic route.
+
+        An unroutable provider is left untouched by design, and no middleware can move an agent to
+        another route: out of the build race the turn is billed to the API key and this plugin has
+        no lever. Reporting it is the whole of its responsibility there, so a paid turn is never
+        silent.
+        """
+        config = settings.session_selection
+        if not config.enabled or provider_key not in NATIVE_ANTHROPIC_PROVIDERS:
+            return
+        selection = self._read_selection(settings, where)
+        if selection is None:
+            return
+        if not self._first_for_turn(where.turn_id, "native"):
+            return
+        self._record_session_event(
+            settings,
+            "selection_native_provider",
+            where,
+            {
+                "session_model": selection.model,
+                "session_provider": selection.provider,
+                "session_effort": selection.effort,
+                "mapped_provider": config.provider_for(selection.provider),
+                "action": "none",
+            },
+        )
+        if config.warns:
+            logger.warning(
+                "jev-effort-router: the agent is on the native %s route; the session chose %s/%s "
+                "and this turn is billed per token",
+                provider_key,
+                selection.model,
+                selection.provider,
+            )
+
+    def _fail_open(
+        self,
+        settings: Settings,
+        reason: str,
+        where: "_Where",
+        *,
+        effective: EffectiveSettings,
+        provider: str = "",
+        api_mode: str = "",
+        original_request: Any = None,
+        selection: Optional[Selection] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """The single exit for every **post-gate** fail-open of a turn.
+
+        Records the skip exactly as the router always did, and — only in ``mode: apply``, only with
+        an eligible selection, and only from here — returns the request rewritten to what the
+        session's own row says. ``disabled``, ``provider_not_routed``, ``api_mode_not_routed``,
+        ``surface_disabled`` and ``user_data`` never reach this method: those are decisions this
+        router may not override, not failures to be patched over. Neither does a successful
+        decision: when the decider answers, its answer is what the turn runs on.
+
+        The answer is the middleware's ``{"request": ...}`` shape when a rewrite happened, and
+        ``None`` otherwise — byte for byte what the router returned before this feature existed.
+        """
+        routed: Optional[Dict[str, Any]] = None
+        if selection is not None:
+            try:
+                routed = self._reconciled(
+                    settings,
+                    selection,
+                    effective,
+                    original_request,
+                    provider=provider,
+                    api_mode=api_mode,
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed reconciliation is just a skip
+                logger.debug(
+                    "jev-effort-router: could not reconcile the turn (%s: %s)",
+                    type(exc).__name__,
+                    exc,
+                )
+                routed = None
+
+        record_extra = dict(extra or {})
+        keep_none: Tuple[str, ...] = ()
+        if routed is not None:
+            record_extra["reconciled_model"] = routed.get("model")
+            record_extra["reconciled_effort"] = wire_effort(routed, provider, api_mode)
+            record_extra["selection_source"] = SELECTION_SOURCE_SESSION_ROW
+            # ``null`` here is a fact — the level was omitted (route cap, or a session that asked
+            # for no level) — so the key is kept rather than filtered away with the other empties.
+            keep_none = ("reconciled_effort",)
+            logger.info(
+                "jev-effort-router: %s; reconciled with the session's selection (%s, effort %s)",
+                reason,
+                record_extra["reconciled_model"],
+                record_extra["reconciled_effort"],
+            )
+
+        self._record_skip(settings, reason, where, extra=record_extra, keep_none=keep_none)
+        if routed is None:
+            return None
+        # Same shape a routed turn returns: ``reason`` names the model that went on the wire, so a
+        # host that logs it cannot mistake a reconciled turn for an unrouted one.
+        return {
+            "request": routed,
+            "source": "jev-effort-router",
+            "reason": str(routed.get("model") or ""),
+        }
+
+    def _reconciled(
+        self,
+        settings: Settings,
+        selection: Selection,
+        effective: EffectiveSettings,
+        original_request: Any,
+        *,
+        provider: str = "",
+        api_mode: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """The request rewritten to the session's own model and effort, or ``None``.
+
+        ``None`` unless the mode is ``apply`` — that is the whole difference between ``warn`` and
+        ``apply``. The model goes through :func:`wire_model_for` (the transport strips picker
+        aliases before this middleware runs) and the level through :func:`resolve_effort`, the same
+        pair the decision path uses, so a level the route's family cap does not accept is *omitted*
+        from the wire rather than clamped onto a neighbour, and a surface policy's ``max_effort``
+        still applies.
+        """
+        if not settings.session_selection.applies or selection is None:
+            return None
+        if not isinstance(original_request, dict):
+            return None
+        return self._rewrite(
+            original_request,
+            model=wire_model_for(provider, effective, selection.model),
+            effort=self._selection_effort(
+                settings, selection, effective, original_request, provider=provider, api_mode=api_mode
+            ),
+            provider=provider,
+            api_mode=api_mode,
+        )
+
+    @staticmethod
+    def _selection_effort(
+        settings: Settings,
+        selection: Selection,
+        effective: EffectiveSettings,
+        original_request: Dict[str, Any],
+        *,
+        provider: str = "",
+        api_mode: str = "",
+    ) -> Optional[str]:
+        """The level a reconciled wire carries; the payload's own level when the row says nothing.
+
+        Two absences must not become a level: a row that disabled reasoning (``enabled: false``) and
+        a row with no ``reasoning_config`` at all. In both cases the payload's own value is what
+        goes out — this router does not own the ``enabled`` switch, and inventing a level for a
+        session that never named one would be exactly the kind of guess an audit cannot explain.
+        """
+        if selection.enabled is False or selection.effort is None:
+            return wire_effort(original_request, provider, api_mode)
+        capped = _cap_effort(selection.effort, effective.max_effort)
+        return resolve_effort(
+            selection.model, capped, provider=provider, effort_maps=settings.effort_maps
+        )
+
+    def _record_session_event(
+        self, settings: Settings, event: str, where: "_Where", extra: Dict[str, Any]
+    ) -> None:
+        """Append one session-selection record to the audit for this turn.
+
+        Unlike a skip record, ``None`` fields are kept: for these events a missing level is the
+        fact being reported (``request_effort: null``), not a value to be dropped.
+        """
+        record: Dict[str, Any] = {"event": event}
+        record.update(extra or {})
+        record.update(where.fields())
+        self.audit(settings).append(record)
+
+    def _first_for_turn(self, turn_id: str, kind: str) -> bool:
+        """Whether this turn has not produced a ``kind`` record yet, and remember that it has.
+
+        The session row is read once per turn, so its events describe a *turn*: emitting them on
+        every provider request of the tool loop would repeat one fact N times. A turn without an id
+        cannot be deduplicated and always answers ``True``.
+        """
+        key = f"{kind}:{turn_id}" if turn_id else ""
+        if not key:
+            return True
+        if key in self._turn_events:
+            return False
+        if len(self._turn_events) >= 512:
+            self._turn_events.clear()
+        self._turn_events[key] = None
+        return True
+
     # -- audit -------------------------------------------------------------------
 
     def _record_route(
@@ -916,7 +1404,21 @@ class Router:
                 decision.latency_ms,
             )
 
-    def _record_skip(self, settings: Settings, reason: str, where: "_Where", *, extra: Optional[Dict[str, Any]] = None) -> None:
+    def _record_skip(
+        self,
+        settings: Settings,
+        reason: str,
+        where: "_Where",
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+        keep_none: Tuple[str, ...] = (),
+    ) -> None:
+        """Write one ``skip`` record.
+
+        ``extra`` drops empty values, because a skip's optional detail is absent when it has
+        nothing to say. ``keep_none`` names the keys whose ``None`` is itself the finding — a
+        reconciled level that was omitted from the wire — so that fact survives the filter.
+        """
         if not settings.log_skips:
             return
         record: Dict[str, Any] = {
@@ -925,7 +1427,11 @@ class Router:
             "provider": where.provider,
             "configured_model": where.model,
         }
-        record.update({key: value for key, value in (extra or {}).items() if value not in (None, "")})
+        record.update({
+            key: value
+            for key, value in (extra or {}).items()
+            if value not in (None, "") or key in keep_none
+        })
         record.update(where.fields())
         self.audit(settings).append(record)
 

@@ -172,6 +172,7 @@ form generated from `plugin.yaml`.
 | `effort_criteria` | `null` | Optional map of effort level (`low`/`medium`/`high`/`max`) to the text the effort question shows. Partial maps override only the levels they name; an unknown level or empty text discards the whole knob. |
 | `effort_instructions` | `""` | Optional override of the effort question's instructions. Empty keeps the built-in rule: pick the lowest level that covers the work; raise it for uncertainty, risk or irreversibility — never for size. |
 | `platform_overrides` | `null` | Optional map of platform to settings overrides (`enabled`, `grid`, `confidence_threshold`, `max_effort`). |
+| `session_selection` | `null` | Optional reconciliation of the webui session's own model/effort pick on a fail-open turn: `mode` (`off`/`warn`/`apply`), `platforms` and `provider_map`. Defaults to `off`, which never reads the session row. |
 
 ### OpenCode & Pluggable Decider Configuration
 
@@ -268,6 +269,64 @@ plugins:
           telegram:
             enabled: false
 ```
+
+### Session selection reconciliation (`session_selection`)
+
+The webui records the model and effort the operator picks in the session's own row
+(`sessions.model_config` in the profile's `state.db`) *and* hands them to the agent it builds. When
+the pick arrives while a pre-warmed build is already running, only the row gets it: the turn runs on
+the profile's default, this plugin sees that default, and the operator's choice never reaches the
+wire. `session_selection` decides what the plugin does with the row when its own routing **fails
+open** — a successful decision always wins, and nothing here is a ceiling on the decider.
+
+```yaml
+plugins:
+  entries:
+    jev-effort-router:
+      settings:
+        session_selection:
+          mode: apply                    # off (default) | warn | apply
+          platforms: [webui]             # surfaces whose row is authoritative
+          provider_map:
+            anthropic: claude-subscription-directsdk-experimental
+```
+
+- `mode: off` is the default and the pre-feature behaviour, byte for byte: the row is not read at
+  all, so `sqlite3.connect` is never called.
+- `mode: warn` reads the row, records `selection_divergence` in the audit and logs a `WARNING`, and
+  leaves the request untouched.
+- `mode: apply` does the same and additionally rewrites a **fail-open** turn to the session's model
+  and effort: the model through `wire_model_for`, the level through the route's own effort policy,
+  so caps still omit a level they do not accept and `reasoning.enabled: false` is preserved. The
+  `skip` record then carries `reconciled_model`, `reconciled_effort` and
+  `selection_source: session_row`.
+- `provider_map` translates the selection's provider onto the provider of the request it may be
+  applied to. The default maps the native `anthropic` pick onto the subscription route, so a Haiku
+  choice can never travel through the per-token API key.
+- Nothing is reconciled when the router may not override the request: `enabled: false`, a
+  `provider_not_routed` (`selection_native_provider` is recorded instead — out of the build race the
+  turn is billed and the plugin can only report it), `api_mode_not_routed` or `surface_disabled`.
+- The session row is read `mode=ro` with a 50 ms lock timeout, once per turn. A missing, locked or
+  unfamiliar `model_config` (the `api_server`'s `browser_model_lock`, a `follow_profile_config` flag,
+  invalid JSON) is "no evidence": the turn fails open exactly as it does without this key.
+
+Two limits are worth stating plainly, because they are properties of doing this in a plugin:
+
+- **The agent is not moved — only the wire is.** `agent.model` keeps whatever the build chose, so
+  `agent.log` still reports the profile's default on a reconciled turn (it already does on every
+  Jev-routed turn). The proof that a turn ran on the session's model is this plugin's audit
+  (`reconciled_model`, `selection_source`) and the provider's own `--model`, not `agent.log`. The
+  context window is not a factor: the three Claude families all carry 1M.
+- **Out of the race, *repo-only* means warning only.** If the agent build finishes before the pick
+  arrives, the live agent really is switched to the native `anthropic` route and the turn is billed
+  per token against the API key. No middleware can prevent that: it cannot change a client, a
+  `base_url` or a credential. The plugin records `selection_native_provider` and leaves the request
+  untouched; keeping the native route out of the profile's offering (or its credentials) is a
+  configuration decision, not this plugin's.
+
+**Rollback:** set `session_selection.mode: off` and reload the plugin — with `off` the row is never
+read and the router is byte-for-byte its pre-feature self — or revert the commit and reinstall the
+previous version.
 
 ## How it behaves when things go wrong
 

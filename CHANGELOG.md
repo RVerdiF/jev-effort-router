@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in reconciliation of the webui session's own model/effort pick (`session_selection`).** The
+  webui writes the operator's choice into the session row (`sessions.model_config`) and in the same
+  breath hands it to the agent being built; when the pick lands while the pre-warmed build is
+  already running, only the row gets it and the turn silently runs on the profile's default (the
+  diagnosed job-search turn: UI `claude-haiku-5-5`/`medium` on `anthropic`, agent
+  `claude-sonnet-5-5`/`high` on the subscription route). The new `selection.py` reads that row —
+  stdlib only, `file:<profile>/state.db?mode=ro` with a 50 ms lock timeout, cached per turn — and
+  `Router._fail_open` is now the single exit of every **post-gate** fail-open: `low_confidence`
+  (fresh and replayed), `timeout`, `no_api_key`, `exception`, `skipped_unknown_model`,
+  `skipped_no_message`, `skipped_model` and the memo mismatches. In `mode: apply` that exit returns
+  the request rewritten to the session's model (`wire_model_for`) and effort (`resolve_effort`, then
+  the route's own writer, so caps omit rather than clamp and `reasoning.enabled: false` survives),
+  and the `skip` record carries `reconciled_model`, `reconciled_effort` and
+  `selection_source: session_row`. `mode: warn` records `selection_divergence` (plus a `WARNING`)
+  and rewrites nothing; `mode: off` is the default and never touches the database. A selection that
+  is not applicable to the request is reported as `selection_unmappable` and applied to nothing; an
+  agent already on the native `anthropic` route only produces `selection_native_provider`, because
+  no middleware can move it back out of that per-token charge. A successful decision still wins:
+  this is a fallback for the fail-open path, never a ceiling on the decider. The gates that may not
+  be overridden (`disabled`, `provider_not_routed`, `api_mode_not_routed`, `surface_disabled`,
+  `user_data`) keep returning an untouched request.
+
 ## [0.6.0] - 2026-11-10
 
 ### Added

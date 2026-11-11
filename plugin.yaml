@@ -82,6 +82,11 @@ config_schema:
     default: null
     label: Per-surface routing policy
     description: 'Optional map of platform (cron, telegram, cli, ...) to the settings it overrides.'
+  session_selection:
+    type: dict
+    default: null
+    label: Session selection reconciliation
+    description: 'Optional map with mode (off|warn|apply, default off), platforms (default [webui]) and provider_map (default anthropic -> claude-subscription-directsdk-experimental). With off the session row is never read; warn records a divergence; apply also reconciles a fail-open turn to the session''s own model and effort.'
   decider:
     type: str
     default: jev

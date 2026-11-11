@@ -187,6 +187,48 @@ ROUTE_WIRE_STYLES: Mapping[str, str] = MappingProxyType(
     {CLAUDE_SUBSCRIPTION_PROVIDER: WIRE_STYLE_EXTRA_BODY_REASONING}
 )
 
+#: -- Session selection reconciliation ------------------------------------------------------------
+#:
+#: The webui writes the operator's model/effort choice to the session's own row (``state.db``,
+#: ``sessions.model_config``) *and* is supposed to hand it to the agent. When the choice arrives
+#: while the agent is already being built (``tui_gateway``), the row carries the choice and the live
+#: agent does not: the turn runs on the profile's default and this plugin sees that default.
+#: ``session_selection`` decides what the plugin does with the session's choice when its **own**
+#: routing fails open — never when the decider succeeds.
+#:
+#: ``off`` (the default) keeps the router byte-for-byte identical to the behaviour before the key
+#: existed: the row is not read at all (no ``sqlite3.connect``). ``warn`` reads it, records the
+#: divergence in the audit and leaves the request alone. ``apply`` also reconciles the fail-open
+#: payload to the session's model and effort.
+SESSION_SELECTION_OFF = "off"
+SESSION_SELECTION_WARN = "warn"
+SESSION_SELECTION_APPLY = "apply"
+SESSION_SELECTION_MODES: Tuple[str, ...] = (
+    SESSION_SELECTION_OFF,
+    SESSION_SELECTION_WARN,
+    SESSION_SELECTION_APPLY,
+)
+
+#: The surfaces whose session row is authoritative. Only the webui writes the flat
+#: ``model_config`` shape this plugin reads (``tui_gateway/session_workdir.py``); every other
+#: client keeps its own contract and stays out until it is declared here.
+DEFAULT_SESSION_SELECTION_PLATFORMS: Tuple[str, ...] = ("webui",)
+
+#: Selection provider → provider of the request it is reconciled onto. The webui offers the native
+#: ``anthropic`` route, whose turns are billed per token against the API key, while the subscription
+#: route serves the same Claude ids and is the one this deployment may spend. The mapping is an
+#: identity translation, not a transport switch: reconciliation only ever rewrites a request that is
+#: already going out on the subscription route.
+DEFAULT_SESSION_SELECTION_PROVIDER_MAP: Mapping[str, str] = MappingProxyType(
+    {ANTHROPIC_PROVIDER: CLAUDE_SUBSCRIPTION_PROVIDER}
+)
+
+#: Providers that mean "the live agent is on the native, per-token Anthropic route". Out of the
+#: race the plugin has no lever there — the route is not in ``routable_providers``, so the request
+#: goes out exactly as built and the turn is billed — and it only warns
+#: (audit event ``selection_native_provider``).
+NATIVE_ANTHROPIC_PROVIDERS: frozenset = frozenset({ANTHROPIC_PROVIDER, *ANTHROPIC_PROVIDER_ALIASES})
+
 #: The levels the router may *ask* Jev for. ``max`` is part of the vocabulary — it can be
 #: requested, accepted, capped by ``max_effort`` and audited — but it is offered by a route only
 #: where its effort map declares it (``effort.offered_levels``), so no answer is asked for and
@@ -539,6 +581,64 @@ class PlatformPolicy:
 
 
 @dataclass(frozen=True)
+class SessionSelectionSettings:
+    """How the webui session's own model/effort selection is treated, under ``session_selection``.
+
+    Three answers, one per ``mode``:
+
+    * ``off`` — the row is not read; every payload, audit record and log line stays what it was;
+    * ``warn`` — the row is read, a divergence between it and the request becomes an audit event
+      (``selection_divergence``) plus a log ``WARNING``, and the request is left alone;
+    * ``apply`` — the same audit, and a turn this router **fails open** is rewritten to the
+      session's model and effort. A successful decision is never overridden: this is fallback
+      for the fail-open path, not a ceiling or a pin on the decider.
+
+    ``platforms`` names the surfaces whose row is authoritative, and ``provider_map`` translates
+    the selection's provider onto the provider of the request it may be applied to (the native
+    ``anthropic`` choice against the subscription route this deployment pays for).
+    """
+
+    mode: str = SESSION_SELECTION_OFF
+    platforms: Tuple[str, ...] = DEFAULT_SESSION_SELECTION_PLATFORMS
+    provider_map: Mapping[str, str] = field(
+        default_factory=lambda: DEFAULT_SESSION_SELECTION_PROVIDER_MAP
+    )
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the session row may be read at all (``warn`` and ``apply``)."""
+        return self.mode != SESSION_SELECTION_OFF
+
+    @property
+    def applies(self) -> bool:
+        """Whether a fail-open payload may be rewritten to the session's selection."""
+        return self.mode == SESSION_SELECTION_APPLY
+
+    @property
+    def warns(self) -> bool:
+        """Whether a divergence also raises a ``WARNING`` in the log, not just an audit event."""
+        return self.mode in (SESSION_SELECTION_WARN, SESSION_SELECTION_APPLY)
+
+    def applies_to(self, platform: str) -> bool:
+        """Whether ``platform``'s session row is authoritative for this deployment."""
+        key = (platform or "").strip().lower()
+        return bool(key) and key in self.platforms
+
+    def provider_for(self, provider: str) -> str:
+        """The request provider ``provider`` from the session row translates to."""
+        key = (provider or "").strip().lower()
+        return self.provider_map.get(key, key)
+
+    def __hash__(self) -> int:
+        """Hash the policy, with the read-only provider map as a frozenset of its items.
+
+        Same reason as :meth:`Settings.__hash__`: ``MappingProxyType`` is hashable only from
+        Python 3.12, and this plugin's matrix includes 3.11.
+        """
+        return hash((self.mode, self.platforms, _make_hashable(self.provider_map)))
+
+
+@dataclass(frozen=True)
 class EffectiveSettings:
     """The frozen per-request snapshot the decision path consumes.
 
@@ -625,6 +725,11 @@ class Settings:
         default_factory=lambda: MappingProxyType({})
     )
     effort_instructions: str = ""
+    #: The webui session-selection reconciliation (see :class:`SessionSelectionSettings`).
+    #: Defaults to ``mode: off``, which leaves every existing deployment untouched.
+    session_selection: SessionSelectionSettings = field(
+        default_factory=SessionSelectionSettings
+    )
 
     def __hash__(self) -> int:
         """Hash the snapshot, treating read-only mappings as frozensets.
@@ -847,6 +952,94 @@ def parse_platform_overrides(raw: Any) -> Mapping[str, PlatformPolicy]:
     return MappingProxyType(policies)
 
 
+def _parse_session_platforms(raw: Any) -> Tuple[str, ...]:
+    """``session_selection.platforms``: the surfaces whose session row is authoritative.
+
+    Absent/null keeps :data:`DEFAULT_SESSION_SELECTION_PLATFORMS`. A comma-separated string is
+    accepted for parity with ``routable_providers``. A declaration that keeps no usable name —
+    including an explicit empty list — falls back to the default **with a warning**: asking for
+    ``mode: apply`` on no surface at all is an operator error, and silently reconciling nothing
+    would hide it.
+    """
+    if raw is None:
+        return DEFAULT_SESSION_SELECTION_PLATFORMS
+    if isinstance(raw, str):
+        declared = tuple(part.strip() for part in raw.split(",") if part.strip())
+    elif isinstance(raw, Sequence):
+        declared = tuple(str(part).strip() for part in raw if str(part).strip())
+    else:
+        logger.warning(
+            "jev-effort-router: session_selection.platforms must be a list of surfaces; "
+            "keeping %s",
+            ", ".join(DEFAULT_SESSION_SELECTION_PLATFORMS),
+        )
+        return DEFAULT_SESSION_SELECTION_PLATFORMS
+    if not declared:
+        logger.warning(
+            "jev-effort-router: session_selection.platforms names no surface; keeping %s",
+            ", ".join(DEFAULT_SESSION_SELECTION_PLATFORMS),
+        )
+        return DEFAULT_SESSION_SELECTION_PLATFORMS
+    normalised = tuple(dict.fromkeys(part.lower() for part in declared))
+    return normalised
+
+
+def _parse_session_provider_map(raw: Any) -> Mapping[str, str]:
+    """``session_selection.provider_map``: selection provider → request provider.
+
+    Absent/null keeps the built-in translation. A declared map keeps only entries whose both
+    sides are non-empty strings, lower-cased; an explicitly empty declaration stays empty (that
+    is how an operator turns the translation off), while a value that is not a mapping at all
+    falls back to the built-in map with a warning.
+    """
+    if raw is None:
+        return DEFAULT_SESSION_SELECTION_PROVIDER_MAP
+    if not isinstance(raw, Mapping):
+        logger.warning(
+            "jev-effort-router: session_selection.provider_map must be a mapping of "
+            "provider to provider; keeping the built-in translation"
+        )
+        return DEFAULT_SESSION_SELECTION_PROVIDER_MAP
+    parsed: Dict[str, str] = {}
+    for key, value in raw.items():
+        source = str(key or "").strip().lower()
+        target = str(value or "").strip().lower() if isinstance(value, str) else ""
+        if source and target:
+            parsed[source] = target
+    return MappingProxyType(parsed)
+
+
+def parse_session_selection(raw: Any) -> SessionSelectionSettings:
+    """Parse ``session_selection`` into a frozen policy. Never raises.
+
+    ``mode`` is the only load-bearing knob, and an unusable one falls back to ``off`` with a
+    warning: a typo must degrade to "the plugin behaves exactly as it did before", never to a
+    request rewritten on a policy nobody declared.
+    """
+    if raw is None:
+        return SessionSelectionSettings()
+    if not isinstance(raw, Mapping):
+        logger.warning(
+            "jev-effort-router: session_selection must be a mapping with a mode; keeping reconciliation off"
+        )
+        return SessionSelectionSettings()
+
+    raw_mode = raw.get("mode", SESSION_SELECTION_OFF)
+    mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+    if mode not in SESSION_SELECTION_MODES:
+        logger.warning(
+            "jev-effort-router: session_selection.mode is not one of %s — keeping reconciliation off",
+            "/".join(SESSION_SELECTION_MODES),
+        )
+        mode = SESSION_SELECTION_OFF
+
+    return SessionSelectionSettings(
+        mode=mode,
+        platforms=_parse_session_platforms(raw.get("platforms")),
+        provider_map=_parse_session_provider_map(raw.get("provider_map")),
+    )
+
+
 def parse_grids(raw: Any) -> Mapping[str, Tuple[Entry, ...]]:
     """Parse per-provider grid overrides."""
     if not isinstance(raw, dict):
@@ -1031,6 +1224,7 @@ def load_settings(get_config: Optional[Callable[..., Any]] = None) -> Settings:
         effort_maps=parse_effort_maps(read("effort_maps", None)),
         effort_criteria=parse_effort_criteria(read("effort_criteria", None)),
         effort_instructions=parse_effort_instructions(read("effort_instructions", "")),
+        session_selection=parse_session_selection(read("session_selection", None)),
         confidence_threshold_per_decider=parse_confidence_threshold_per_decider(
             read("confidence_threshold_per_decider", None)
         ),
