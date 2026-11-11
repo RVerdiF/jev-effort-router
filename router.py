@@ -38,11 +38,15 @@ from .config import (
     ROUTED_API_MODES,
     ROUTED_PROVIDER,
     ROUTED_PROVIDER_ALIASES,
+    WIRE_STYLE_EXTRA_BODY_REASONING,
+    WIRE_STYLE_OUTPUT_CONFIG,
+    WIRE_STYLE_RESPONSES,
     CommandCodeFallback,
     EffectiveSettings,
     Settings,
     api_key,
     route_catalog,
+    wire_style,
 )
 from .effort import offered_levels_for_grid, resolve_effort
 from .memo import Memo, TurnMemo, failure_marker
@@ -50,29 +54,43 @@ from .state import last_user_message
 
 logger = logging.getLogger(__name__)
 
-#: Where the routing decision puts the effort, per payload shape (see ``config.ROUTED_API_MODES``).
+#: Where the routing decision puts the effort, per payload style (``config.wire_style``). The style
+#: is declared by the route, so no branch below tests a provider id:
 #:
-#: ``chat_completions`` takes the level as the top-level ``reasoning_effort``. The Codex Responses
-#: route (``codex_responses``) takes it nested under ``reasoning``: the transport decodes the
-#: params-level ``reasoning_config`` into ``reasoning: {"effort": ...}`` while it *builds* the
-#: body (``agent/transports/codex.py::_reasoning_fields``), and the middleware runs after that
-#: build, so the payload here is already the Responses body. A top-level ``reasoning_effort`` in
-#: it is not a Responses field at all — the SDK call raises ``TypeError: unexpected keyword
-#: argument 'reasoning_effort'`` before a request is sent.
+#: ``top_level`` (``chat_completions``) takes the level as the top-level ``reasoning_effort``. The
+#: Codex Responses route (``codex_responses`` → ``responses``) takes it nested under ``reasoning``:
+#: the transport decodes the params-level ``reasoning_config`` into ``reasoning: {"effort": ...}``
+#: while it *builds* the body (``agent/transports/codex.py::_reasoning_fields``), and the middleware
+#: runs after that build, so the payload here is already the Responses body. A top-level
+#: ``reasoning_effort`` in it is not a Responses field at all — the SDK call raises ``TypeError:
+#: unexpected keyword argument 'reasoning_effort'`` before a request is sent.
 EFFORT_WIRE_KEY = "reasoning_effort"
 RESPONSES_API_MODE = "codex_responses"
 RESPONSES_REASONING_KEY = "reasoning"
 
-#: The Anthropic Messages payload shape (``api_mode="anthropic_messages"``). Same story as the
-#: Responses route, one level deeper: the transport decodes the params-level ``reasoning_config``
-#: into ``thinking: {type: adaptive, display: summarized}`` plus ``output_config: {effort: ...}``
-#: while it *builds* the body (``agent/anthropic_adapter.py::_thinking_kwargs``, reached from
+#: The Anthropic Messages payload shape (``api_mode="anthropic_messages"`` → ``output_config``
+#: style). Same story as the Responses route, one level deeper: the transport decodes the
+#: params-level ``reasoning_config`` into ``thinking: {type: adaptive, display: summarized}`` plus
+#: ``output_config: {effort: ...}`` while it *builds* the body
+#: (``agent/anthropic_adapter.py::_thinking_kwargs``, reached from
 #: ``agent/transports/anthropic.py::build_kwargs``), and this middleware runs after that build.
 #: A top-level ``reasoning_effort`` is not a Messages field; ``output_config`` is (``format`` and,
 #: for adaptive thinking, ``effort``).
 ANTHROPIC_API_MODE = "anthropic_messages"
 ANTHROPIC_OUTPUT_CONFIG_KEY = "output_config"
 ANTHROPIC_EFFORT_KEY = "effort"
+
+#: The ``extra_body.reasoning`` style: the Claude subscription profile hands
+#: ``{"reasoning": dict(reasoning_config)}`` back from ``build_api_kwargs_extras`` and the core puts
+#: it in ``api_kwargs["extra_body"]``, so the body carries the reasoning object one level down from
+#: the kwargs. The provider then maps ``reasoning.effort`` onto ``thinking`` and
+#: ``output_config.effort`` and runs Claude Code with ``--effort``; a top-level ``reasoning_effort``
+#: is not among its allowed kwargs.
+EXTRA_BODY_KEY = "extra_body"
+REASONING_KEY = "reasoning"
+EFFORT_KEY = "effort"
+REASONING_ENABLED_KEY = "enabled"
+
 
 #: Failures a turn may remember. Both are slow and repeatable: a decider that answered below the
 #: confidence threshold will answer the same way to the same question, and a timeout inside one
@@ -415,10 +433,11 @@ class Router:
             routed = self._apply(
                 original_request,
                 decision,
+                provider=provider,
                 api_mode=api_mode,
                 wire_model=wire_model_for(provider, effective, decision.model),
             )
-            decision = self._applied_decision(decision, routed, api_mode)
+            decision = self._applied_decision(decision, routed, provider=provider, api_mode=api_mode)
             self._record_route(
                 settings,
                 decision,
@@ -643,6 +662,7 @@ class Router:
         original_request: Dict[str, Any],
         decision: Decision,
         *,
+        provider: str = "",
         api_mode: str = "",
         wire_model: str = "",
     ) -> Dict[str, Any]:
@@ -652,24 +672,34 @@ class Router:
         middleware rewrites the same call, and makes "the request is unchanged" literally true
         on the no-route path.
 
-        On ``chat_completions`` only the top-level ``reasoning_effort`` is written.
-        ``reasoning_config`` is a *params-level* input that the provider profile consumes to
-        derive that top-level field (``agent/transports/chat_completions.py::
-        _build_kwargs_from_profile``, then ``plugins/model-providers/ollama-cloud/__init__.py``
-        which returns only ``reasoning_effort``). It is never a wire kwarg, and leaving it in the
-        final payload makes Ollama reject the entire call with "Completions.create() got an
-        unexpected keyword argument 'reasoning_config'" — a hard turn failure, not a degraded
-        route.
+        The branch is chosen by :func:`config.wire_style`, which answers the **route's** declared
+        style first and the ``api_mode`` default second. The router therefore never tests a
+        provider id here: declaring a route in ``config.ROUTE_WIRE_STYLES`` is what puts its body in
+        the ``extra_body.reasoning`` branch, and every other route keeps the branch its payload
+        shape implies.
 
-        On ``codex_responses`` the field is nested instead — see :meth:`_apply_responses_reasoning`,
-        and on ``anthropic_messages`` inside ``output_config`` — see :meth:`_apply_anthropic_effort`.
+        On the top-level style only ``reasoning_effort`` is written. ``reasoning_config`` is a
+        *params-level* input that the provider profile consumes to derive that top-level field
+        (``agent/transports/chat_completions.py::_build_kwargs_from_profile``, then
+        ``plugins/model-providers/ollama-cloud/__init__.py`` which returns only
+        ``reasoning_effort``). It is never a wire kwarg, and leaving it in the final payload makes
+        Ollama reject the entire call with "Completions.create() got an unexpected keyword argument
+        'reasoning_config'" — a hard turn failure, not a degraded route.
+
+        On the ``responses`` style the field is nested instead — see
+        :meth:`_apply_responses_reasoning`; on ``output_config`` inside the Messages block — see
+        :meth:`_apply_anthropic_effort`; on ``extra_body_reasoning`` one level below the kwargs — see
+        :meth:`_apply_extra_body_reasoning`.
         """
         routed = dict(original_request)
         routed["model"] = wire_model or decision.model
-        if api_mode == RESPONSES_API_MODE:
+        style = wire_style(provider, api_mode)
+        if style == WIRE_STYLE_RESPONSES:
             return self._apply_responses_reasoning(routed, decision.effort)
-        if api_mode == ANTHROPIC_API_MODE:
+        if style == WIRE_STYLE_OUTPUT_CONFIG:
             return self._apply_anthropic_effort(routed, decision.effort)
+        if style == WIRE_STYLE_EXTRA_BODY_REASONING:
+            return self._apply_extra_body_reasoning(routed, decision.effort)
         if decision.effort:
             routed[EFFORT_WIRE_KEY] = decision.effort
         else:
@@ -730,21 +760,79 @@ class Router:
         return routed
 
     @staticmethod
-    def _applied_decision(decision: Decision, routed: Dict[str, Any], api_mode: str) -> Decision:
+    def _apply_extra_body_reasoning(routed: Dict[str, Any], effort: Optional[str]) -> Dict[str, Any]:
+        """Rewrite ``extra_body.reasoning.effort`` on an already-built chat-completions body.
+
+        The Claude subscription profile is the author of both containers: its
+        ``build_api_kwargs_extras`` returns ``{"reasoning": dict(reasoning_config)}`` and the core
+        places that in ``api_kwargs["extra_body"]``, so by the time this middleware runs the body
+        carries ``extra_body.reasoning``. The plugin therefore writes the level **inside** an object
+        that exists and adds neither ``extra_body`` nor ``reasoning``: a route whose profile emitted
+        no ``reasoning_config`` (or a caller that stripped it) has nothing to write into, and an
+        invented ``extra_body`` is a request the provider would reject.
+
+        Everything the transport wrote survives: ``reasoning.enabled``, every other key of
+        ``reasoning`` (the provider accepts only ``enabled``/``effort`` today, but that allowlist
+        is not this plugin's to police) and every other ``extra_body`` key (``max_tokens``,
+        ``stop_sequences``, ``response_format``, ...). A ``reasoning`` object the transport
+        *disabled* (``enabled: false``) is left exactly as built — the provider turns a disable
+        into ``thinking: {type: disabled}`` or, where the family cannot disable thinking, into its
+        lowest effort; overriding the level there would contradict the session's own setting. The
+        audit reports ``effort: null`` for that turn.
+
+        An omitted level removes the ``effort`` key, so a ``null`` in the audit always means "no
+        level on the wire". A top-level ``reasoning_effort`` is never written on this route: it is
+        not in the provider's allowed kwargs.
+        """
+        extra = routed.get(EXTRA_BODY_KEY)
+        if not isinstance(extra, dict):
+            return routed
+        reasoning = extra.get(REASONING_KEY)
+        if not isinstance(reasoning, dict):
+            return routed
+        if reasoning.get(REASONING_ENABLED_KEY) is False:
+            return routed
+        updated_reasoning = dict(reasoning)
+        if effort:
+            updated_reasoning[EFFORT_KEY] = effort
+        else:
+            updated_reasoning.pop(EFFORT_KEY, None)
+        updated_extra = dict(extra)
+        updated_extra[REASONING_KEY] = updated_reasoning
+        routed[EXTRA_BODY_KEY] = updated_extra
+        return routed
+
+    @staticmethod
+    def _applied_decision(
+        decision: Decision,
+        routed: Dict[str, Any],
+        *,
+        provider: str = "",
+        api_mode: str = "",
+    ) -> Decision:
         """The decision as it actually reached the payload.
 
         A nested route the transport judged as taking no effort field carries no container to
         write into (no ``reasoning`` object on the Responses body, no ``output_config`` on the
-        Messages body), and this router will not invent one. The audit then reports the level as
-        *not* sent (``effort: null``) while ``effort_requested`` keeps Jev's choice — a null effort
-        is a statement about the wire, never about what the model executed.
+        Messages body, no ``extra_body.reasoning`` on the subscription body), and this router will
+        not invent one. The audit then reports the level as *not* sent (``effort: null``) while
+        ``effort_requested`` keeps Jev's choice — a null effort is a statement about the wire, never
+        about what the model executed. A ``reasoning`` object the transport disabled is the same
+        case: nothing was written, so nothing is claimed.
         """
         if not decision.effort:
             return decision
-        if api_mode == RESPONSES_API_MODE:
-            container, effort_key = routed.get(RESPONSES_REASONING_KEY), "effort"
-        elif api_mode == ANTHROPIC_API_MODE:
+        style = wire_style(provider, api_mode)
+        if style == WIRE_STYLE_RESPONSES:
+            container, effort_key = routed.get(RESPONSES_REASONING_KEY), EFFORT_KEY
+        elif style == WIRE_STYLE_OUTPUT_CONFIG:
             container, effort_key = routed.get(ANTHROPIC_OUTPUT_CONFIG_KEY), ANTHROPIC_EFFORT_KEY
+        elif style == WIRE_STYLE_EXTRA_BODY_REASONING:
+            extra = routed.get(EXTRA_BODY_KEY)
+            container = extra.get(REASONING_KEY) if isinstance(extra, dict) else None
+            effort_key = EFFORT_KEY
+            if isinstance(container, dict) and container.get(REASONING_ENABLED_KEY) is False:
+                return replace(decision, effort=None)
         else:
             return decision
         if isinstance(container, dict) and container.get(effort_key) == decision.effort:

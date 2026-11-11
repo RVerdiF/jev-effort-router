@@ -1021,3 +1021,75 @@ mas **não é uma captura ao vivo** e não deve ser descrito como tal.
   se o branch mudar, `hermes plugin update`/install + `reload-plugins` precisam rodar de novo.
   Rollback em `evidence/RESUMO.md`.
 
+
+## 12. Rota `claude-subscription-directsdk-experimental` — corpo reproduzido no parser do provider (`t_c5151092`)
+
+Esta rota é **outro provider**, não a rota `anthropic` nativa da §11: Claude Pro/Max através do
+Claude Code CLI (`api_mode=chat_completions`), com o nível em **`extra_body.reasoning.effort`**.
+O card entrega só o código da rota — a configuração de planner/reviewer fica para o card de operação
+seguinte —, então aqui **não há turno roteado nem status HTTP**: o que se registra é a reprodução do
+corpo que chega ao parser do provider, derivada de três fontes verificadas no código.
+
+### 12.1 As três fontes do contrato
+
+1. `claude-subscription-directsdk-experimental/__init__.py::build_api_kwargs_extras` devolve
+   `{'reasoning': dict(reasoning_config)}` (plugin do provider 0.3.4), e o core coloca esse dicionário
+   em `api_kwargs['extra_body']['reasoning']`
+   (`core/agent/transports/chat_completions.py`, merge de `extra_body`).
+2. O plugin escreve **apenas** `extra_body.reasoning.effort` dentro de um objeto `reasoning` que já
+   existe (`Router._apply_extra_body_reasoning`, escolhido por declaração:
+   `config.ROUTE_WIRE_STYLES` → `WIRE_STYLE_EXTRA_BODY_REASONING`). `reasoning.enabled` e as demais
+   chaves de `extra_body` são preservados; nem `extra_body` nem `reasoning` são criados; um
+   `reasoning` desabilitado (`enabled: false`) é deixado como o transporte o montou.
+3. `directsdk.py::request_body` (provider 0.3.4) valida os kwargs contra uma allowlist que **não**
+   contém `reasoning_effort`, faz `body.pop('reasoning')`, recusa qualquer chave além de
+   `enabled`/`effort`, limita o esforço ao vocabulário `(none, low, medium, high, xhigh, max)`,
+   escreve `thinking: {type: adaptive, display: summarized}` (famílias adaptativas com
+   `enabled: true`) e `output_config: {effort: …}`, e passa o mesmo valor ao CLI como `--effort`
+   (`directsdk.py`, montagem do comando; `parsed['output_config']['effort']`).
+
+### 12.2 Reprodução: as três famílias no parser real
+
+Execução local (2026-11-10), sem rede e sem spawn do CLI: `Router._apply` com
+`provider=claude-subscription-directsdk-experimental`, `api_mode=chat_completions`, sobre um corpo em
+que o transporte já pôs `extra_body.reasoning = {"enabled": true, "effort": "medium"}`, e então
+`directsdk.request_body(routed)` — o parser do próprio provider, importado do seu diretório de
+instalação.
+
+| Modelo | Nível decidido | `extra_body.reasoning` após o plugin | `thinking` (nativo) | `output_config` (nativo) |
+|---|---|---|---|---|
+| `claude-opus-5-5` | `high` | `{"enabled": true, "effort": "high"}` | `{"type": "adaptive", "display": "summarized"}` | `{"effort": "high"}` |
+| `claude-sonnet-5-5` | `medium` | `{"enabled": true, "effort": "medium"}` | `{"type": "adaptive", "display": "summarized"}` | `{"effort": "medium"}` |
+| `claude-haiku-5-5` | `max` | `{"enabled": true, "effort": "max"}` | `{"type": "adaptive", "display": "summarized"}` | `{"effort": "max"}` |
+
+Em nenhum dos três o corpo roteado carrega `reasoning_effort` top-level, e as chaves do corpo nativo
+ficam `['max_tokens', 'output_config', 'thinking', 'tools']` — nenhuma chave inventada pelo plugin.
+
+O mesmo parser, com `reasoning_effort` top-level no corpo, responde
+`ValueError: Unsupported request parameters: reasoning_effort`. É a razão de o plugin nunca escrever
+esse campo nesta rota (o `wire_parameter` da policy serve de metadado, não de seletor de transporte).
+
+### 12.3 `reasoning.enabled = false`: o plugin não escolhe o nível
+
+Corpo com `extra_body.reasoning = {"enabled": false, "effort": "medium"}` e decisão `high`: o plugin
+deixa o objeto **intacto** (`{"enabled": false, "effort": "medium"}`) e o audit registra
+`effort: null` / `effort_requested: high`. No parser do provider esse corpo vira
+`output_config = {"effort": "low"}` e **sem** bloco `thinking`, porque as três famílias servidas aqui
+estão em `MANDATORY_THINKING` (`model_catalog.py`) — o desligamento é impossível e o provider cai no
+próprio caminho de menor esforço. Ou seja: nesse caso o `effort: null` do audit significa "o plugin
+não escreveu nível nenhum", e o `low` que vai ao CLI é decisão do provider, não uma escolha roteada.
+
+### 12.4 Limitações e pendências
+
+- **Reprodução, não captura ao vivo.** O corpo foi derivado de `build_api_kwargs_extras` + a
+  reescrita do plugin + `directsdk.request_body`; nenhum `request_dump_*` foi produzido (o mesmo
+  limite estrutural da §11: `HERMES_DUMP_REQUESTS=1` não alcança o managed worker).
+- **Sem turno roteado nesta rodada.** Não há status HTTP a registrar: a rota é entregue desligada
+  (`routable_providers` não a lista por padrão) e a configuração de planner/reviewer é do card de
+  operação.
+- **Caps são decisão do plugin, não limite do wire:** Opus/Sonnet até `high`, Haiku até `max`; nível
+  fora do cap é omitido, nunca clampado, e `effort_maps` do operador é o caminho suportado para
+  alargar uma família.
+- **`max` no Haiku é o único caso oferecido:** a pergunta de esforço é feita uma vez, antes do
+  modelo, e `offered_levels_for_grid` intersecta as famílias — na grade de três modelos o `max` não
+  é perguntado.

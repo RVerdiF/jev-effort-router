@@ -27,6 +27,7 @@ from .grid import (
     DEFAULT_GRID,
     OPENCODE_CONSOLE_GRID,
     OPENCODE_GO_GRID,
+    SUBSCRIPTION_GRID,
     Entry,
     parse_grid,
     parse_grid_strict,
@@ -65,6 +66,15 @@ CODEX_PROVIDER_ALIASES = ("codex", "openai_codex")
 ANTHROPIC_PROVIDER = "anthropic"
 ANTHROPIC_PROVIDER_ALIASES = ("claude", "claude-code")
 
+#: The Claude subscription provider: Claude Pro/Max driven through the official Claude Code CLI.
+#: It is a **different** route from ``anthropic`` — different profile, different auth, and a
+#: ``chat_completions`` payload, where the level rides in ``extra_body.reasoning.effort`` instead of
+#: the Messages ``output_config``. The name is the provider's own plugin id and it has no aliases:
+#: an id that is not this one is not this route, and inventing an alias here would let a typo or an
+#: unrelated provider inherit a subscription's wire (see :data:`ROUTE_WIRE_STYLES`).
+CLAUDE_SUBSCRIPTION_PROVIDER = "claude-subscription-directsdk-experimental"
+CLAUDE_SUBSCRIPTION_PROVIDER_ALIASES: Tuple[str, ...] = ()
+
 #: Console serves generation for the one normal (non-free) id its public model list carries.
 #: The free variant was refused by the owner and is absent from every catalog.
 OPENCODE_CONSOLE_MODELS: Tuple[str, ...] = ("deepseek-v4.1-flash",)
@@ -95,12 +105,23 @@ CODEX_ALLOWLIST = frozenset(CODEX_MODELS)
 ANTHROPIC_MODELS: Tuple[str, ...] = tuple(entry.model_id for entry in ANTHROPIC_GRID)
 ANTHROPIC_ALLOWLIST = frozenset(ANTHROPIC_MODELS)
 
+#: The ``claude-subscription-directsdk-experimental`` route's catalog: the native ids its pinned
+#: ``model_catalog.py`` serves, taken from the route's own grid so the cap and the built-in catalog
+#: cannot drift apart.
+CLAUDE_SUBSCRIPTION_MODELS: Tuple[str, ...] = tuple(entry.model_id for entry in SUBSCRIPTION_GRID)
+CLAUDE_SUBSCRIPTION_ALLOWLIST = frozenset(CLAUDE_SUBSCRIPTION_MODELS)
+
 #: The model a route degrades to when the operator's ``default_model`` is not in its catalog.
 #: ``anthropic`` defaults to Sonnet — the middle family — instead of the first grid entry
 #: (Haiku), because a turn that loses its decision should keep a general-purpose model rather
-#: than the cheapest one. Every other route keeps the first-catalog-entry behaviour.
+#: than the cheapest one. ``claude-subscription-directsdk-experimental`` defaults to Opus: its
+#: reason to exist is the planner/reviewer work, so a degraded turn keeps the planning family.
+#: Every other route keeps the first-catalog-entry behaviour.
 ROUTE_DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
-    {ANTHROPIC_PROVIDER: "claude-sonnet-5-5"}
+    {
+        ANTHROPIC_PROVIDER: "claude-sonnet-5-5",
+        CLAUDE_SUBSCRIPTION_PROVIDER: "claude-opus-5-5",
+    }
 )
 
 #: The provider/alias pairs an operator grid may be declared under. The same table drives the
@@ -113,6 +134,7 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (COMMANDCODE_PROVIDER, COMMANDCODE_PROVIDER_ALIASES),
     (CODEX_PROVIDER, CODEX_PROVIDER_ALIASES),
     (ANTHROPIC_PROVIDER, ANTHROPIC_PROVIDER_ALIASES),
+    (CLAUDE_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER_ALIASES),
 )
 
 #: API modes this router understands, keyed by the payload shape each one hands the middleware.
@@ -128,6 +150,42 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 #: nowhere else (see ``router._apply_anthropic_effort``). Bedrock Converse builds somewhere else
 #: and is left alone.
 ROUTED_API_MODES = ("chat_completions", "codex_responses", "anthropic_messages")
+
+#: -- Payload styles ----------------------------------------------------------------------------
+#:
+#: The **branch** that writes the decided level into a payload, named once here and dispatched on by
+#: the router (``router._apply``). A style is a property of the route, not of the provider id: the
+#: router never asks "is this provider X?", it asks "which container does this route's body carry?".
+#: Adding a route is therefore a declaration in this table, and no unrelated branch changes.
+WIRE_STYLE_TOP_LEVEL = "top_level"
+WIRE_STYLE_RESPONSES = "responses"
+WIRE_STYLE_OUTPUT_CONFIG = "output_config"
+WIRE_STYLE_EXTRA_BODY_REASONING = "extra_body_reasoning"
+
+#: The style each payload shape implies when its route declares none. ``chat_completions`` takes
+#: the top-level ``reasoning_effort`` — the OpenAI-compatible contract every route of this plugin
+#: has used since 0.1.0.
+API_MODE_WIRE_STYLES: Mapping[str, str] = MappingProxyType(
+    {
+        "chat_completions": WIRE_STYLE_TOP_LEVEL,
+        "codex_responses": WIRE_STYLE_RESPONSES,
+        "anthropic_messages": WIRE_STYLE_OUTPUT_CONFIG,
+    }
+)
+
+#: Route-specific styles: a provider whose body takes the level somewhere its ``api_mode`` does not
+#: imply. One route is declared here today — ``claude-subscription-directsdk-experimental``, which
+#: speaks ``chat_completions`` but carries the level in ``extra_body.reasoning.effort``: its
+#: ``build_api_kwargs_extras`` returns ``{"reasoning": dict(reasoning_config)}``, and the core puts
+#: that into ``api_kwargs["extra_body"]["reasoning"]``
+#: (``core/agent/transports/chat_completions.py``). A top-level ``reasoning_effort`` must never be
+#: written on it: the provider's own kwarg allowlist rejects the field outright.
+#:
+#: A route absent from this table keeps its ``api_mode`` style, so declaring one here cannot change
+#: another route's payload.
+ROUTE_WIRE_STYLES: Mapping[str, str] = MappingProxyType(
+    {CLAUDE_SUBSCRIPTION_PROVIDER: WIRE_STYLE_EXTRA_BODY_REASONING}
+)
 
 #: The levels the router may *ask* Jev for. ``max`` is part of the vocabulary — it can be
 #: requested, accepted, capped by ``max_effort`` and audited — but it is offered by a route only
@@ -294,6 +352,12 @@ def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
         return CODEX_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
     if key in (ANTHROPIC_PROVIDER, *ANTHROPIC_PROVIDER_ALIASES):
         return ANTHROPIC_ALLOWLIST if (decider or "").strip().lower() == "jev_console" else None
+    if key in (CLAUDE_SUBSCRIPTION_PROVIDER, *CLAUDE_SUBSCRIPTION_PROVIDER_ALIASES):
+        return (
+            CLAUDE_SUBSCRIPTION_ALLOWLIST
+            if (decider or "").strip().lower() == "jev_console"
+            else None
+        )
     return None
 
 
@@ -310,6 +374,8 @@ def route_catalog(provider: str) -> Optional[Tuple[Entry, ...]]:
         return CODEX_GRID
     if key in (ANTHROPIC_PROVIDER, *ANTHROPIC_PROVIDER_ALIASES):
         return ANTHROPIC_GRID
+    if key in (CLAUDE_SUBSCRIPTION_PROVIDER, *CLAUDE_SUBSCRIPTION_PROVIDER_ALIASES):
+        return SUBSCRIPTION_GRID
     return None
 
 
@@ -323,6 +389,29 @@ def route_default_model(provider: str) -> Optional[str]:
     return ROUTE_DEFAULT_MODELS.get(key) or ROUTE_DEFAULT_MODELS.get(
         canonical_provider_name(key) or ""
     )
+
+
+def wire_style(provider: str, api_mode: str = "") -> str:
+    """The payload branch :meth:`router.Router._apply` must use for this route.
+
+    Declarative on purpose: the router is told *which container* the body carries instead of
+    branching on provider ids. Resolution order:
+
+    1. the route's own declaration (:data:`ROUTE_WIRE_STYLES`), by canonical name and then by any
+       known alias of it;
+    2. the style the ``api_mode`` implies (:data:`API_MODE_WIRE_STYLES`);
+    3. the top-level ``reasoning_effort`` — the OpenAI-compatible default of this plugin.
+
+    An empty or unknown provider and an empty ``api_mode`` fall to the top-level style, which is
+    exactly what the router did before styles existed.
+    """
+    key = (provider or "").strip().lower()
+    declared = ROUTE_WIRE_STYLES.get(key) or ROUTE_WIRE_STYLES.get(
+        canonical_provider_name(key) or ""
+    )
+    if declared:
+        return declared
+    return API_MODE_WIRE_STYLES.get((api_mode or "").strip().lower(), WIRE_STYLE_TOP_LEVEL)
 
 
 def _capped(

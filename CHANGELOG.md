@@ -4,6 +4,54 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-10
+
+### Added
+
+- **Opt-in `claude-subscription-directsdk-experimental` generation route, wired on
+  `extra_body.reasoning.effort`.** A **different provider** from the native `anthropic` route of
+  0.5.0: Claude Pro/Max driven through the official Claude Code CLI, `api_mode=chat_completions`,
+  and a body whose reasoning object sits one level below the kwargs. Its catalog is
+  `SUBSCRIPTION_GRID` — the same three native ids the provider's own `model_catalog.py` pins
+  (`claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`), copied verbatim rather than composed
+  from a family name or taken from the short `opus`/`sonnet`/`haiku` aliases. The effort caps are
+  per family and are this plugin's decision, not a wire limit (`SUBSCRIPTION_MODEL_LEVELS`):
+  `low`/`medium`/`high` on Opus and Sonnet, plus `max` on Haiku; a level outside a cap is
+  **omitted**, never clamped. The route's default model is `claude-opus-5-5` — a degraded turn keeps
+  the planning family, because this route exists to serve planner/reviewer work — and the cap is the
+  same opt-in mechanism as Go/CommandCode/Codex/Anthropic (`route_allowlist` / `route_catalog` under
+  `decider: jev_console`, `_GRID_ALIASES`, `ROUTE_DEFAULT_MODELS`).
+- **A declared wire style, so the router stops inferring the container from the api mode.** `config`
+  gained `WIRE_STYLE_*`, `API_MODE_WIRE_STYLES`, `ROUTE_WIRE_STYLES` and `wire_style(provider,
+  api_mode)`: the route declares **where** the level goes (`top_level`, `responses`,
+  `output_config`, `extra_body_reasoning`) and `Router._apply` / `_applied_decision` dispatch on that
+  name, receiving the `provider`. Adding the subscription route therefore changed no other route's
+  payload, and nothing in the router tests a provider id. The new branch
+  (`Router._apply_extra_body_reasoning`) writes **only** `extra_body.reasoning.effort` inside a
+  `reasoning` object the provider profile already created inside an `extra_body` the core already
+  created: it preserves `reasoning.enabled` and every other key, creates neither container, never
+  writes a top-level `reasoning_effort` (the provider's kwarg allowlist rejects the field with
+  `ValueError: Unsupported request parameters`), and leaves a `reasoning` object the transport
+  disabled (`enabled: false`) exactly as built — the audit then reports `effort: null` while
+  `effort_requested` keeps Jev's choice.
+- **Evidence §12, reproduced through the provider's own parser.** `docs/EVIDENCIAS_OPERACIONAIS.md`
+  §12 records the three sources of the contract (`build_api_kwargs_extras`, this plugin's rewrite,
+  `directsdk.py::request_body`), the resulting `thinking` / `output_config.effort` for the three ids
+  (`high`, `medium`, `max`), the provider's `ValueError` for a top-level `reasoning_effort`, and what
+  a disabled `reasoning` object becomes on the wire. It is a **reproduction, not a live capture**:
+  the card delivers the route only, so no routed turn ran and no HTTP status is claimed.
+
+### Changed
+
+- **`_custom_wire_parameter` is a table, not a chain of `if`s.** The field a custom `effort_maps`
+  contract rides in is now `effort.WIRE_PARAMETERS` keyed by canonical route name (`reasoning` for
+  Codex, `output_config.effort` for Anthropic Messages, `extra_body.reasoning.effort` for the
+  subscription route, `reasoning_effort` for everything else). Metadata only — the payload branch is
+  still chosen by `config.wire_style`.
+- **`ModelReasoningPolicy.offered` is no longer a one-route exception.** Both Claude routes declare
+  the levels their own question asks for; every other route still leaves the field empty and keeps
+  the three-level default, so no existing question widens.
+
 ## [0.5.0] - 2026-11-10
 
 ### Added
