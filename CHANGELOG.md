@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **The native `anthropic` route is routable, and the subscription route's `[1m]` context variant is
+  normalised.** The owner's decision (card t_ec2453b1): the Jev routes *both* Claude routes, because
+  what a turn costs is decided by the credential the core resolves, not by the provider id — Claude
+  Code's OAuth spends the subscription quota, an `sk-ant-api*` key bills per token.
+  - `session_selection`'s `provider_map` became **additive** ("also valid in"): a selection is always
+    eligible on its own route (`config.same_provider_route`, the alias table), and the map adds the
+    second route the same choice applies to. The default `anthropic →
+    claude-subscription-directsdk-experimental` entry stays, so the t_9bda5849 race keeps reconciling
+    on the subscription route, while a native `anthropic` pick no longer turns into
+    `selection_unmappable/provider_mismatch` on a native request.
+  - `config.CONTEXT_VARIANT_SUFFIXES` declares the context-window suffixes per route (`[1m]` on
+    `claude-subscription-directsdk-experimental`). The grid, catalog, memo, divergence and selection
+    comparisons use the bare id, and the write paths re-append the suffix, so a
+    `claude-sonnet-5-5[1m]` request is routed (it used to skip as `model_not_in_grid`) and the wire
+    carries, for example, `claude-haiku-5-5[1m]` — the id the provider's own `native_model` accepts
+    and resolves back to itself. The audit keeps `configured_model` verbatim and adds
+    `normalized_model` when a suffix was normalised. The native `anthropic` route declares no variant:
+    its 1M window is the `context-1m-2025-08-07` beta header's, so an unexpected `[1m]` there is still
+    a skip.
+  - Corrected the billing claim in the code and in the docs: the plugin no longer states that the
+    native route is "billed per token against the API key". `_note_native_selection` still fires when
+    the route is not in `routable_providers` (out of the build race there is no lever), and its
+    warning now names the unresolved credential instead of a price.
+  - Tests: spec §5 `N1`–`N5`, `M1`–`M4`, `B1`, `B2`, `F1`–`F3` in
+    `tests/test_anthropic_native_and_variant.py`, plus the D2 test in `test_session_selection.py`
+    rewritten to the new semantics.
+
 - **Opt-in reconciliation of the webui session's own model/effort pick (`session_selection`).** The
   webui writes the operator's choice into the session row (`sessions.model_config`) and in the same
   breath hands it to the agent being built; when the pick lands while the pre-warmed build is
@@ -24,8 +51,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `selection_source: session_row`. `mode: warn` records `selection_divergence` (plus a `WARNING`)
   and rewrites nothing; `mode: off` is the default and never touches the database. A selection that
   is not applicable to the request is reported as `selection_unmappable` and applied to nothing; an
-  agent already on the native `anthropic` route only produces `selection_native_provider`, because
-  no middleware can move it back out of that per-token charge. A successful decision still wins:
+  agent already on the native `anthropic` route only produces `selection_native_provider` while that
+  route is not in `routable_providers` (out of the build race there is no lever, and no middleware can
+  move an agent). A successful decision still wins:
   this is a fallback for the fail-open path, never a ceiling on the decider. The gates that may not
   be overridden (`disabled`, `provider_not_routed`, `api_mode_not_routed`, `surface_disabled`,
   `user_data`) keep returning an untouched request.

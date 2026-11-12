@@ -30,7 +30,7 @@ reasoning and generation in the main model — it only steers.
     enabled with its declared middleware/hook/tool surface; `hermes plugins doctor <repo>` exits 0.
 
 - **CAP-1b** — Decider pluggability and route catalogs: The operator can configure `decider: jev_console` to use the SystemOne protocol (`POST https://opencode.ai/inference/systemone/v1/systemone`) authenticated via `OPENCODE_CONSOLE_API_KEY`. The Console decider decides; generation is served by the `opencode-go` provider, whose catalog is capped to the single authorized normal model (`deepseek-v4.1-flash`) while this decider is active, or by the opt-in `commandcode` provider, capped to its namespaced id (`deepseek/deepseek-v4.1-flash`). The `opencode-console` route itself is pinned to the one generation id its own catalog carries (`deepseek-v4.1-flash`). No generation catalog carries a second model.
-  - **success:** When `decider: jev_console` is configured, Jev decisions are fetched via SystemOne wire format, supporting primary model (`jev-1.13-free`) and fallback model iteration (`jev-1.13`), failing open gracefully on errors, isolating memo replays across providers and deciders, and offering no model outside the active route's catalog.
+  - **success:** When `decider: jev_console` is configured, Jev decisions are fetched via SystemOne wire format, supporting primary model (`jev-1.13-free`) and fallback model iteration (`jev-1.13`), failing open gracefully on errors, isolating memo replays across providers and deciders, and offering no model outside the active route's catalog. The native `anthropic` route is routable on the same terms: it has its own catalog (`ANTHROPIC_GRID`) and its own wire (`output_config.effort`), and routing it never moves a turn between it and the subscription route.
 
 - **CAP-2** — On the first LLM request of each user turn, the effective provider kwargs are rewritten so
   that `model` is Jev's chosen model and `reasoning_effort` is Jev's chosen level, mapped onto that
@@ -86,6 +86,12 @@ reasoning and generation in the main model — it only steers.
   enforces its own much shorter budget (default 2.0 s) and returns `None` on any error.
 - The chosen model must exist in the active provider's catalog (if a catalog is available); a model id outside the
   configured grid is rejected and treated as low confidence.
+- A context-window variant suffix a route declares (`[1m]` on
+  `claude-subscription-directsdk-experimental`) is normalised to the bare id for every grid, catalog,
+  memo and session-selection comparison and re-appended to the routed `model`; the audit keeps
+  `configured_model` and adds `normalized_model`. A route that declares none — the native `anthropic`
+  route, whose 1M window is the `context-1m-2025-08-07` beta header — is unaffected, and an
+  unexpected `[1m]` there remains a `model_not_in_grid` skip.
 - The option list sent to Jev stays short. A longer Choice list measurably dilutes decision quality, so
   the grid is the six benchmarked models and grows only on evidence.
 - Routing interval: one route per user turn by default (`route_per_turn: true`), where the decision is taken

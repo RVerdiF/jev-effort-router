@@ -300,12 +300,19 @@ plugins:
   so caps still omit a level they do not accept and `reasoning.enabled: false` is preserved. The
   `skip` record then carries `reconciled_model`, `reconciled_effort` and
   `selection_source: session_row`.
-- `provider_map` translates the selection's provider onto the provider of the request it may be
-  applied to. The default maps the native `anthropic` pick onto the subscription route, so a Haiku
-  choice can never travel through the per-token API key.
+- `provider_map` adds a **second** route a selection is also valid on; identity (the selection's own
+  route, aliases included) always is. The default maps the native `anthropic` pick onto the
+  subscription route, which is what reconciles a pick that arrived after the agent was built on
+  either Claude route: the race is patched on both, and the map no longer forbids the route the row
+  itself names.
+- A model id on `claude-subscription-directsdk-experimental` may end in `[1m]`. The suffix is the
+  caller's 1M window, not another model: the grid, catalog, memo and selection comparisons use the
+  bare id and the wire carries it back (`claude-haiku-5-5[1m]`), which is the id the provider's own
+  `native_model` pins. The audit keeps `configured_model` and adds `normalized_model`. The native
+  `anthropic` route declares no such variant — its 1M window is the beta header's.
 - Nothing is reconciled when the router may not override the request: `enabled: false`, a
   `provider_not_routed` (`selection_native_provider` is recorded instead — out of the build race the
-  turn is billed and the plugin can only report it), `api_mode_not_routed` or `surface_disabled`.
+  plugin can only report the turn), `api_mode_not_routed` or `surface_disabled`.
 - The session row is read `mode=ro` with a 50 ms lock timeout, once per turn. A missing, locked or
   unfamiliar `model_config` (the `api_server`'s `browser_model_lock`, a `follow_profile_config` flag,
   invalid JSON) is "no evidence": the turn fails open exactly as it does without this key.
@@ -318,11 +325,12 @@ Two limits are worth stating plainly, because they are properties of doing this 
   (`reconciled_model`, `selection_source`) and the provider's own `--model`, not `agent.log`. The
   context window is not a factor: the three Claude families all carry 1M.
 - **Out of the race, *repo-only* means warning only.** If the agent build finishes before the pick
-  arrives, the live agent really is switched to the native `anthropic` route and the turn is billed
-  per token against the API key. No middleware can prevent that: it cannot change a client, a
-  `base_url` or a credential. The plugin records `selection_native_provider` and leaves the request
-  untouched; keeping the native route out of the profile's offering (or its credentials) is a
-  configuration decision, not this plugin's.
+  arrives and the route the agent landed on is not in `routable_providers`, no middleware can move
+  it: it cannot change a client, a `base_url` or a credential. The plugin records
+  `selection_native_provider` and leaves the request untouched. What that turn costs is the core's
+  answer, not this plugin's: with Claude Code's OAuth it spends the subscription quota, with an
+  `sk-ant-api*` key it bills per token. Declaring the route under `routable_providers` removes the
+  state entirely — the turn is then routed like any other.
 
 **Rollback:** set `session_selection.mode: off` and reload the plugin — with `off` the row is never
 read and the router is byte-for-byte its pre-feature self — or revert the commit and reinstall the
