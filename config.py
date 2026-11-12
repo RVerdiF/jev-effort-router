@@ -137,6 +137,20 @@ _GRID_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (CLAUDE_SUBSCRIPTION_PROVIDER, CLAUDE_SUBSCRIPTION_PROVIDER_ALIASES),
 )
 
+#: Context-window variant suffixes a route's model ids may carry, declared per route.
+#:
+#: On ``claude-subscription-directsdk-experimental`` the caller asks for the 1M window by writing
+#: ``[1m]`` at the end of the id. The provider's own ``model_catalog.py::native_model`` strips the
+#: suffix and re-appends it to every family it pins at 1M, so ``X`` and ``X[1m]`` reach the CLI
+#: identically — the suffix is a statement of intent, not a different model. This plugin's grids
+#: carry the bare ids, so the suffix has to be normalised away before a grid, catalog, memo or
+#: selection comparison and put back on the wire. Nothing is declared for the native ``anthropic``
+#: route: its 1M window is requested by the ``context-1m-2025-08-07`` beta header, never by the id,
+#: and an unexpected ``[1m]`` there stays a ``model_not_in_grid`` skip.
+CONTEXT_VARIANT_SUFFIXES: Mapping[str, Tuple[str, ...]] = MappingProxyType(
+    {CLAUDE_SUBSCRIPTION_PROVIDER: ("[1m]",)}
+)
+
 #: API modes this router understands, keyed by the payload shape each one hands the middleware.
 #:
 #: ``chat_completions`` builds a ``messages`` payload that takes a top-level ``reasoning_effort``.
@@ -214,19 +228,23 @@ SESSION_SELECTION_MODES: Tuple[str, ...] = (
 #: client keeps its own contract and stays out until it is declared here.
 DEFAULT_SESSION_SELECTION_PLATFORMS: Tuple[str, ...] = ("webui",)
 
-#: Selection provider → provider of the request it is reconciled onto. The webui offers the native
-#: ``anthropic`` route, whose turns are billed per token against the API key, while the subscription
-#: route serves the same Claude ids and is the one this deployment may spend. The mapping is an
-#: identity translation, not a transport switch: reconciliation only ever rewrites a request that is
-#: already going out on the subscription route.
+#: Selection provider → provider of the request it is reconciled onto ("also valid in"). A selection
+#: is always eligible on its **own** route (identity, see ``Router._eligible_selection``); this map
+#: only adds a second route the same choice may be applied to, and the case it exists for is the
+#: native ``anthropic`` pick on a request already going out on the subscription route — the build
+#: race ``session_selection`` patches over. What a turn *costs* is decided by the credential the
+#: core resolves for that route, never by the provider id: Claude Code's OAuth consumes the
+#: subscription quota, an ``sk-ant-api*`` key bills per token.
 DEFAULT_SESSION_SELECTION_PROVIDER_MAP: Mapping[str, str] = MappingProxyType(
     {ANTHROPIC_PROVIDER: CLAUDE_SUBSCRIPTION_PROVIDER}
 )
 
-#: Providers that mean "the live agent is on the native, per-token Anthropic route". Out of the
-#: race the plugin has no lever there — the route is not in ``routable_providers``, so the request
-#: goes out exactly as built and the turn is billed — and it only warns
-#: (audit event ``selection_native_provider``).
+#: Providers that mean "the live agent is on the native Anthropic route". Consulted only **out of
+#: the race**: while the route is not in ``routable_providers`` the plugin has no lever there — the
+#: request goes out exactly as built — and the only honest answer is the warning (audit event
+#: ``selection_native_provider``). Once ``anthropic`` is routable the route is routed like any other
+#: and the billing question belongs to the credential the core resolves: Claude Code's OAuth
+#: consumes the subscription quota, an ``sk-ant-api*`` API key bills per token.
 NATIVE_ANTHROPIC_PROVIDERS: frozenset = frozenset({ANTHROPIC_PROVIDER, *ANTHROPIC_PROVIDER_ALIASES})
 
 #: The levels the router may *ask* Jev for. ``max`` is part of the vocabulary — it can be
@@ -373,6 +391,43 @@ def canonical_provider_name(provider: str) -> Optional[str]:
         if key in aliases:
             return name
     return None
+
+
+def same_provider_route(first: str, second: str) -> bool:
+    """Whether two provider ids denote the same route (a canonical name or any alias of it).
+
+    The same table that backs :meth:`Settings.is_provider_routable`, reused wherever two ids have
+    to be compared for *identity* instead of being translated: a name this router does not know is
+    only equal to itself, never to another unknown name.
+    """
+    key = (first or "").strip().lower()
+    other = (second or "").strip().lower()
+    if not key or not other:
+        return False
+    group = _provider_group(key)
+    return other in group if group else key == other
+
+
+def context_variant_suffixes(provider: str) -> Tuple[str, ...]:
+    """The context-variant suffixes declared for ``provider``'s model ids (empty when none are)."""
+    key = (provider or "").strip().lower()
+    return CONTEXT_VARIANT_SUFFIXES.get(key) or CONTEXT_VARIANT_SUFFIXES.get(
+        canonical_provider_name(key) or "", ()
+    )
+
+
+def split_context_variant(provider: str, model_id: str) -> Tuple[str, str]:
+    """``(base_id, suffix)`` for ``model_id`` on ``provider``; ``(model_id, "")`` when not one.
+
+    Split, never dropped: every lookup (grid, catalog, memo, selection eligibility) needs the base
+    id, and the write path needs the suffix back, because the suffix is the caller's own statement
+    of a 1M turn and the route's implicit upgrade is not something this plugin should lean on.
+    """
+    text = (model_id or "").strip()
+    for suffix in context_variant_suffixes(provider):
+        if len(text) > len(suffix) and text.endswith(suffix):
+            return text[: -len(suffix)], suffix
+    return text, ""
 
 
 def route_allowlist(provider: str, decider: str = "") -> Optional[frozenset]:
@@ -593,9 +648,10 @@ class SessionSelectionSettings:
       session's model and effort. A successful decision is never overridden: this is fallback
       for the fail-open path, not a ceiling or a pin on the decider.
 
-    ``platforms`` names the surfaces whose row is authoritative, and ``provider_map`` translates
-    the selection's provider onto the provider of the request it may be applied to (the native
-    ``anthropic`` choice against the subscription route this deployment pays for).
+    ``platforms`` names the surfaces whose row is authoritative. A selection is always eligible on
+    its own route; ``provider_map`` adds a **second** route the same choice is also valid on (the
+    native ``anthropic`` pick against the subscription route), which is how the build race this
+    feature exists for is reconciled without forbidding the native route.
     """
 
     mode: str = SESSION_SELECTION_OFF
@@ -625,7 +681,12 @@ class SessionSelectionSettings:
         return bool(key) and key in self.platforms
 
     def provider_for(self, provider: str) -> str:
-        """The request provider ``provider`` from the session row translates to."""
+        """The **additional** route a selection provider is valid on, beside its own.
+
+        Identity (``provider`` itself, aliases included) is :func:`same_provider_route`'s answer and
+        needs no entry here; an empty answer falls back to the name unchanged, which is what an
+        unmapped provider means.
+        """
         key = (provider or "").strip().lower()
         return self.provider_map.get(key, key)
 
