@@ -737,12 +737,14 @@ def test_a_surface_outside_the_platforms_list_never_reads_the_row(
     assert "reconciled_model" not in last_skip(router, settings)
 
 
-def test_haiku_never_travels_on_the_native_paid_route(profile, tmp_path):
-    """D2 — the row names ``anthropic``; Haiku may only reach the wire through the subscription.
+def test_a_native_selection_reconciles_on_the_native_route(profile, tmp_path):
+    """``provider_map`` is additive: the row's own route needs no translation to be eligible.
 
-    Even with the native route declared routable, the selection's provider translates to the
-    subscription one, so a request already on the native route cannot be reconciled into a
-    per-token call: the selection is ``selection_unmappable`` there and nothing is rewritten.
+    The owner's decision (card t_ec2453b1) routes the native ``anthropic`` route too, so a
+    selection naming ``anthropic`` must be usable on an ``anthropic`` request — reading the map as
+    "only valid in" turned it into ``selection_unmappable/provider_mismatch`` and left the turn on
+    the profile's default. The subscription translation still applies (``provider_map``), it just
+    no longer *restricts* the route the row itself names.
     """
     write_row(profile, JOB_SEARCH_MODEL_CONFIG)
     transport = low_confidence_transport()
@@ -757,11 +759,11 @@ def test_haiku_never_travels_on_the_native_paid_route(profile, tmp_path):
         api_mode="anthropic_messages",
     )
 
-    assert result is None
-    unmappable = events(router, settings, "selection_unmappable")[-1]
-    assert unmappable["reason"] == "provider_mismatch"
-    assert unmappable["mapped_provider"] == PROVIDER
-    assert "reconciled_model" not in last_skip(router, settings)
+    assert result is not None
+    assert result["request"]["model"] == HAIKU
+    assert events(router, settings, "selection_unmappable") == []
+    assert last_skip(router, settings)["reconciled_model"] == HAIKU
+    assert last_skip(router, settings)["selection_source"] == "session_row"
 
 
 def test_the_gates_are_never_overridden_by_a_selection(profile, tmp_path, monkeypatch):
