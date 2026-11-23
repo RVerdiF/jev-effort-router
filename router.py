@@ -48,7 +48,12 @@ from .config import (
     same_provider_route,
     wire_style,
 )
-from .effort import offered_levels_for_grid, resolve_effort
+from .effort import (
+    bounds_adjustment,
+    declared_bounds,
+    offered_levels_for_grid,
+    resolve_effort,
+)
 from .memo import Memo, TurnMemo, failure_marker
 from .selection import SELECTION_SOURCE_SESSION_ROW, Selection, SelectionReader
 from .selection import profile_home as selection_profile_home
@@ -452,9 +457,17 @@ class Router:
                 # consult the route's built-in policy, which declares ``max`` for ``opencode-go``,
                 # ``commandcode`` and ``codex``: the turn would run a level its question never
                 # offered. Omitting the field keeps the memoised model and leaves effort to the
-                # host instead of to a level nobody asked for.
-                if applied_effort is not None and applied_effort not in offered_levels_for_grid(
-                    effective.grid, provider, settings.effort_maps
+                # host instead of to a level nobody asked for. A bounded grid offers the union, so
+                # a memoised level stays offered; and a model with declared bounds is exempt even
+                # when it does not, because its contract takes the level by clamping — omitting it
+                # there would hand the turn to the transport's default, above the ceiling.
+                if (
+                    applied_effort is not None
+                    and applied_effort
+                    not in offered_levels_for_grid(
+                        effective.grid, provider, settings.effort_maps
+                    )
+                    and declared_bounds(provider, memo.model, settings.effort_maps) is None
                 ):
                     logger.info(
                         "jev-effort-router: memo effort %r is not offered by %r anymore; omitting it",
@@ -469,7 +482,7 @@ class Router:
                     provider=provider,
                     effort_maps=settings.effort_maps,
                 )
-                # ``effort_requested`` keeps what the decision asked for: a cap applied to the
+                # ``effort_requested`` keeps what the decision asked for: the level applied to the
                 # replay is visible in ``effort`` (and in ``effort_requested != effort``), not by
                 # rewriting the request into the value that was actually applied.
                 decision = _decision_from_memo(memo, effort=re_effort)
@@ -1408,6 +1421,17 @@ class Router:
             "decider": getattr(decision, "decider", settings.decider),
             "replayed": bool(replayed),
         }
+        # A route that declares per-model effort bounds gets the proof of the clamp: the pair
+        # itself, and — only when it actually bit — the reason the applied level is not the one
+        # the decider asked for. ``effort`` already carries the applied value and
+        # ``effort_requested`` the request, so the three together show the ceiling held rather
+        # than trusting it. Routes without bounds keep exactly the shape they had.
+        bounds = declared_bounds(where.provider, decision.model, settings.effort_maps)
+        if bounds is not None:
+            record["effort_bounds"] = list(bounds)
+            adjusted = bounds_adjustment(decision.effort_requested, decision.effort, bounds)
+            if adjusted is not None:
+                record["effort_adjusted"] = adjusted
         secondary = settings.active_commandcode_fallback()
         if secondary.enabled:
             # Provenance of the call that produced the decision. Only a deployment that opted into
@@ -1547,6 +1571,10 @@ def _decision_from_memo(memo: Memo, effort: Any = _UNSET) -> Decision:
     the per-criterion distributions, the full alternative list, the effort-choice string —
     is left empty/``None`` rather than reconstructed from a sibling field: an audit record
     must never report a value that was not measured at replay.
+
+    ``effort`` is the level this replay resolves onto the wire (the memoised request re-applied
+    against the *current* declaration); it is a fact about this run, not about the memo, so it is
+    passed in rather than read back.
     """
     actual_effort = memo.effort if effort is _UNSET else effort
     return Decision(
